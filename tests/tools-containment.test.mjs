@@ -10,11 +10,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { WorkspaceTools } from "../bridge/tools.mjs";
+import { WorkspaceTools, parseGitHubRemote } from "../bridge/tools.mjs";
 import { workspaceStateDir, recordsDir } from "../bridge/state.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
+}
+
+function cli(args, { cwd, stateRoot }) {
+  return execFileSync(process.execPath, [path.resolve("bridge/cli.mjs"), ...args], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GPT_WORKER_STATE_ROOT: stateRoot },
+  });
 }
 
 function makeParentRepoWithWorkspaceSubdir() {
@@ -58,6 +66,22 @@ function trackedParentRepo() {
   const r = makeParentRepoWithWorkspaceSubdir();
   dirsToClean.push(r.parent, workspaceStateDir(r.workspace));
   return r;
+}
+
+function ignoredWorkspace() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gw-ignored-"));
+  git(root, ["init", "-q"]);
+  git(root, ["config", "user.email", "test@example.com"]);
+  git(root, ["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(root, "README.md"), "visible\n");
+  fs.writeFileSync(path.join(root, ".gitignore"), "ignored.txt\nignored-dir/\n");
+  git(root, ["add", "README.md", ".gitignore"]);
+  git(root, ["commit", "-q", "-m", "initial"]);
+  fs.writeFileSync(path.join(root, "ignored.txt"), "ignored searchable value\n");
+  fs.mkdirSync(path.join(root, "ignored-dir"));
+  fs.writeFileSync(path.join(root, "ignored-dir", "hidden.js"), "const hidden = true;\n");
+  dirsToClean.push(root, workspaceStateDir(root));
+  return root;
 }
 
 describe("WorkspaceTools: path containment", () => {
@@ -132,6 +156,78 @@ describe("git_status / git_diff: scoped to workspace root, not the enclosing rep
   test("git_log respects limit", () => {
     const r = tools.gitLog({ limit: 1 });
     assert.equal(r.commits.length, 1);
+  });
+});
+
+describe("WorkspaceTools: Git-ignored paths", () => {
+  const workspace = ignoredWorkspace();
+
+  test("denies direct reads unless the exact canonical path is explicitly allowed", () => {
+    const denied = new WorkspaceTools(workspace).readFile({ path: "ignored.txt" });
+    assert.equal(denied.error, "ACCESS_DENIED_GITIGNORED_FILE");
+
+    const allowed = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored.txt"] }).readFile({ path: "ignored.txt" });
+    assert.equal(allowed.error, undefined);
+    assert.match(allowed.text, /ignored searchable value/);
+  });
+
+  test("does not let an allowlist override sensitive-file protection", () => {
+    fs.writeFileSync(path.join(workspace, ".env"), "not-a-secret\n");
+    const result = new WorkspaceTools(workspace, { allowedReadPaths: () => [".env"] }).readFile({ path: ".env" });
+    assert.equal(result.error, "ACCESS_DENIED_SENSITIVE_FILE");
+  });
+
+  test("keeps ignored paths out of browsing, search, language detection and scoped Git tools", () => {
+    const tools = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored.txt"] });
+    const listing = tools.listDirectory({ path: "" });
+    assert.equal(listing.entries.some((entry) => entry.path === "ignored.txt" || entry.path === "ignored-dir"), false);
+    assert.equal(tools.searchWorkspace({ query: "ignored searchable value" }).hits.length, 0);
+    assert.equal(tools.workspaceInfo().languages.includes("JavaScript"), false);
+    assert.equal(tools.gitDiff({ path: "ignored.txt" }).error, "ACCESS_DENIED_GITIGNORED_FILE");
+    assert.equal(tools.gitLog({ path: "ignored.txt" }).error, "ACCESS_DENIED_GITIGNORED_FILE");
+  });
+
+  test("CLI stores and removes exact-file exceptions in private local state", () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gw-allow-state-"));
+    dirsToClean.push(stateRoot);
+    assert.match(cli(["allow-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored.txt");
+    assert.match(cli(["deny-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed files)");
+  });
+});
+
+describe("GitHub repository identity", () => {
+  test("normalizes only safe github.com remote forms", () => {
+    assert.deepEqual(parseGitHubRemote("https://github.com/acme/widget.git"), {
+      provider: "github", owner: "acme", name: "widget", host: "github.com",
+    });
+    assert.deepEqual(parseGitHubRemote("git@github.com:acme/widget.git"), {
+      provider: "github", owner: "acme", name: "widget", host: "github.com",
+    });
+    for (const remote of [
+      "https://token@github.com/acme/widget.git",
+      "https://github.example.com/acme/widget.git",
+      "https://github.com/acme/widget.git?token=no",
+      "not a remote",
+    ]) {
+      assert.equal(parseGitHubRemote(remote), null, remote);
+    }
+  });
+
+  test("workspace_info exposes a sanitized GitHub identity and local HEAD", () => {
+    const { workspace } = trackedParentRepo();
+    git(workspace, ["remote", "add", "origin", "git@github.com:acme/widget.git"]);
+    const info = new WorkspaceTools(workspace).workspaceInfo();
+    assert.deepEqual(info.repository, {
+      provider: "github",
+      owner: "acme",
+      name: "widget",
+      host: "github.com",
+      remote: "origin",
+      headCommit: info.git.commit,
+      branch: info.git.branch,
+    });
   });
 });
 

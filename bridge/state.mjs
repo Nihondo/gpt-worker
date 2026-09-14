@@ -71,7 +71,7 @@ export function fixPermissions() {
   for (const d of workspaceDirs) {
     const wsDir = path.join(STATE_ROOT, d.name);
     chmodIfExists(wsDir, 0o700);
-    for (const f of ["tokens.json", "state.json", "guidance.md", "bridge.pid", "bridge.log", "bridge.log.1"]) {
+    for (const f of ["tokens.json", "state.json", "guidance.md", "read-allowlist.json", "bridge.pid", "bridge.log", "bridge.log.1"]) {
       chmodIfExists(path.join(wsDir, f), 0o600);
     }
     const rDir = path.join(wsDir, "records");
@@ -176,6 +176,37 @@ export function clearGuidance(workspaceRoot) {
   } catch {
     /* already gone */
   }
+}
+
+// Owner-controlled exceptions for Git-ignored files. This is deliberately
+// outside the repository so untrusted workspace content cannot grant itself
+// access. It is access policy, not task/protocol state.
+function readAllowlistFilePath(workspaceRoot) {
+  return path.join(workspaceStateDir(workspaceRoot), "read-allowlist.json");
+}
+
+export function readAllowedReadPaths(workspaceRoot) {
+  try {
+    const data = JSON.parse(fs.readFileSync(readAllowlistFilePath(workspaceRoot), "utf8"));
+    return Array.isArray(data.paths) ? data.paths.filter((p) => typeof p === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeAllowedReadPaths(workspaceRoot, paths) {
+  atomicWrite(readAllowlistFilePath(workspaceRoot), JSON.stringify({ paths }, null, 2) + "\n");
+}
+
+export function allowReadPath(workspaceRoot, relPath) {
+  const paths = readAllowedReadPaths(workspaceRoot);
+  if (!paths.includes(relPath)) paths.push(relPath);
+  writeAllowedReadPaths(workspaceRoot, paths.sort());
+}
+
+export function denyReadPath(workspaceRoot, relPath) {
+  const paths = readAllowedReadPaths(workspaceRoot).filter((p) => p !== relPath);
+  writeAllowedReadPaths(workspaceRoot, paths);
 }
 
 function stateFilePath(workspaceRoot) {

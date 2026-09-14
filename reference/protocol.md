@@ -110,6 +110,18 @@ reason and waits.
 | `next_task` | GPT | Fetch the oldest undelivered INIT/EXECUTED, or a specific one if called with `task_id` (see below). `{"empty":true}` when there is nothing (matching). This is what "continue" triggers. |
 | `submit_plan` | GPT | Send PLAN/DONE/BLOCKED for a specific `task_id`+`iteration`. |
 
+## Optional GitHub connector use
+
+`workspace_info` returns a `repository` object only when the local remote is a safely normalized `github.com` repository.
+
+If a GitHub connector is available in the ChatGPT session, it may supplement local inspection only after its repository identity and commit SHA match `repository.owner`, `repository.name`, and `repository.headCommit`.
+
+The local MCP workspace remains authoritative when a file has staged, unstaged, or untracked changes, when the SHA cannot be matched, and for generated files, LFS objects, partial checkouts, and submodules.
+
+Failure to access GitHub must fall back to local MCP inspection without blocking the task.
+
+The bridge and Worker never detect connector availability or store, request, or forward GitHub credentials.
+
 See `~/.agents/skills/gpt-worker/worker/src/tools.json` for each workspace
 tool's base JSON Schema. The shared connector adds required `workspace_id`
 to every tool other than `list_workspaces`.

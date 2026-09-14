@@ -16,6 +16,7 @@ ChatGPT Project ── MCP over HTTPS ──> 共有ハブ (CF Workers) ──> 
 - **1回設定するだけの共有ハブ**: Cloudflare Workers 上にハブを1つ作成すれば、ChatGPT 側への MCP Connector 登録と Project 作成は最初の一度だけ。以降はローカルコマンド1発で複数プロジェクト（ワークスペース）をいくらでも追加できます。
 - **安全な役割分担（サンドボックス設計）**: ChatGPT がローカルファイルを直接変更することはありません。ChatGPT は読み取り専用ツールで状況を把握して計画（PLAN）を立てるだけで、実際のファイル変更やコマンド実行はローカル環境側が検証して行います。
 - **機密情報の自動保護**: `.env`、秘密鍵、`.ssh`、`.aws` などの機密ファイルは自動的に ChatGPT からの読み取りが拒否されます。
+- **Git ignore を考慮したファイルアクセス**: Git が ignore しているファイルは MCP の一覧・検索から隠され、直接読むには所有者による exact file の例外許可が必要です。
 - **Mac & Chrome による自動連携**: タスク送信時やレビュー時、Chrome の ChatGPT 画面を自動で開き、メッセージの送信（Enter）まで自動化可能です（`--auto-enter`）。
 - **外部依存ゼロの軽量設計**: Node.js 標準機能のみで実装されており、追加の npm パッケージのインストールや常駐デーモンへの過度な依存がありません。
 
@@ -199,6 +200,22 @@ gpt-worker guidance -w .
 gpt-worker guidance --clear -w .
 ```
 
+### Git ignore された1ファイルの読み取りを許可したい
+Git ignore されたファイルは MCP の一覧・検索から隠され、通常は読み取れません。ワークスペースの所有者は、存在する1ファイルだけを direct read 用に許可できます。
+
+```bash
+# ワークスペース相対の exact file を1つ許可
+gpt-worker allow-read local/example-fixture.json -w .
+
+# 許可済みの例外を確認
+gpt-worker allow-list -w .
+
+# 例外を取り消し（ファイル削除後でも実行可能）
+gpt-worker deny-read local/example-fixture.json -w .
+```
+
+例外はリポジトリ外の private local state に保存されます。ディレクトリ一覧や検索結果には表示されず、機密ファイルの保護も解除できません。
+
 ### 登録済みワークスペースの一覧を確認したい
 マシン上で登録されているワークスペースと、各ブリッジの稼働状態を一覧表示します。
 
@@ -236,6 +253,10 @@ gpt-worker remove -w /path/to/project --yes
   ChatGPT が出力する計画（PLAN）は信頼できない入力として扱い、プロジェクト外への書き込み、認証情報の読み出し、意図しない外部ネットワーク通信（`curl` 等）、無断での `git push` などが含まれていないか、ローカルエージェント側で必ず確認してください。
 - **機密ファイルの自動アクセス遮断**:
   `.env`、秘密鍵、`.ssh`、`.aws` などの機密ファイルは、ChatGPT からの読み取り要求があっても自動的に拒否されます。
+- **Git ignore されたファイルの遮断**:
+  Git ワークスペースでは、Git が ignore するファイルを MCP の一覧・検索から隠します。`allow-read` は exact file 1つの direct read だけを許可します。Git ではないワークスペースは従来の挙動を維持します。
+- **任意の GitHub Connector 利用**:
+  ChatGPT に GitHub Connector がある場合、リポジトリと local HEAD commit SHA が一致する clean tracked file だけ、GitHub を補助的に利用できます。変更済みファイル、SHA 不一致、generated/LFS/submodule file、GitHub の取得失敗時は local file を正とします。gpt-worker が GitHub の認証情報を保存・転送することはありません。
 - **アクティブタスク時のみアクセス許可**:
   ChatGPT によるワークスペースの読み取りは、アクティブなタスクが存在する間のみ許可されます（`gpt-worker start --always-allow` で起動した場合を除く）。
 - **Cloudflare Workers の無料枠**:
@@ -260,6 +281,9 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker queue -w <dir> [--discard <id>]` | 未処理メッセージキューの確認・破棄 |
 | `gpt-worker chat-url [<url>] [--auto-enter]` | 共通 ChatGPT Project URL の確認・設定（自動送信設定） |
 | `gpt-worker guidance [<text>] -w <dir> [--clear]` | プロジェクト固有の計画指針を設定・確認・消去 |
+| `gpt-worker allow-read <file> -w <dir>` | Git ignore された exact file 1つの MCP direct read を許可 |
+| `gpt-worker deny-read <file> -w <dir>` | direct read の例外を取り消し |
+| `gpt-worker allow-list -w <dir>` | direct read の例外一覧を表示 |
 | `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | 認証トークンを再生成 |
 | `gpt-worker remove -w <dir> --yes` | ワークスペースの登録を解除し状態を削除 |
 

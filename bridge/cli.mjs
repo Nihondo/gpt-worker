@@ -3,7 +3,7 @@
 // loop and ~/.agents/skills/gpt-worker/reference/protocol.md for message formats.
 //
 // Subcommands: init, url, chat-url, start, stop, status, queue, task, wait,
-// report, state, rotate, workspaces.
+// report, state, rotate, workspaces, allow-read, deny-read, allow-list.
 // There is deliberately no `doctor`: the Worker URL never expires, so the
 // only thing that can go wrong locally is "the WS link isn't connected",
 // which `status` already shows.
@@ -26,9 +26,10 @@ import {
   writePidFile, checkPid, removePidFile,
   appendLog, recordsDir, fixPermissions,
   listProvisionedWorkspaces, workspaceStateDir, removeWorkspaceStateDir,
-  readGuidance, clearGuidance,
+  readGuidance, clearGuidance, allowReadPath, denyReadPath, readAllowedReadPaths,
 } from "./state.mjs";
 import { BridgeLink } from "./link.mjs";
+import { WorkspaceTools } from "./tools.mjs";
 import { isChromeAutomationAvailable, openInChromeAndSubmit } from "./mac-chrome.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -619,6 +620,48 @@ async function cmdGuidance(args) {
   console.log("Saved. ChatGPT will see this via the workspace_guidance tool from now on.");
 }
 
+function allowedReadFile(root, input, { mustExist = true } = {}) {
+  if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-file> [-w <dir>]");
+  const tools = new WorkspaceTools(root);
+  const resolved = tools.resolve(input);
+  if (resolved.error) throw new Error(resolved.error);
+  if (!resolved.relPath || resolved.relPath === ".") throw new Error("A workspace-relative file path is required.");
+  if (tools.ignore.isSensitive(resolved.relPath)) throw new Error("ACCESS_DENIED_SENSITIVE_FILE");
+  if (mustExist) {
+    let stat;
+    try {
+      stat = fs.statSync(resolved.absPath);
+    } catch {
+      throw new Error("NOT_FOUND");
+    }
+    if (!stat.isFile()) throw new Error("Only an exact file path can be allowed.");
+  }
+  return resolved.relPath;
+}
+
+function cmdAllowRead(args) {
+  const root = workspaceRoot(args);
+  const relPath = allowedReadFile(root, args._[0]);
+  allowReadPath(root, relPath);
+  console.log(`Allowed direct MCP reads for ${relPath}. It remains hidden from listing and search.`);
+}
+
+function cmdDenyRead(args) {
+  const root = workspaceRoot(args);
+  const relPath = allowedReadFile(root, args._[0], { mustExist: false });
+  denyReadPath(root, relPath);
+  console.log(`Removed direct-read permission for ${relPath}.`);
+}
+
+function cmdAllowList(args) {
+  const paths = readAllowedReadPaths(workspaceRoot(args));
+  if (paths.length === 0) {
+    console.log("(no explicitly allowed files)");
+    return;
+  }
+  for (const relPath of paths) console.log(relPath);
+}
+
 async function cmdQueue(args) {
   const cfg = requireWorkspaceConfig(workspaceRoot(args));
   if (args.discard) {
@@ -884,6 +927,12 @@ async function main() {
       return cmdChatUrl(args);
     case "guidance":
       return cmdGuidance(args);
+    case "allow-read":
+      return cmdAllowRead(args);
+    case "deny-read":
+      return cmdDenyRead(args);
+    case "allow-list":
+      return cmdAllowList(args);
     case "start":
       return cmdStart(args);
     case "stop":
@@ -903,7 +952,7 @@ async function main() {
     case "rotate":
       return cmdRotate(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|guidance|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
+      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
       process.exit(cmd ? 1 : 0);
   }
 }

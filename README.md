@@ -16,6 +16,7 @@ ChatGPT Project ── MCP over HTTPS ──> Shared Hub (CF Workers) ──> Se
 - **One Shared Hub for All Workspaces**: Deploy a single Cloudflare Worker hub once. You register the MCP Connector and create a ChatGPT Project only once. Every subsequent project (workspace) is added instantly via a single local CLI command.
 - **Safe & Sandboxed Execution**: ChatGPT never modifies local files directly. It only inspects workspace files through read-only tools to generate a plan (PLAN). The local agent inspects and validates the plan before executing edits or commands.
 - **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, and `.aws` are automatically blocked from ChatGPT's inspection tools.
+- **Git-Ignore Aware File Access**: Git-ignored files are hidden from MCP browsing and search, and require an owner-controlled exact-file exception for direct reads.
 - **Seamless macOS & Chrome Integration**: Automatically opens the ChatGPT Project in Google Chrome when a task is queued, and can even automatically press Enter to submit (`--auto-enter`).
 - **Zero Runtime Dependencies**: Built entirely using Node.js built-in modules without bloated external npm packages or heavy daemon requirements.
 
@@ -199,6 +200,22 @@ gpt-worker guidance -w .
 gpt-worker guidance --clear -w .
 ```
 
+### Allowing One Git-Ignored File to Be Read
+Git-ignored files are hidden from listing and search and cannot normally be read through MCP. The workspace owner can allow one existing file for direct reads only:
+
+```bash
+# Allow one exact workspace-relative file
+gpt-worker allow-read local/example-fixture.json -w .
+
+# Inspect exceptions
+gpt-worker allow-list -w .
+
+# Remove an exception (works even if the file was deleted)
+gpt-worker deny-read local/example-fixture.json -w .
+```
+
+Exceptions are stored in private local state outside the repository. They do not expose the file in directory listings or search results, and can never override sensitive-file protection.
+
 ### Viewing All Provisioned Workspaces
 List all workspaces registered on this machine and their bridge statuses:
 
@@ -236,6 +253,10 @@ gpt-worker remove -w /path/to/project --yes
   Treat ChatGPT's PLAN output as untrusted input. The local agent should verify that the plan does not attempt out-of-bounds file writes, credential exfiltration, unexpected external network commands (`curl`), or unauthorized `git push`.
 - **Automatic Secret File Blocking**:
   Files like `.env`, private keys, `.ssh`, and `.aws` are always blocked from ChatGPT's inspection tools.
+- **Git-Ignored File Blocking**:
+  In Git workspaces, files ignored by Git are hidden from MCP browsing and search. `allow-read` grants direct access to one exact file only. Non-Git workspaces retain the previous behavior.
+- **Optional GitHub Connector Use**:
+  If ChatGPT has a GitHub connector, it may use GitHub only as a supplement for a clean tracked file after the repository and local HEAD commit SHA match. Local files remain authoritative for changes, SHA mismatches, generated/LFS/submodule files, or any GitHub access failure. gpt-worker never stores or forwards GitHub credentials.
 - **Access Granted Only During Active Tasks**:
   ChatGPT can only read workspace files while an active task exists (unless the bridge is started with `--always-allow`).
 - **Cloudflare Workers Free Tier**:
@@ -260,6 +281,9 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues |
 | `gpt-worker chat-url [<url>] [--auto-enter]` | Save or inspect shared ChatGPT Project URL & auto-submit |
 | `gpt-worker guidance [<text>] -w <dir> [--clear]` | Set, inspect, or clear trusted standing guidance |
+| `gpt-worker allow-read <file> -w <dir>` | Allow direct MCP reads of one exact Git-ignored file |
+| `gpt-worker deny-read <file> -w <dir>` | Remove a direct-read exception |
+| `gpt-worker allow-list -w <dir>` | List direct-read exceptions |
 | `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate authentication tokens |
 | `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge local/remote state |
 

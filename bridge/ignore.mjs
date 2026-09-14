@@ -9,8 +9,10 @@
 // Implementation note: none of the patterns below contain an internal slash
 // (only an optional trailing slash marking "directory anywhere in the path"),
 // so a small basename/dirname matcher is sufficient here — the full gitignore
-// grammar (anchored patterns, "**", etc.) is not needed and is intentionally
-// not implemented, to keep this dependency-free.
+// grammar (anchored patterns, "**", etc.) is not needed for these static
+// patterns. Git ignore rules are evaluated separately by Git itself below.
+
+import { execFileSync } from "node:child_process";
 
 export const SENSITIVE_PATTERNS = [
   ".env",
@@ -133,9 +135,11 @@ function testPath(compiled, relPath, isDir) {
 }
 
 export class IgnoreRules {
-  constructor() {
+  constructor({ root = null } = {}) {
     this.sensitive = SENSITIVE_PATTERNS.map(compilePattern);
     this.noise = NOISE_PATTERNS.map(compilePattern);
+    this.root = root;
+    this.isGitRepository = null;
   }
 
   /** True when the path must be denied with ACCESS_DENIED_SENSITIVE_FILE. */
@@ -152,5 +156,35 @@ export class IgnoreRules {
 
   isHidden(relPath, isDir = false) {
     return this.isSensitive(relPath, isDir) || this.isNoise(relPath, isDir);
+  }
+
+  /** True when Git itself classifies this workspace-relative path as ignored.
+   *  Delegating to `git check-ignore` preserves Git's complete syntax
+   *  (including nested files, negation and user excludes) without adding a
+   *  partial parser or a runtime dependency. Non-Git workspaces retain the
+   *  previous static-filter behavior. */
+  isGitIgnored(relPath) {
+    if (!this.root || !relPath || relPath === ".") return false;
+    if (this.isGitRepository === null) {
+      try {
+        execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+          cwd: this.root,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        this.isGitRepository = true;
+      } catch {
+        this.isGitRepository = false;
+      }
+    }
+    if (!this.isGitRepository) return false;
+    try {
+      execFileSync("git", ["check-ignore", "-q", "--", relPath], {
+        cwd: this.root,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

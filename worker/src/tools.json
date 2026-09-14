@@ -4,7 +4,7 @@
     {
       "name": "workspace_info",
       "title": "Workspace info",
-      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. Call this first to confirm which workspace this connector is bound to.",
+      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. When a safe github.com remote is configured, repository includes its sanitized owner/name, local HEAD commit and branch. If a GitHub connector is available, use it only for a clean tracked file after matching repository and commit SHA; otherwise use this local workspace as authoritative. Call this first to confirm which workspace this connector is bound to.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "local",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
@@ -20,7 +20,7 @@
     {
       "name": "list_directory",
       "title": "List directory",
-      "description": "List entries under a workspace-relative directory path. Noisy directories (node_modules, .git, build output, lockfiles, ...) and sensitive paths are hidden.",
+      "description": "List entries under a workspace-relative directory path. Noisy directories (node_modules, .git, build output, lockfiles, ...), sensitive paths, and Git-ignored paths are hidden. Explicitly allowed Git-ignored files remain direct-read only and are not listed.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -37,7 +37,7 @@
     {
       "name": "read_file",
       "title": "Read file",
-      "description": "Read a workspace-relative file's contents, paginated by line. Sensitive files (secrets, keys, credentials) are always denied regardless of .gitignore.",
+      "description": "Read a workspace-relative file's contents, paginated by line. Git-ignored files are denied unless the workspace owner explicitly allows that exact file through the local CLI. Sensitive files (secrets, keys, credentials) are always denied regardless of .gitignore or an allowlist.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -54,7 +54,7 @@
     {
       "name": "search_workspace",
       "title": "Search workspace",
-      "description": "Search file contents in the workspace (ripgrep semantics). Noisy and sensitive paths are excluded from results.",
+      "description": "Search file contents in the workspace (ripgrep semantics). Noisy, sensitive, and Git-ignored paths are excluded from results, including explicitly allowed direct-read files.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -70,7 +70,7 @@
     {
       "name": "git_status",
       "title": "Git status",
-      "description": "Structured git status of the workspace: branch, staged/unstaged/untracked files. Entries touching sensitive files are redacted.",
+      "description": "Structured git status of the workspace: branch, staged/unstaged/untracked files. Entries touching sensitive, noisy, or Git-ignored paths are redacted.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "local",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
@@ -78,7 +78,7 @@
     {
       "name": "git_diff",
       "title": "Git diff",
-      "description": "Git diff of the workspace (working tree or staged), optionally scoped to a path. Hunks touching sensitive files are redacted.",
+      "description": "Git diff of the workspace (working tree or staged), optionally scoped to a path. Git-ignored paths cannot be scoped, and hunks touching sensitive, noisy, or Git-ignored files are redacted.",
       "inputSchema": {
         "type": "object",
         "properties": {
