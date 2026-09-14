@@ -1,6 +1,17 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { escapeForAppleScript, isChromeAutomationAvailable } from "../bridge/mac-chrome.mjs";
+import {
+  chatGptProjectScope,
+  escapeForAppleScript,
+  isChromeAutomationAvailable,
+  matchesChatGptProjectScope,
+} from "../bridge/mac-chrome.mjs";
+
+const projectURL = "https://chatgpt.com/g/g-p-example-gpt-worker/project";
+const scope = {
+  projectURL,
+  conversationPrefix: "https://chatgpt.com/g/g-p-example-gpt-worker/c/",
+};
 
 describe("escapeForAppleScript", () => {
   test("escapes double quotes and backslashes so the string stays one AppleScript literal", () => {
@@ -21,6 +32,47 @@ describe("isChromeAutomationAvailable", () => {
   test("is false on any non-darwin platform regardless of filesystem state", () => {
     if (process.platform !== "darwin") {
       assert.equal(isChromeAutomationAvailable(), false);
+    }
+  });
+});
+
+describe("ChatGPT Project tab scope", () => {
+  test("normalizes a Project landing URL while ignoring trailing slash, query and hash", () => {
+    assert.deepEqual(chatGptProjectScope(`${projectURL}/?prompt=@gpt-worker#composer`), scope);
+  });
+
+  test("rejects malformed and non-Project saved URLs", () => {
+    for (const value of ["not a URL", "https://chatgpt.com/c/conversation", "https://chatgpt.com/g/g-p-example-gpt-worker/c/conversation"]) {
+      assert.equal(chatGptProjectScope(value), null, value);
+    }
+  });
+
+  test("matches the Project landing URL and same-Project conversations", () => {
+    for (const value of [
+      projectURL,
+      `${projectURL}?prompt=@gpt-worker`,
+      `${projectURL}#composer`,
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/1234",
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/1234?foo=bar#composer",
+    ]) {
+      assert.equal(matchesChatGptProjectScope(value, scope), true, value);
+    }
+  });
+
+  test("rejects empty conversations and unrelated ChatGPT URLs", () => {
+    for (const value of [
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/",
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/?foo=bar",
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/#composer",
+      "https://chatgpt.com/g/g-p-other-project/project",
+      "https://chatgpt.com/g/g-p-other-project/c/1234",
+      "https://chatgpt.com/c/1234",
+      "https://chatgpt.com/g/g-p-example-gpt-worker/project-evil",
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c//nested",
+      "http://chatgpt.com/g/g-p-example-gpt-worker/c/1234",
+      "https://example.com/g/g-p-example-gpt-worker/c/1234",
+    ]) {
+      assert.equal(matchesChatGptProjectScope(value, scope), false, value);
     }
   });
 });

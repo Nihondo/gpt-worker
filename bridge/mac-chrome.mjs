@@ -11,9 +11,9 @@
 // Why the tab match is scoped to *this workspace's* project path (not just
 // "any chatgpt.com tab"): an earlier draft matched any `https://chatgpt.com/`
 // tab, which would silently hijack an unrelated conversation the user has
-// open elsewhere by overwriting its URL. Matching on the saved chat-url's
-// own path prefix means only a tab this tool itself would have opened is
-// ever reused.
+// open elsewhere by overwriting its URL. A ChatGPT Project landing URL moves
+// from `/project` to `/c/<conversation-id>` after sending, so both shapes are
+// matched within the same project scope and nothing broader is reused.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -30,28 +30,78 @@ export function escapeForAppleScript(str) {
   return String(str).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-/** matchPrefix: the chat-url's own path (no query string) — e.g.
- *  "https://chatgpt.com/g/g-p-xxxx-gptworker/project". Only a tab whose URL
- *  starts with exactly this is reused; anything else is left alone and a
- *  new tab is created instead. */
-export function openInChromeAndSubmit(url, matchPrefix, { autoEnter = false, enterDelayMs = 1500 } = {}) {
+/** Normalize a saved ChatGPT Project landing URL into the only tab locations
+ *  this workspace may reuse. Query/hash do not define project identity. */
+export function chatGptProjectScope(chatUrl) {
+  try {
+    const parsed = new URL(chatUrl);
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/g\/([^/]+)\/project$/);
+    if (!match || !match[1]) return null;
+    const projectBase = `${parsed.origin}/g/${match[1]}`;
+    return {
+      projectURL: `${projectBase}/project`,
+      conversationPrefix: `${projectBase}/c/`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** True only for the Project landing URL or a same-Project conversation with
+ *  a non-empty ID. This remains pure so its security boundary is testable
+ *  independently of macOS and AppleScript. */
+export function matchesChatGptProjectScope(candidateUrl, scope) {
+  if (!scope) return false;
+  try {
+    const candidate = new URL(candidateUrl);
+    const normalized = candidate.origin + candidate.pathname;
+    if (normalized === scope.projectURL) return true;
+    if (!normalized.startsWith(scope.conversationPrefix)) return false;
+    const conversationId = normalized.slice(scope.conversationPrefix.length);
+    return conversationId.length > 0 && !conversationId.startsWith("?") && !conversationId.startsWith("#") && !conversationId.startsWith("/");
+  } catch {
+    return false;
+  }
+}
+
+/** Reuse only a tab in the saved ChatGPT Project. A valid Project landing
+ *  URL may have become `/c/<conversation-id>` after a prior submission. */
+export function openInChromeAndSubmit(url, chatUrl, { autoEnter = false, enterDelayMs = 1500 } = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
+  const scope = chatGptProjectScope(chatUrl);
+  if (!scope) return false;
+
   const safeUrl = escapeForAppleScript(url);
-  const safePrefix = escapeForAppleScript(matchPrefix);
+  const safeProjectURL = escapeForAppleScript(scope.projectURL);
+  const safeConversationPrefix = escapeForAppleScript(scope.conversationPrefix);
   const enterStep = autoEnter
     ? `delay ${(enterDelayMs / 1000).toFixed(2)}\n    tell application "System Events" to keystroke return`
     : "";
 
   const script = `
     set targetURL to "${safeUrl}"
-    set matchPrefix to "${safePrefix}"
+    set projectURL to "${safeProjectURL}"
+    set conversationPrefix to "${safeConversationPrefix}"
     tell application "Google Chrome"
       set foundTab to false
       repeat with w in windows
         set tabIndex to 1
         repeat with t in tabs of w
-          if (URL of t) starts with matchPrefix then
+          set candidateURL to URL of t
+          set isProjectTab to candidateURL is projectURL or candidateURL starts with projectURL & "?" or candidateURL starts with projectURL & "#"
+          set isConversationTab to false
+          if candidateURL starts with conversationPrefix then
+            if (length of candidateURL) > (length of conversationPrefix) then
+              set remainderURL to text ((length of conversationPrefix) + 1) thru -1 of candidateURL
+              set firstRemainderCharacter to character 1 of remainderURL
+              if firstRemainderCharacter is not "?" and firstRemainderCharacter is not "#" and firstRemainderCharacter is not "/" then
+                set isConversationTab to true
+              end if
+            end if
+          end if
+          if isProjectTab or isConversationTab then
             set URL of t to targetURL
             set active tab index of w to tabIndex
             set index of w to 1

@@ -178,19 +178,9 @@ function nudgeChatGpt(settings, taskId) {
   }
   const url = buildChatOpenUrl(settings.chatUrl, taskId);
 
-  // Only a tab already showing exactly this workspace's project (scheme +
-  // host + path, no ?prompt=...) is ever reused — see mac-chrome.mjs for why.
-  let matchPrefix = settings.chatUrl;
-  try {
-    const u = new URL(settings.chatUrl);
-    matchPrefix = u.origin + u.pathname;
-  } catch {
-    /* fall back to the raw saved string */
-  }
-
   if (
     isChromeAutomationAvailable() &&
-    openInChromeAndSubmit(url, matchPrefix, { autoEnter: !!settings.autoEnter, enterDelayMs: settings.enterDelayMs })
+    openInChromeAndSubmit(url, settings.chatUrl, { autoEnter: !!settings.autoEnter, enterDelayMs: settings.enterDelayMs })
   ) {
     console.log(
       settings.autoEnter
