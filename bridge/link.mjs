@@ -13,7 +13,7 @@ import { appendLog } from "./state.mjs";
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
-const GATED_METHODS = new Set(["list_directory", "read_file", "search_workspace", "git_status", "git_diff", "git_log", "execution_output"]);
+const GATED_METHODS = new Set(["workspace_overview", "list_directory", "read_file", "search_workspace", "git_status", "git_diff", "git_log", "execution_output"]);
 
 export class BridgeLink {
   constructor({ workerUrl, workspaceId, linkToken, workspaceRoot, alwaysAllow, onPlanPushed }) {
@@ -128,6 +128,8 @@ export class BridgeLink {
         return this.tools.workspaceInfo();
       case "workspace_guidance":
         return this.tools.workspaceGuidance();
+      case "workspace_overview":
+        return this.tools.workspaceOverview();
       case "list_directory":
         return this.tools.listDirectory(params);
       case "read_file":

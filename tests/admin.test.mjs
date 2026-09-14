@@ -61,9 +61,13 @@ describe("shared connector hub", () => {
     const body = await response.json();
     const list = body.result.tools.find((tool) => tool.name === "list_workspaces");
     const info = body.result.tools.find((tool) => tool.name === "workspace_info");
+    const overview = body.result.tools.find((tool) => tool.name === "workspace_overview");
     assert.ok(list);
     assert.equal(info.inputSchema.properties.workspace_id.type, "string");
     assert.ok(info.inputSchema.required.includes("workspace_id"));
+    assert.equal(overview.inputSchema.properties.workspace_id.type, "string");
+    assert.ok(overview.inputSchema.required.includes("workspace_id"));
+    assert.equal(overview.annotations.readOnlyHint, true);
   });
 });
 

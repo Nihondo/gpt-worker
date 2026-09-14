@@ -74,12 +74,21 @@ function ignoredWorkspace() {
   git(root, ["config", "user.email", "test@example.com"]);
   git(root, ["config", "user.name", "Test"]);
   fs.writeFileSync(path.join(root, "README.md"), "visible\n");
-  fs.writeFileSync(path.join(root, ".gitignore"), "ignored.txt\nignored-dir/\n");
+  fs.writeFileSync(path.join(root, ".gitignore"), "ignored.txt\nignored-dir/\nCLAUDE.md\n");
   git(root, ["add", "README.md", ".gitignore"]);
   git(root, ["commit", "-q", "-m", "initial"]);
   fs.writeFileSync(path.join(root, "ignored.txt"), "ignored searchable value\n");
+  fs.writeFileSync(path.join(root, "CLAUDE.md"), "ignored overview\n");
   fs.mkdirSync(path.join(root, "ignored-dir"));
   fs.writeFileSync(path.join(root, "ignored-dir", "hidden.js"), "const hidden = true;\n");
+  dirsToClean.push(root, workspaceStateDir(root));
+  return root;
+}
+
+function overviewWorkspace() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gw-overview-"));
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "agent rules\n");
+  fs.writeFileSync(path.join(root, "CLAUDE.md"), "developer notes\n");
   dirsToClean.push(root, workspaceStateDir(root));
   return root;
 }
@@ -194,6 +203,37 @@ describe("WorkspaceTools: Git-ignored paths", () => {
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored.txt");
     assert.match(cli(["deny-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed files)");
+  });
+
+  test("keeps Git-ignored overview files unavailable unless explicitly allowed", () => {
+    const denied = new WorkspaceTools(workspace).workspaceOverview();
+    const deniedClaude = denied.files.find((file) => file.path === "CLAUDE.md");
+    assert.deepEqual(deniedClaude, { path: "CLAUDE.md", status: "unavailable", reason: "ACCESS_DENIED_GITIGNORED_FILE" });
+
+    const allowed = new WorkspaceTools(workspace, { allowedReadPaths: () => ["CLAUDE.md"] }).workspaceOverview();
+    const allowedClaude = allowed.files.find((file) => file.path === "CLAUDE.md");
+    assert.equal(allowedClaude.status, "read");
+    assert.match(allowedClaude.text, /ignored overview/);
+  });
+});
+
+describe("WorkspaceTools: project overview", () => {
+  const workspace = overviewWorkspace();
+
+  test("reads only the two fixed root-level overview files as untrusted data", () => {
+    const overview = new WorkspaceTools(workspace).workspaceOverview();
+    assert.equal(overview.note.includes("untrusted project data"), true);
+    assert.deepEqual(overview.files.map((file) => file.path), ["AGENTS.md", "CLAUDE.md"]);
+    assert.equal(overview.files.every((file) => file.status === "read"), true);
+    assert.match(overview.files[0].text, /agent rules/);
+    assert.match(overview.files[1].text, /developer notes/);
+  });
+
+  test("reports a missing file without suppressing the other overview file", () => {
+    fs.unlinkSync(path.join(workspace, "AGENTS.md"));
+    const overview = new WorkspaceTools(workspace).workspaceOverview();
+    assert.deepEqual(overview.files[0], { path: "AGENTS.md", status: "unavailable", reason: "NOT_FOUND" });
+    assert.equal(overview.files[1].status, "read");
   });
 });
 

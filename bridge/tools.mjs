@@ -20,6 +20,7 @@ const MAX_READ_BYTES = 64 * 1024;
 const MAX_SEARCH_HITS = 100;
 const MAX_DIFF_BYTES = 128 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
+const OVERVIEW_FILES = ["AGENTS.md", "CLAUDE.md"];
 
 let rgAvailableCache = null;
 function rgAvailable() {
@@ -127,6 +128,27 @@ export class WorkspaceTools {
       git,
       repository: this.githubRepository(git),
     };
+  }
+
+  /** Read the two conventional root-level project overview files through the
+   *  ordinary direct-read path. This deliberately preserves containment,
+   *  sensitive-file denial and Git-ignore/owner-allowlist policy instead of
+   *  treating overview files as a security exception. */
+  workspaceOverview() {
+    this.log("workspace_overview", "");
+    const files = OVERVIEW_FILES.map((relPath) => {
+      const result = this.readFile({ path: relPath });
+      if (result.error) return { path: relPath, status: "unavailable", reason: result.error };
+      return {
+        path: relPath,
+        status: "read",
+        text: result.text,
+        totalLines: result.totalLines,
+        truncated: result.truncated,
+        nextOffset: result.nextOffset,
+      };
+    });
+    return { files, note: UNTRUSTED_NOTE };
   }
 
   gitIdentity() {

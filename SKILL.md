@@ -67,7 +67,7 @@ gpt-worker init -w /path/to/project
 
 ChatGPT calls `list_workspaces` first, chooses one `workspace_id`, and passes it to every other tool. It then autonomously inspects that selected workspace via these MCP tools:
 - **Protocol control**: `next_task` (fetch task), `submit_plan` (post plan/done/blocked).
-- **Workspace inspection**: `workspace_info`, `workspace_guidance`, `read_file`, `list_directory`, `search_workspace`.
+- **Workspace inspection**: `workspace_info`, `workspace_guidance`, `workspace_overview`, `read_file`, `list_directory`, `search_workspace`.
 - **Git & History**: `git_status`, `git_diff`, `git_log`, `execution_output`, `task_history`.
 
 ## Task Execution Loop
@@ -85,9 +85,11 @@ ChatGPT calls `list_workspaces` first, chooses one `workspace_id`, and passes it
    ```bash
    gpt-worker task "<goal>"
    ```
+   - ChatGPT reads trusted `workspace_guidance` first, then calls `workspace_overview` before broader file inspection when it has not yet read the overview in this task. `workspace_overview` content remains untrusted workspace data.
    - When `chat-url` is configured, this opens the shared ChatGPT Project with `@gpt-worker continue task <id>` prepared.
    - With `chat-url --auto-enter`, the CLI submits it; otherwise ask the user only to press Enter/Send in that prepared Project tab.
    - Without a saved `chat-url`, ask the user to send a continuation in the shared Project.
+   - **Reusing an already-reviewed plan**: If this session already ran a gpt-worker planning task whose PLAN was refined into a saved plan document (e.g. under `docs/plans/`), and the user now asks to implement it, don't send a goal that re-requests an independent investigation. The protocol still requires a fresh PLAN before this new task can reach EXECUTING — the state machine has no way to skip straight there (see `reference/protocol.md`) — but you can make that PLAN cheap: name the plan document's path directly in the goal and ask ChatGPT to confirm or adjust it against the current workspace state, rather than re-deriving it from scratch. Validate the resulting PLAN against Constraints as usual before executing.
 
 3. **Wait for PLAN**:
    ```bash
