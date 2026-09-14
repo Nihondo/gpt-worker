@@ -1,0 +1,16 @@
+{
+  "name": "gpt-worker",
+  "private": true,
+  "type": "module",
+  "description": "ChatGPT (planning/review) + a local agent (execution), relayed through a fixed Cloudflare Workers URL. No runtime dependencies.",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "test": "node --test tests/",
+    "verify": "npm run check && npm test",
+    "deploy": "cd worker && npx wrangler deploy",
+    "dry-run": "cd worker && npx wrangler deploy --dry-run"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

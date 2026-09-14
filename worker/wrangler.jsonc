@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gpt-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  // Secrets (never in this file): set with
+  //   npx wrangler secret put ADMIN_TOKEN
+  // `gpt-worker init` generates this once, machine/account-wide, and runs
+  // this for you. The shared connector token and per-workspace gpt/link/cli
+  // tokens are NOT Worker Secrets — their Durable Objects store them in the
+  // secrets table, issued via POST /admin/<ADMIN_TOKEN>.
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "BRIDGE_DO", "class_name": "BridgeDO" }
+    ]
+  },
+
+  // SQLite-backed Durable Objects are required on the Workers Free plan.
+  // Do not change "new_sqlite_classes" to "new_classes" — that requires a
+  // paid plan's classic (non-SQLite) storage backend.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BridgeDO"] }
+  ]
+}

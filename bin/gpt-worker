@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Thin entry point. A shell script (not a Node file) so that invoking it via
+# a PATH symlink (~/.local/bin/gpt-worker -> this file) never runs into
+# Node's ESM/CJS module-type detection for an extensionless entry file.
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+exec node "$DIR/../bridge/cli.mjs" "$@"
