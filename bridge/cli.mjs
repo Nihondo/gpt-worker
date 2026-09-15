@@ -322,15 +322,9 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
           : `Sent to ChatGPT automatically in ${where} — check that it went through.`
       );
     } else if (chromeResult.reused && !chromeResult.prepared) {
-      if (chromeResult.preparationOutcome === "COMPOSER_BUSY") {
-        console.log(
-          "Reused this workspace's existing ChatGPT conversation without changing it, but its composer already has an unsent draft — left it untouched. Send or clear that draft, then run the command again."
-        );
-      } else {
-        console.log(
-          "Reused this workspace's existing ChatGPT conversation without changing it, but could not prepare the continuation — leave the conversation open and enable Chrome's View > Developer > \"Allow JavaScript from Apple Events\", then relaunch Chrome."
-        );
-      }
+      console.log(
+        "Reused this workspace's existing ChatGPT conversation without changing it, but could not prepare the continuation — leave the conversation open and enable Chrome's View > Developer > \"Allow JavaScript from Apple Events\", then relaunch Chrome."
+      );
     } else if (settings.autoEnter) {
       console.log(
         `Opened ChatGPT in ${where} with the connector mention (and this task's id) ready, but could not auto-submit — press Enter/Send there.\n` +

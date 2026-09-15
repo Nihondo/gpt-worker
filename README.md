@@ -4,6 +4,9 @@
 
 It brings ChatGPT's advanced web reasoning into your daily coding loop without consuming any ChatGPT API tokens.
 
+This tool was inspired by [XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt). It is a compact development support tool that achieves integration between ChatGPT Web and a local bridge via a message hub on Cloudflare Workers, while streamlining its scope specifically to macOS and Google Chrome.
+Special thanks to XiaoDuoYa for providing this brilliant idea.
+
 ```text
 [ChatGPT Project] ──(MCP / HTTPS)──> [Cloudflare Worker (Shared Hub)] ──(WebSocket)──> [Local Environment (Bridge)]
 ```
@@ -33,7 +36,7 @@ It brings ChatGPT's advanced web reasoning into your daily coding loop without c
 
 ## Initial Setup (One-Time)
 
-Setup takes 4 steps. Once completed, the same configuration is reused across all your projects.
+Setup takes 5 steps. Once completed, the same configuration is reused across all your projects.
 
 ### Step 1: Clone the Repository & Link the Command
 
@@ -50,7 +53,25 @@ Setup takes 4 steps. Once completed, the same configuration is reused across all
    ```
    > **Tip**: On Apple Silicon Macs, you can link directly to `/opt/homebrew/bin/gpt-worker` (or `/usr/local/bin` on Intel Macs). Using `$(brew --prefix)/bin` automatically resolves the correct path for your system. Any directory in your `PATH` (e.g. `~/.local/bin`) works as well.
 
-### Step 2: Initialize & Deploy the Worker
+### Step 2: Register the Skill for Your Agent (SKILL.md)
+
+Link `SKILL.md` into your coding agent's skills directory so the agent can discover and operate `gpt-worker`:
+
+```bash
+# Example: For Claude Code
+mkdir -p ~/.claude/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.claude/skills/gpt-worker/SKILL.md
+
+# Example: For Codex
+mkdir -p ~/.codex/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.codex/skills/gpt-worker/SKILL.md
+
+# Example: For Antigravity
+mkdir -p ~/.agents/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.agents/skills/gpt-worker/SKILL.md
+```
+
+### Step 3: Initialize & Deploy the Worker
 
 Run `init` targeting your first project directory:
 
@@ -62,7 +83,7 @@ gpt-worker init -w /path/to/your-project
 - Once authenticated, the Cloudflare Worker deploys automatically.
 - Note the `Server URL` printed in the terminal (you can check it anytime with `gpt-worker url`).
 
-### Step 3: Configure ChatGPT
+### Step 4: Configure ChatGPT
 
 1. **Enable Developer Mode**:
    - In ChatGPT, click your profile (bottom-left) → **Settings** → **Developer mode** and toggle it ON.
@@ -90,19 +111,28 @@ inspect the workspace through the connector, then call submit_plan with the
 same workspace_id.
 ```
 
-### Step 4: Register the Project URL
+### Step 5: Register the Project URL & Enable Chrome Auto-Submit
 
-Save your ChatGPT Project URL (from the browser address bar `https://chatgpt.com/g/...`) into the CLI:
+1. Save your ChatGPT Project URL (from the browser address bar `https://chatgpt.com/g/...`) into the CLI:
+   ```bash
+   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
+   ```
+   With `--auto-enter`, Chrome will automatically prepare and submit the prompt when tasks are queued.
 
-```bash
-gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
-```
-
-With `--auto-enter`, Chrome will automatically prepare and submit the prompt when tasks are queued.
+2. **Allow Chrome Background Submission (One-Time Setup)**:
+   To enable background prompt typing and submission without stealing window focus, enable Apple Events scripting in Chrome:
+   - In Chrome's menu bar, click **View** → **Developer** → check **Allow JavaScript from Apple Events**.
+   - **Relaunch Chrome completely** (`Cmd + Q` to quit, then reopen).
+   > **Note**: If this setting is not enabled, the prompt will be placed into the composer, but you will need to press Enter manually.
 
 ---
 
 ## Daily Usage (Workflow Cycle)
+
+> **💡 Routine work only requires prompting your agent**  
+> Once `SKILL.md` is installed, simply tell your agent (Claude Code, Codex, Antigravity, etc.) to "**plan this with gpt-worker**" or "**run this with ChatGPT review**". The agent will execute the CLI commands below autonomously in the background.  
+> In most cases, **you do not need to run commands manually**.  
+> (The manual steps below remain fully available if you wish to run commands directly or inspect what is happening.)
 
 Development follows an iterative cycle: **"Task (`task`) → Wait (`wait`) → Edit & Test → Report (`report`) → Review (`wait`)"**.
 
@@ -134,7 +164,7 @@ Describe your goal in natural language:
 ```bash
 gpt-worker task "Fix the validation error styling on the login page" -w .
 ```
-Chrome opens your ChatGPT Project, and the task prompt is automatically entered and submitted.
+Chrome opens your ChatGPT Project, and the task prompt is automatically entered and submitted (requires the Chrome "Allow JavaScript from Apple Events" setting described above).
 
 ### 3. Wait for the Plan (`wait`)
 ChatGPT inspects workspace files and prepares a plan:
@@ -234,6 +264,25 @@ gpt-worker state -w .
 gpt-worker wait -w .
 ```
 
+### Updating & Redeploying
+When you update gpt-worker via `git pull`, redeploy the Cloudflare Worker if the update includes changes to the Worker code (`worker/`):
+
+```bash
+# 1. Navigate to the gpt-worker repository and pull the latest changes
+cd /path/to/gpt-worker
+git pull
+
+# 2. Redeploy the Cloudflare Worker
+npm run deploy
+
+# 3. Restart any running local bridge processes
+gpt-worker stop -w /path/to/your-project
+gpt-worker start -w /path/to/your-project
+```
+> **Note**:
+> - Redeploying preserves your Worker URL and existing authentication tokens, so you do not need to reconfigure ChatGPT connectors.
+> - If an update only modifies local bridge code (`bridge/`), Worker redeployment is not strictly necessary, but running `npm run deploy` is always safe.
+
 ### Deregistering a Workspace
 To remove a project and purge its records from the local machine and remote Worker:
 
@@ -250,7 +299,7 @@ To allow background script execution in an existing tab:
 
 1. In Chrome, open **View** → **Developer** → check **Allow JavaScript from Apple Events**.
 2. **Relaunch Chrome completely**.
-3. If an unsent draft already exists in the ChatGPT input box, auto-submission pauses to prevent accidental overwrite. Clear or submit the draft and try again.
+3. Any existing text or draft in the input box (including connector mentions) is cleared and overwritten with the new prompt to prioritize uninterrupted background execution.
 
 ### Safety Guarantees
 - **Plan Review**: Always verify the plan generated by ChatGPT before execution. Check for unwanted file deletions or unexpected external commands.

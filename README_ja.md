@@ -4,6 +4,9 @@
 
 ChatGPT の API トークン料金を消費することなく、ブラウザ版の高度な推論能力を作業ループに取り込めます。
 
+このツールは、[XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt) に着想を得ています。ChatGPT Web とローカルブリッジとの連携を Cloudflare Workers上のメッセージハブを介した形で実現し、ターゲットを macOS、Google Chrome に限定することでコンパクトにした開発支援ツールです。
+素晴らしいアイデアを提供してくださった XiaoDuoYa さんに感謝いたします。
+
 ```text
 [ChatGPT Project] ──(MCP / HTTPS)──> [Cloudflare Worker (中継ハブ)] ──(WebSocket)──> [ローカル環境 (bridge)]
 ```
@@ -33,7 +36,7 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
 
 ## 初期セットアップ（初回のみ）
 
-セットアップは以下の 4 ステップです。一度完了すれば、他のプロジェクトでも同じ設定をそのまま使い回せます。
+セットアップは以下の 5 ステップです。一度完了すれば、他のプロジェクトでも同じ設定をそのまま使い回せます。
 
 ### ステップ 1：リポジトリのクローンとコマンドの配置
 
@@ -50,7 +53,25 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
    ```
    > **ヒント**：Apple Silicon Mac の場合は直接 `/opt/homebrew/bin/gpt-worker` にリンクを作成しても構いません（Intel Mac の場合は `/usr/local/bin`）。`$(brew --prefix)/bin` を使うと環境に合わせて自動解決されます。`~/.local/bin` などお好みの PATH 配下でも構いません。
 
-### ステップ 2：初期化と Worker の準備
+### ステップ 2：エージェントへのスキル登録（SKILL.md）
+
+お使いのコーディングエージェントの skills ディレクトリへ `SKILL.md` のシンボリックリンクを作成し、エージェントが `gpt-worker` を認識できるようにします。
+
+```bash
+# 例：Claude Code の場合
+mkdir -p ~/.claude/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.claude/skills/gpt-worker/SKILL.md
+
+# 例：Codex の場合
+mkdir -p ~/.codex/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.codex/skills/gpt-worker/SKILL.md
+
+# 例：Antigravity の場合
+mkdir -p ~/.agents/skills/gpt-worker
+ln -s "$(pwd)/SKILL.md" ~/.agents/skills/gpt-worker/SKILL.md
+```
+
+### ステップ 3：初期化と Worker の準備
 
 最初のプロジェクトのディレクトリを指定して `init` コマンドを実行します。
 
@@ -62,7 +83,7 @@ gpt-worker init -w /path/to/your-project
 - ログインが完了すると、自動的に Cloudflare Worker がデプロイされます。
 - 完了時に表示される `Server URL` を確認します（後から `gpt-worker url` でも確認できます）。
 
-### ステップ 3：ChatGPT の設定
+### ステップ 4：ChatGPT の設定
 
 1. **開発者モードを有効にする**：
    - ChatGPT 画面左下のユーザー名をクリックし、**設定** → **Developer mode** をオンにします。
@@ -90,21 +111,30 @@ inspect the workspace through the connector, then call submit_plan with the
 same workspace_id.
 ```
 
-### ステップ 4：ChatGPT Project URL の登録
+### ステップ 5：ChatGPT Project URL の登録と Chrome の自動送信設定
 
-作成した ChatGPT Project の URL（ブラウザのアドレスバーにある `https://chatgpt.com/g/...`）を CLI に登録します。
+1. 作成した ChatGPT Project の URL（ブラウザのアドレスバーにある `https://chatgpt.com/g/...`）を CLI に登録します。
+   ```bash
+   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
+   ```
+   `--auto-enter` を付けておくと、タスク発行時に Chrome でタブを開き、メッセージの送信まで自動で行います。
 
-```bash
-gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
-```
-
-`--auto-enter` を付けておくと、タスク発行時に Chrome でタブを開き、メッセージの送信まで自動で行います。
+2. **Chrome の自動送信を許可する（初回のみ）**：
+   画面フォーカスを奪わずにバックグラウンドでメッセージを入力・送信させるために、Chrome 側で以下の設定を有効にします。
+   - Chrome のメニューバーから **表示** → **開発** → **Apple EventsからのJavaScriptを許可** にチェックを入れる。
+   - 設定後、**Chrome を完全に再起動** する（`Cmd + Q` で終了してから開き直す）。
+   > **注意**：この設定が無効のままだと、プロンプトが入力欄にセットされた状態で停止し、手動で Enter キーを押して送信する必要があります。
 
 ---
 
 ## 基本的な使い方（日常の作業サイクル）
 
-開発作業は **「依頼 (task) → 待機 (wait) → 実装・テスト → 報告 (report) → レビュー待機 (wait)」** のサイクルで進めます。
+> **💡 普段の作業はエージェントへの指示だけで完了します**  
+> スキル（`SKILL.md`）を登録していれば、お使いのエージェント（Claude Code、Codex、Antigravity など）に対して「**gpt-worker で計画して**」「**ChatGPT でレビューさせながら進めて**」と伝えるだけで、エージェントが以下の CLI コマンドを裏側で自律的に実行します。  
+> そのため、**多くの場合ユーザー自身が直接コマンドを叩く必要はありません**。  
+> （手動で直接コマンドを実行したい場合や動作状況を確認したい場合も、以下の手順をそのまま利用できます。）
+
+開発作業は、内部的には **「依頼 (task) → 待機 (wait) → 実装・テスト → 報告 (report) → レビュー待機 (wait)」** のサイクルで進みます。
 
 ```text
 [あなた / ローカルエージェント]                 [ChatGPT]
@@ -134,7 +164,7 @@ gpt-worker status -w .
 ```bash
 gpt-worker task "ログイン画面のバリデーション表示を修正して" -w .
 ```
-Chrome で ChatGPT の画面が開き、プロンプトが自動で入力・送信されます。
+Chrome で ChatGPT の画面が開き、プロンプトが自動で入力・送信されます（※ 自動送信には上述の Chrome「Apple EventsからのJavaScriptを許可」設定が必要です）。
 
 ### 3. 計画の完成を待つ（`wait`）
 ChatGPT がファイルを調査し、作業計画（PLAN）を作成するのを待ちます。
@@ -234,6 +264,25 @@ gpt-worker state -w .
 gpt-worker wait -w .
 ```
 
+### 最新版へのアップデートと再デプロイ
+`git pull` でツールを最新版に更新した際、Worker 側のコード（`worker/`）に変更が含まれている場合は、Worker の再デプロイを行います。
+
+```bash
+# 1. gpt-worker のディレクトリへ移動して最新コードを取得
+cd /path/to/gpt-worker
+git pull
+
+# 2. Cloudflare Worker を再デプロイ
+npm run deploy
+
+# 3. 起動中のローカルブリッジがあれば再起動
+gpt-worker stop -w /path/to/your-project
+gpt-worker start -w /path/to/your-project
+```
+> **注意点**：
+> - 再デプロイを行っても Worker の URL や既存の認証情報はそのまま保持されるため、ChatGPT 側のコネクタを再設定する必要はありません。
+> - ローカルブリッジ（`bridge/`）のみの更新であれば Worker の再デプロイは不要ですが、迷った場合は `npm run deploy` を実行しておけば安全です。
+
 ### プロジェクトの登録を解除したい
 不要になったプロジェクトの登録情報と Worker 上の記録を削除します。
 
@@ -250,7 +299,7 @@ gpt-worker remove -w /path/to/project --yes
 
 1. Chrome のメニューバーから **表示** → **開発** → **Apple EventsからのJavaScriptを許可** を有効にします。
 2. 設定後、**Chrome を完全に再起動** してください。
-3. 未送信の下書きが入力欄に残っている場合、誤送信を防ぐため自動入力は中断されます。下書きを送信するか消去してから再実行してください。
+3. 入力欄にテキストや下書き（メンション含む）が残っている場合でも、自律的な作業の継続性を優先するため、自動送信時は既存の内容を消去して新しいプロンプトが上書き投入されます。
 
 ### 安全上の注意
 - **計画の確認**：ChatGPT が作成した計画（PLAN）は、実行前に必ず確認してください。意図しないファイルの削除や外部通信（curl など）が含まれていないかチェックします。

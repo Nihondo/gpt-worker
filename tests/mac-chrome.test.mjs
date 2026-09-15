@@ -105,12 +105,14 @@ describe("workspace tab AppleScript", () => {
 });
 
 describe("existing-conversation composer preparation", () => {
-  test("uses ChatGPT's contenteditable composer and reports a user draft as busy instead of overwriting it", () => {
+  test("uses ChatGPT's contenteditable composer and always clears and overwrites existing contents", () => {
     const script = buildChatGptComposerScript("@gpt-worker continue task abc123");
     assert.match(script, /#prompt-textarea\[contenteditable=true\]/);
-    assert.match(script, /if \(existingText\.trim\(\)\) return 'COMPOSER_BUSY'/);
+    assert.doesNotMatch(script, /COMPOSER_BUSY/);
+    assert.match(script, /range\.selectNodeContents\(composer\)/);
     assert.match(script, /document\.execCommand\('insertText', false, message\)/);
     assert.match(script, /new InputEvent\('input', \{ bubbles: true, inputType: 'insertText', data: message \}\)/);
+    assert.match(script, /return 'READY'/);
   });
 
   test("encodes arbitrary prompt text as a JavaScript literal rather than interpolating it as code", () => {

@@ -137,11 +137,11 @@ const CLICK_SEND_BUTTON_JS = `(() => {
 
 /** Prepare a continuation in an existing ChatGPT conversation without
  * navigating away from it. ChatGPT currently uses a ProseMirror
- * contenteditable composer, with a textarea retained as a fallback. Do not
- * replace a user's unsent draft: report COMPOSER_BUSY so the caller can leave
- * the conversation untouched. `execCommand("insertText")` dispatches the
- * input change ChatGPT's editor consumes; the textarea branch uses its native
- * setter and an InputEvent for the same reason. */
+ * contenteditable composer, with a textarea retained as a fallback.
+ * Prioritizes automated workflow continuity: clears whatever text is currently
+ * in the composer and inserts the new continuation message.
+ * `execCommand("insertText")` dispatches the input change ChatGPT's editor consumes;
+ * the textarea branch uses its native setter and an InputEvent for the same reason. */
 export function buildChatGptComposerScript(prompt) {
   const message = String(prompt || "");
   const messageLiteral = JSON.stringify(message);
@@ -150,8 +150,6 @@ export function buildChatGptComposerScript(prompt) {
   const composer = document.querySelector('#prompt-textarea[contenteditable=true]') ||
     document.querySelector('textarea[aria-label*=ChatGPT]');
   if (!composer || !message) return 'RETRY';
-  const existingText = composer.tagName === 'TEXTAREA' ? composer.value : composer.innerText;
-  if (existingText.trim()) return 'COMPOSER_BUSY';
   composer.focus();
   if (composer.tagName === 'TEXTAREA') {
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
@@ -161,7 +159,6 @@ export function buildChatGptComposerScript(prompt) {
     const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(composer);
-    range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
     if (!document.execCommand('insertText', false, message)) {
@@ -229,14 +226,14 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
       set prepareOutcome to "PENDING"
       set prepareErrorCount to 0
       set prepareAttemptCount to 0
-      repeat while prepareOutcome is not "READY" and prepareOutcome is not "COMPOSER_BUSY" and prepareErrorCount < ${MAX_JS_ERRORS} and prepareAttemptCount < ${MAX_RETRY_ATTEMPTS}
+      repeat while prepareOutcome is not "READY" and prepareErrorCount < ${MAX_JS_ERRORS} and prepareAttemptCount < ${MAX_RETRY_ATTEMPTS}
         try
           set prepareOutcome to (execute selectedTab javascript "${safeComposerJs}")
         on error
           set prepareOutcome to "JS_ERROR"
           set prepareErrorCount to prepareErrorCount + 1
         end try
-        if prepareOutcome is not "READY" and prepareOutcome is not "COMPOSER_BUSY" then
+        if prepareOutcome is not "READY" then
           delay ${RETRY_INTERVAL_SEC}
         end if
         set prepareAttemptCount to prepareAttemptCount + 1
@@ -343,7 +340,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
  *  When reusing a conversation tab, its URL is deliberately left unchanged:
  *  the task prompt is inserted into that conversation's composer instead.
  *  `prepared` reports whether that injection (or the new-tab URL prompt)
- *  succeeded; a non-empty user draft is never overwritten. */
+ *  succeeded. */
 export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
