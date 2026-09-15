@@ -1,4 +1,4 @@
-# gpt-worker User Manual
+# gpt-worker
 
 **gpt-worker** is a developer workflow tool that pairs the web version of ChatGPT (Plus, Team, Pro) as your planning and review "brain" with a local coding agent (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files, run tests, and manage Git.
 

@@ -1,4 +1,4 @@
-# gpt-worker マニュアル
+# gpt-worker
 
 **gpt-worker** は、Web ブラウザ版の ChatGPT（Plus, Team, Pro）を「計画・レビュー役（頭脳）」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
 
