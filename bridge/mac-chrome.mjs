@@ -172,7 +172,7 @@ export function buildChatGptComposerScript(prompt) {
 
 /** Build the AppleScript separately so its generated syntax can be compiled
  *  in a macOS test without opening or changing a Chrome window. */
-export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelayMs = 1500, tabId } = {}) {
+export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId } = {}) {
   const savedTabId = normalizeChromeTabId(tabId) || "";
   const safeUrl = escapeForAppleScript(url);
   const safeProjectURL = escapeForAppleScript(scope.projectURL);
@@ -202,8 +202,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
   // every attempt, so this still bails quickly (no meaningful added
   // latency) for the common case of a user who never enabled it.
   const MAX_JS_ERRORS = 2;
-  const submitStep = autoEnter
-    ? `
+  const submitStep = `
       delay ${(enterDelayMs / 1000).toFixed(2)}
       set submitOutcome to "PENDING"
       set jsErrorCount to 0
@@ -219,8 +218,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
           delay ${RETRY_INTERVAL_SEC}
         end if
         set attemptCount to attemptCount + 1
-      end repeat`
-    : "";
+      end repeat`;
 
   const prepareContinuationStep = `
       set prepareOutcome to "PENDING"
@@ -327,8 +325,8 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
  *  and return its ID so the caller can associate it with the workspace.
  *
  *  `submitted` is only ever true when the send button was actually clicked
- *  in the background — false means nothing was submitted (autoEnter was
- *  off, or the JS route never became available/clickable), so the caller
+ *  in the background — false means nothing was submitted (e.g. the JS route
+ *  never became available/clickable or send button was not ready), so the caller
  *  can tell the user what to do instead of assuming it went through.
  *
  *  `reused` says whether this reused the workspace's existing tab (true —

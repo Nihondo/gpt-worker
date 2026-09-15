@@ -190,9 +190,9 @@ ordinary PLAN before submitting it.
 
 1. Save your ChatGPT Project URL (from the browser address bar `https://chatgpt.com/g/...`) into the CLI:
    ```bash
-   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
+   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project"
    ```
-   With `--auto-enter`, Chrome will automatically prepare and submit the prompt when tasks are queued.
+   When configured, Chrome will automatically prepare and submit the prompt (press Enter) when tasks are queued.
 
 2. **Allow Chrome Background Submission (One-Time Setup)**:
    To enable background prompt typing and submission without stealing window focus, enable Apple Events scripting in Chrome:

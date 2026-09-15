@@ -189,7 +189,6 @@ describe("workspace Chrome tab mapping", () => {
       adminToken: "admin-secret",
       hubGptToken: "hub-secret",
       chatUrl: "https://chatgpt.com/g/g-p-default/project",
-      autoEnter: true,
       enterDelayMs: 1500,
       chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
       chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
@@ -202,6 +201,7 @@ describe("workspace Chrome tab mapping", () => {
     const text = JSON.stringify(view);
 
     assert.equal(view.sharedChatUrl, settings.chatUrl);
+    assert.equal(view.autoEnter, undefined);
     assert.equal(view.workspaces[0].chatUrlOverride, null);
     assert.equal(view.workspaces[0].effectiveChatUrl, settings.chatUrl);
     assert.equal(view.workspaces[1].chatUrlOverride, settings.chatUrlsByWorkspace[workspaceB]);
@@ -209,6 +209,16 @@ describe("workspace Chrome tab mapping", () => {
     for (const secret of ["worker.example", "admin-secret", "hub-secret", "gpt-secret", "cli-secret", "101", "202"]) {
       assert.equal(text.includes(secret), false, secret);
     }
+  });
+
+  test("ignores legacy autoEnter: false in persisted settings", () => {
+    const settings = {
+      chatUrl: "https://chatgpt.com/g/g-p-default/project",
+      autoEnter: false,
+    };
+    const view = safeBrowserConfig(settings, []);
+    assert.equal(view.autoEnter, undefined);
+    assert.equal(view.sharedChatUrl, settings.chatUrl);
   });
 
   test("filters the config view to the requested workspace", () => {

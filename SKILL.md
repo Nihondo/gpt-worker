@@ -192,13 +192,13 @@ When the user adds relevant instructions mid-task, retain the existing objective
 
 The CLI uses a workspace Project URL override or the shared default and reuses that workspace's Chrome conversation tab. It preserves an existing conversation URL and clears/overwrites the composer with the continuation. Do not navigate the reused tab back to the Project landing page or create extra chats for each round.
 
-On macOS Chrome, composer preparation in an existing conversation requires View > Developer > **Allow JavaScript from Apple Events**, followed by relaunching Chrome. There is no keystroke fallback. With `--auto-enter`, the CLI also attempts submission. Reused tabs stay in the background; new windows may take focus. Always rely on the actual command result, not the saved auto-submit flag alone.
+On macOS Chrome, composer preparation and automatic submission require View > Developer > **Allow JavaScript from Apple Events**, followed by relaunching Chrome. There is no keystroke fallback. Automatic submission is attempted by default. Reused tabs stay in the background; new windows may take focus. Always rely on the actual command result, not assumptions about the browser state.
 
 Use setup instructions only when a prerequisite is missing:
 
 1. Register the workspace with `gpt-worker init -w <workspace>`. Additional workspaces reuse the existing hub and connector. First-machine setup can require interactive Cloudflare login and deploys a Worker; obtain any missing deployment authorization before running it.
 2. Configure the shared OAuth MCP connector and ChatGPT Project using the existing [README setup instructions](README.md#initial-setup-one-time). `gpt-worker url` displays both the secret-free Server URL and a sensitive owner token; use it only for setup and never include that token in goals, browser URLs, or reports.
-3. Save the intended Project link with `gpt-worker chat-url '<project-url>' --auto-enter`. Add `-w <workspace>` for a workspace URL override; auto-submit settings remain machine-wide. Preserve existing settings unless the task calls for changing them.
+3. Save the intended Project link with `gpt-worker chat-url '<project-url>'`. Add `-w <workspace>` for a workspace URL override. Preserve existing settings unless the task calls for changing them.
 
 If only `SKILL.md` was symlinked into the agent's skill directory, resolve supporting documentation from the original gpt-worker checkout rather than assuming the links exist next to the symlink.
 

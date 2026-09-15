@@ -124,7 +124,6 @@ describe("existing-conversation composer preparation", () => {
 
   test("includes the continuation preparation before auto-submit when reusing a conversation tab", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=%40gpt-worker%20continue%20task%20abc123`, scope, {
-      autoEnter: true,
       tabId: "540586144",
     });
     assert.match(script, /set prepareOutcome to "PENDING"/);
@@ -133,10 +132,11 @@ describe("existing-conversation composer preparation", () => {
   });
 });
 
-describe("autoEnter submit step", () => {
-  test("omits the send-button click when autoEnter is off (the default), while retaining safe composer preparation for a reused conversation", () => {
+describe("submit step (default)", () => {
+  test("includes the send-button click by default without needing autoEnter flag, while retaining safe composer preparation for a reused conversation", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
-    assert.doesNotMatch(script, /data-testid=send-button/);
+    assert.match(script, /data-testid=send-button/);
+    assert.match(script, /execute selectedTab javascript/);
     assert.doesNotMatch(script, /keystroke return/);
     assert.doesNotMatch(script, /System Events/);
     assert.match(script, /set submitOutcome to "SKIPPED"/);
@@ -144,7 +144,7 @@ describe("autoEnter submit step", () => {
   });
 
   test("tries clicking ChatGPT's send button via Chrome's own JS execution, with no keystroke fallback of any kind", () => {
-    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true, enterDelayMs: 2000 });
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { enterDelayMs: 2000 });
 
     assert.match(script, /delay 2\.00/);
     assert.match(script, /execute selectedTab javascript "/);
@@ -158,13 +158,13 @@ describe("autoEnter submit step", () => {
   });
 
   test("tolerates a couple of execute-javascript errors as retryable (a mid-navigation tab can throw transiently) rather than bailing on the first one", () => {
-    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
     assert.match(script, /on error\s*\n\s*set submitOutcome to "JS_ERROR"\s*\n\s*set jsErrorCount to jsErrorCount \+ 1\s*\n\s*end try/);
     assert.match(script, /repeat while submitOutcome is not "CLICKED" and jsErrorCount < \d+ and attemptCount < \d+/);
   });
 
   test("leaves submitOutcome as the last failure reason (not CLICKED) once errors or disabled-button retries are exhausted, for the caller to report", () => {
-    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
     const maxErrorsMatch = script.match(/jsErrorCount < (\d+)/);
     assert.ok(maxErrorsMatch, "expected a jsErrorCount cap in the generated script");
     assert.ok(Number(maxErrorsMatch[1]) >= 2, "a single transient error must not be treated as permanent");

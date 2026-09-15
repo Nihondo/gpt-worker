@@ -190,9 +190,9 @@ ordinary PLAN before submitting it.
 
 1. 作成した ChatGPT Project の URL（ブラウザのアドレスバーにある `https://chatgpt.com/g/...`）を CLI に登録します。
    ```bash
-   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
+   gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project"
    ```
-   `--auto-enter` を付けておくと、タスク発行時に Chrome でタブを開き、メッセージの送信まで自動で行います。
+   登録すると、タスク発行時に Chrome でタブを開き、メッセージの送信（ENTER投入）まで自動で行われます。
 
 2. **Chrome の自動送信を許可する（初回のみ）**：
    画面フォーカスを奪わずにバックグラウンドでメッセージを入力・送信させるために、Chrome 側で以下の設定を有効にします。

@@ -211,7 +211,6 @@ export function safeBrowserConfig(settings, workspaces, workspaceId = null) {
     }));
   return {
     sharedChatUrl: settings?.chatUrl || null,
-    autoEnter: !!settings?.autoEnter,
     enterDelayMs: Number.isFinite(settings?.enterDelayMs) ? settings.enterDelayMs : null,
     workspaces: workspaceViews,
   };
@@ -300,7 +299,6 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
 
   const chromeResult = isChromeAutomationAvailable()
     ? openInChromeAndSubmit(url, chatUrl, {
-        autoEnter: !!settings.autoEnter,
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
       })
@@ -325,13 +323,11 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
       console.log(
         "Reused this workspace's existing ChatGPT conversation without changing it, but could not prepare the continuation — leave the conversation open and enable Chrome's View > Developer > \"Allow JavaScript from Apple Events\", then relaunch Chrome."
       );
-    } else if (settings.autoEnter) {
+    } else {
       console.log(
         `Opened ChatGPT in ${where} with the connector mention (and this task's id) ready, but could not auto-submit — press Enter/Send there.\n` +
           'For background auto-submit next time this tab is reused, enable Chrome\'s View > Developer > "Allow JavaScript from Apple Events" and relaunch Chrome.'
       );
-    } else {
-      console.log(`Opened ChatGPT in ${where} with the connector mention (and this task's id) ready — press Enter/Send there.`);
     }
     return;
   }
@@ -362,7 +358,6 @@ async function sharedChatSettings(cfg) {
     return {
       ...current,
       chatUrl: legacy.chatUrl,
-      autoEnter: !!legacy.autoEnter,
       enterDelayMs: legacy.enterDelayMs,
     };
   });
@@ -376,7 +371,6 @@ async function migrateLegacyStateIfNeeded(root, cfg) {
   const legacy = readState(root);
   const settings = {};
   if (legacy && legacy.chatUrl !== undefined) settings.chatUrl = legacy.chatUrl;
-  if (legacy && legacy.autoEnter !== undefined) settings.autoEnter = !!legacy.autoEnter;
   if (legacy && legacy.enterDelayMs !== undefined) settings.enterDelayMs = legacy.enterDelayMs;
   if (Object.keys(settings).length) {
     const saved = await localCall(cfg, "settings_set", settings);
@@ -555,7 +549,6 @@ function formatConfigUrl(url) {
 
 function printBrowserConfig(config) {
   console.log(`shared default : ${formatConfigUrl(config.sharedChatUrl)}`);
-  console.log(`auto-enter     : ${config.autoEnter}`);
   console.log(`enter delay    : ${config.enterDelayMs ?? "(default)"}`);
   if (config.workspaces.length === 0) {
     console.log("workspaces     : (none provisioned)");
@@ -766,17 +759,6 @@ async function cmdChatUrl(args) {
     process.exit(1);
   }
 
-  if (args["auto-enter"]) {
-    if (!isChromeAutomationAvailable()) {
-      console.error("--auto-enter needs macOS + Google Chrome installed. Saving the flag anyway; it will just have no effect here.");
-    }
-    next.autoEnter = true;
-    flagsChanged = true;
-  }
-  if (args["no-auto-enter"]) {
-    next.autoEnter = false;
-    flagsChanged = true;
-  }
   if (args["enter-delay"] !== undefined) {
     next.enterDelayMs = Number(args["enter-delay"]);
     flagsChanged = true;
@@ -785,14 +767,14 @@ async function cmdChatUrl(args) {
   if (args.clear) {
     const saved = updateWorkerConfigAtomic((config) => ({ ...withoutWorkspaceChatUrl(config || worker, workspaceId), ...next }));
     console.log(`Cleared this workspace's Project URL override. Effective URL: ${effectiveChatUrl(saved, workspaceId) || "(none; set the shared default with: gpt-worker chat-url <url>)"}`);
-    if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+    if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
     return;
   }
 
   if (!url) {
     if (flagsChanged) {
       const saved = updateWorkerConfigAtomic((current) => ({ ...(current || worker), ...next }));
-      console.log(`Saved. autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+      console.log(`Saved. enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
       return;
     }
     if (workspaceId) {
@@ -813,14 +795,14 @@ async function cmdChatUrl(args) {
   if (workspaceId) {
     const saved = updateWorkerConfigAtomic((config) => ({ ...withWorkspaceChatUrl(config || worker, workspaceId, url), ...next }));
     console.log(`Saved this workspace's ChatGPT Project URL override. 'gpt-worker task' / 'gpt-worker report' will use it for this workspace.`);
-    if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+    if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
     return;
   }
 
   next.chatUrl = url;
   const saved = updateWorkerConfigAtomic((config) => ({ ...withChatUrl(config || worker, url), ...next }));
   console.log(`Saved the shared default. Workspaces without an override will use this ChatGPT Project automatically.`);
-  if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+  if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
 }
 
 /** Standing planning/review guidance is owner-authenticated and stored with

@@ -2076,19 +2076,17 @@ export class BridgeDO {
   }
 
   localSettingsGet() {
-    const rows = this.sql.exec(`SELECT k, v FROM settings WHERE k IN ('chat_url', 'auto_enter', 'enter_delay_ms')`).toArray();
+    const rows = this.sql.exec(`SELECT k, v FROM settings WHERE k IN ('chat_url', 'enter_delay_ms')`).toArray();
     const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
     return {
       chatUrl: values.chat_url || null,
-      autoEnter: values.auto_enter === "true",
       enterDelayMs: values.enter_delay_ms ? Number(values.enter_delay_ms) : null,
     };
   }
 
   localSettingsSet(body) {
-    const { chatUrl, autoEnter, enterDelayMs } = body || {};
+    const { chatUrl, enterDelayMs } = body || {};
     if (chatUrl !== undefined) this.setSetting("chat_url", chatUrl || "");
-    if (autoEnter !== undefined) this.setSetting("auto_enter", autoEnter ? "true" : "false");
     if (enterDelayMs !== undefined) this.setSetting("enter_delay_ms", enterDelayMs === null ? "" : String(enterDelayMs));
     return this.localSettingsGet();
   }
