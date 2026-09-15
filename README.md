@@ -58,8 +58,8 @@ gpt-worker init -w /path/to/your-project
 2. **Add MCP Connector**:
    - Go to Settings → **Connectors** (or Developer mode) and add a new connector:
    - **Name**: `gpt-worker`
-   - **Server URL**: The shared MCP URL printed by `gpt-worker url`
-   - **Authentication**: `None`
+   - **Server URL**: From `gpt-worker url`
+   - **Authentication**: `OAuth`. ChatGPT registers itself and shows a consent page; enter the owner token printed by `gpt-worker url` there (it's never embedded in the URL). Rotate it anytime with `gpt-worker rotate --hub`.
 3. **Create a ChatGPT Project**:
    - Create a new Project in ChatGPT (e.g., `Coding Assistant`).
    - We recommend enabling **Project-only memory** in the project settings.
@@ -288,7 +288,7 @@ gpt-worker remove -w /path/to/project --yes
 | Command | Purpose |
 |---|---|
 | `gpt-worker init -w <dir>` | Register workspace (deploys Worker on first run) |
-| `gpt-worker url [--oauth [-w <dir>]]` | Print the shared MCP URL to register once in ChatGPT. `--oauth` instead prints the secret-free OAuth Server URL and its resource-owner token (shared, or `-w <dir>`'s own workspace) |
+| `gpt-worker url [-w <dir>]` | Print the secret-free OAuth Server URL and its resource-owner token (shared, or `-w <dir>`'s own workspace) for the ChatGPT connector. `--oauth` remains an accepted alias. |
 | `gpt-worker workspaces` | List provisioned workspaces and bridge status |
 | `gpt-worker start -w <dir> [--always-allow]` | Start local bridge daemon |
 | `gpt-worker stop -w <dir>` | Stop local bridge daemon |

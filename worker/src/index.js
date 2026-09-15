@@ -5,20 +5,15 @@
 // own 3 tokens, and its own /link WebSocket — starting the bridge for one
 // workspace never evicts another's connection.
 //
-//   /mcp/<hub_gpt_token>               Shared ChatGPT-facing MCP endpoint. It exposes
-//                                       registered workspaces as an explicit tool argument.
-//   /mcp/<workspace_id>/<gpt_token>    Legacy per-workspace MCP endpoint (kept for migration).
+//   /mcp, /mcp/<workspace_id>          OAuth-protected ChatGPT-facing MCP resources.
+//                                       The shared resource exposes registered workspaces as an
+//                                       explicit tool argument.
 //   /local/<workspace_id>/<cli_token> CLI-facing postbox API (enqueue / poll / ack / status).
 //   /link/<workspace_id>/<link_token> WebSocket reverse-connection from the local bridge process.
 //   /admin/<ADMIN_TOKEN>              Provision a new workspace_id, or migrate an old
 //                                     single-tenant deployment's tokens into one. Never
 //                                     appears in a per-workspace URL; set once machine-wide.
 //
-//   /mcp, /mcp/<workspace_id>          Secret-free OAuth resource URLs (Phase 1: discovery +
-//                                       401 Bearer challenge only, no issuer yet — see
-//                                       docs/plans/oauth-mcp-authentication.md). Distinguished
-//                                       from the legacy routes above by workspace_id shape
-//                                       (16 hex chars / "default") vs. a 64-hex gpt_token.
 //   /.well-known/oauth-protected-resource[/mcp[/<workspace_id>]]
 //   /.well-known/oauth-authorization-server
 //                                       RFC 9728 / OAuth AS discovery metadata for the above.
@@ -126,29 +121,14 @@ export default {
       return handleAdminRoute(request, env, parts[1]);
     }
 
-    // Secret-free OAuth resource URL, per-workspace: "/mcp/<workspace_id>".
-    // A real workspace_id is 16 hex chars ("default" also allowed) while the
-    // legacy hub_gpt_token below is a 64-hex randomHex(32) value, so the two
-    // never collide — check this first.
+    // OAuth resource URL, per-workspace: "/mcp/<workspace_id>".
     if (parts.length === 2 && parts[0] === "mcp" && isValidWorkspaceId(parts[1])) {
       return handleOAuthMcpResource(request, env, parts[1]);
     }
 
-    // The shared connector has one stable URL, independent of any individual
-    // workspace. It is deliberately a different path shape from the legacy
-    // per-workspace endpoint, so existing connectors remain usable during
-    // migration.
-    if (parts.length === 2 && parts[0] === "mcp") {
-      if (!checkOrigin(request)) return new Response("forbidden", { status: 403 });
-      const hub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(HUB_DO_NAME));
-      const forwardUrl = new URL(request.url);
-      forwardUrl.pathname = `/hub-mcp/${parts[1]}`;
-      return hub.fetch(new Request(forwardUrl, request));
-    }
-
     if (parts.length !== 3) return new Response("not found", { status: 404 });
     const [route, workspaceId, token] = parts;
-    if (!["mcp", "link", "local"].includes(route)) return new Response("not found", { status: 404 });
+    if (!["link", "local"].includes(route)) return new Response("not found", { status: 404 });
     if (!isValidWorkspaceId(workspaceId)) return new Response("not found", { status: 404 });
 
     if (!checkOrigin(request)) {
@@ -242,9 +222,8 @@ function json(body, status = 200, headers = {}) {
 // per-workspace DO for /mcp/<workspace_id> — resolved via
 // resolveOAuthResource() and reached only through internal-only DO routes
 // (oauth-authorize/oauth-token/oauth-validate/oauth-mcp/oauth-hub-mcp; see
-// BridgeDO.fetch), never exposed at a public URL directly. The legacy
-// /mcp/<hub_gpt_token> and /mcp/<workspace_id>/<gpt_token> routes and the
-// handleMcpRequest/handleHubMcpRequest JSON-RPC handlers are untouched.
+// BridgeDO.fetch), never exposed at a public URL directly. The JSON-RPC
+// handlers remain separate from OAuth routing.
 // ---------------------------------------------------------------------------
 
 function oauthResourceUrl(requestUrl, workspaceId) {
@@ -953,9 +932,7 @@ export class BridgeDO {
     if (parts.length === 1 && parts[0] === "oauth-hub-mcp") return this.handleOAuthMcpDispatch(request, true);
     if (parts.length !== 2) return new Response("not found", { status: 404 });
     const [route, token] = parts;
-    if (route === "hub-mcp") return this.handleHubMcpRoute(request, token);
     if (route === "link") return this.handleLink(request, token);
-    if (route === "mcp") return this.handleMcpRoute(request, token);
     if (route === "local") return this.handleLocalRoute(request, token);
     return new Response("not found", { status: 404 });
   }
@@ -1016,6 +993,20 @@ export class BridgeDO {
     return { ok: true };
   }
 
+  /** Revokes every OAuth authorization code/access token/refresh token this
+   *  DO has issued for its own resource — not the DCR client registry
+   *  (oauth_clients), which is independent of any owner credential. Called
+   *  when gpt_token/hub_gpt_token rotates, since that value doubles as the
+   *  OAuth resource-owner credential (see checkResourceOwnerToken): a
+   *  deliberate rotation (e.g. because it may have leaked) should also cut
+   *  off OAuth grants already issued under the old value, not just block
+   *  future /oauth-authorize calls. */
+  revokeAllOAuthTokens() {
+    this.sql.exec(`DELETE FROM oauth_authorization_codes`);
+    this.sql.exec(`DELETE FROM oauth_access_tokens`);
+    this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
+  }
+
   /** Replaces one of this workspace's 3 tokens with a fresh random value.
    *  Only the named key changes; the other two (and every queued message)
    *  are untouched. Requires the workspace to already be provisioned. */
@@ -1026,6 +1017,7 @@ export class BridgeDO {
     if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
     const value = randomHex(32);
     this.setSecret(key, value);
+    if (key === "gpt_token") this.revokeAllOAuthTokens();
     return { value };
   }
 
@@ -1056,6 +1048,7 @@ export class BridgeDO {
     if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
     const value = randomHex(32);
     this.setSecret("hub_gpt_token", value);
+    this.revokeAllOAuthTokens();
     return { value };
   }
 
@@ -1614,11 +1607,8 @@ export class BridgeDO {
   }
 
   /** POST /oauth-mcp or /oauth-hub-mcp (internal). Reached only after
-   *  handleOAuthMcpResource has already Bearer-authenticated the caller;
-   *  this just parses the JSON-RPC envelope (identical shape/limits to
-   *  handleMcpRoute/handleHubMcpRoute) and dispatches into the same
-   *  handleMcpRequest/handleHubMcpRequest used by the legacy token routes,
-   *  so OAuth callers get exactly the same tool behavior. */
+   *  handleOAuthMcpResource has Bearer-authenticated the caller; this parses
+   *  the JSON-RPC envelope and dispatches into the resource's handler. */
   async handleOAuthMcpDispatch(request, useHubHandler) {
     if (!this.rateLimit(useHubHandler ? "oauth-hub-mcp" : "oauth-mcp", 60)) {
       return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
@@ -1643,77 +1633,6 @@ export class BridgeDO {
     if (!("method" in payload) || !("id" in payload)) return new Response(null, { status: 202 });
 
     return useHubHandler ? this.handleHubMcpRequest(payload) : this.handleMcpRequest(payload);
-  }
-
-  // ======================= /mcp : ChatGPT-facing JSON-RPC =======================
-
-  async handleMcpRoute(request, token) {
-    if (!this.checkToken("gpt_token", token)) return new Response("not found", { status: 404 });
-    if (request.method === "GET" || request.method === "DELETE") {
-      return new Response(null, { status: 405, headers: { allow: "POST" } });
-    }
-    if (request.method !== "POST") {
-      return new Response(null, { status: 405, headers: { allow: "POST" } });
-    }
-    if (!this.rateLimit("mcp", 60)) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    }
-    const contentType = request.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) {
-      return new Response("unsupported media type", { status: 415 });
-    }
-    const protocolVersion = checkProtocolVersion(request);
-    if (protocolVersion === null) {
-      return new Response("unsupported MCP-Protocol-Version", { status: 400 });
-    }
-
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
-    if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
-    if (parsed.parseError) return rpcError(null, -32700, "Parse error");
-    const payload = parsed.value;
-
-    if (Array.isArray(payload)) {
-      // JSON-RPC batching was removed in MCP 2025-06-18.
-      return new Response("JSON-RPC batching is not supported", { status: 400 });
-    }
-    if (!payload || typeof payload !== "object" || payload.jsonrpc !== "2.0") {
-      return rpcError(payload && payload.id, -32600, "Invalid Request");
-    }
-
-    if (!("method" in payload)) {
-      // A bare JSON-RPC *response* sent to us: accept and discard.
-      return new Response(null, { status: 202 });
-    }
-    if (!("id" in payload)) {
-      // A JSON-RPC *notification* (e.g. notifications/initialized): accept, no reply expected.
-      return new Response(null, { status: 202 });
-    }
-
-    return this.handleMcpRequest(payload);
-  }
-
-  // ======================= shared /mcp : one ChatGPT connector =======================
-
-  async handleHubMcpRoute(request, token) {
-    if (!this.checkToken("hub_gpt_token", token)) return new Response("not found", { status: 404 });
-    if (request.method === "GET" || request.method === "DELETE") {
-      return new Response(null, { status: 405, headers: { allow: "POST" } });
-    }
-    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    if (!this.rateLimit("hub-mcp", 60)) return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    if (!(request.headers.get("content-type") || "").includes("application/json")) {
-      return new Response("unsupported media type", { status: 415 });
-    }
-    if (checkProtocolVersion(request) === null) return new Response("unsupported MCP-Protocol-Version", { status: 400 });
-
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
-    if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
-    if (parsed.parseError) return rpcError(null, -32700, "Parse error");
-    const payload = parsed.value;
-    if (Array.isArray(payload)) return new Response("JSON-RPC batching is not supported", { status: 400 });
-    if (!payload || typeof payload !== "object" || payload.jsonrpc !== "2.0") return rpcError(payload && payload.id, -32600, "Invalid Request");
-    if (!("method" in payload) || !("id" in payload)) return new Response(null, { status: 202 });
-    return this.handleHubMcpRequest(payload);
   }
 
   async handleHubMcpRequest({ id, method, params }) {

@@ -58,8 +58,8 @@ gpt-worker init -w /path/to/your-project
 2. **MCP Connector を登録**:
    - 「Settings」→「Connectors」または「Developer mode」設定から、新しい Connector を追加します。
    - **Name**: `gpt-worker`
-   - **Server URL**: 先ほど表示された共有 MCP URL
-   - **Authentication**: `None`
+   - **Server URL**: `gpt-worker url`で表示されるURL
+   - **Authentication**: `OAuth`。ChatGPT側が自動でクライアント登録を行い、同意画面が表示されます。そこで`gpt-worker url`が表示するowner tokenを入力してください(URLには含まれません)。`gpt-worker rotate --hub`でいつでも再発行できます。
 3. **ChatGPT Project を作成**:
    - ChatGPT の左サイドバーから「New Project」を作成します（例: `Coding Assistant`）。
    - 設定で「Project-only memory」を有効にすることを推奨します。
@@ -288,7 +288,7 @@ gpt-worker remove -w /path/to/project --yes
 | コマンド | 説明 |
 |---|---|
 | `gpt-worker init -w <dir>` | ワークスペースを登録（初回実行時は Worker のデプロイも実施） |
-| `gpt-worker url [--oauth [-w <dir>]]` | ChatGPT に登録する共有 MCP URL を表示。`--oauth` を付けると、秘密を含まない OAuth Server URL とそのresource-owner token(共有、または `-w <dir>` で指定したワークスペース自身)を表示 |
+| `gpt-worker url [-w <dir>]` | ChatGPT Connector に登録する、秘密を含まない OAuth Server URL とresource-owner token(共有、または `-w <dir>` で指定したワークスペース自身)を表示。`--oauth`は互換エイリアスとして引き続き利用可能。 |
 | `gpt-worker workspaces` | 登録済みワークスペースとブリッジの状態を一覧表示 |
 | `gpt-worker start -w <dir> [--always-allow]` | ローカルブリッジ（中継デーモン）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |

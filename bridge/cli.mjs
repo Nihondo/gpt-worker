@@ -422,7 +422,7 @@ async function cmdInit(args) {
     worker = await ensureSharedConnector(worker);
     await registerSharedWorkspace(worker, existingTokens, root);
     console.log(`Already provisioned for this workspace.`);
-    console.log(`Shared Server URL: ${worker.workerUrl}/mcp/${worker.hubGptToken}`);
+    console.log(`OAuth Server URL: ${worker.workerUrl}/mcp`);
     console.log("(Also available any time via: gpt-worker url -w " + root + ")");
     console.log("This workspace is available through the already registered ChatGPT connector.");
     return;
@@ -489,12 +489,16 @@ async function cmdInit(args) {
 ✓ Tokens saved (mode 600)
 
 This workspace has been added to the shared connector.
-Shared Server URL: ${worker.workerUrl}/mcp/${worker.hubGptToken}
 
 If you have not registered it yet, add this single connector in ChatGPT once:
-  Name:           gpt-worker
-  Server URL:     ${worker.workerUrl}/mcp/${worker.hubGptToken}
-  Authentication: None
+  Name: gpt-worker
+
+  OAuth (no secret embedded in the URL):
+    Server URL:     ${worker.workerUrl}/mcp
+    Authentication: OAuth
+    (ChatGPT will register itself and show a consent page; enter the owner
+    token from "gpt-worker url" there — never in the URL. Rotate it
+    anytime with "gpt-worker rotate --hub".)
 
 Then use one ChatGPT Project for every workspace. Future gpt-worker init -w
 <new-dir> commands only add that directory to this connector; they never
@@ -509,16 +513,12 @@ function cmdUrl(args) {
     process.exit(1);
   }
 
-  if (!args.oauth) {
-    // Unchanged default: the one legacy token-in-URL shared connector URL.
-    console.log(`${worker.workerUrl}/mcp/${worker.hubGptToken}`);
-    return;
-  }
-
-  // --oauth: the secret-free OAuth Server URL plus the existing token that
+  // The secret-free OAuth Server URL plus the existing token that
   // doubles as the resource-owner credential you type into the consent page
   // an OAuth client redirects you to (see docs/plans/oauth-mcp-authentication.md).
-  // No separate OAuth token is minted — gpt_token/hub_gpt_token are reused.
+  // --oauth remains an accepted no-op alias for scripts that adopted the
+  // previous OAuth-first interface. No separate OAuth token is minted —
+  // gpt_token/hub_gpt_token are reused.
   if (args.workspace) {
     const root = workspaceRoot(args);
     const tokens = readTokens(root);
@@ -1107,12 +1107,10 @@ async function cmdState(args) {
 // rotate
 // ---------------------------------------------------------------------------
 
-/** Rotates the one machine-wide hub_gpt_token: the shared ChatGPT
- *  connector's legacy URL token, and — since Phase 2/3 — the resource-owner
- *  credential for the shared /mcp OAuth resource's consent page. Every
- *  already-registered workspace keeps working; only this one shared value
- *  changes. Unlike gpt_token/link_token/cli_token, hub_gpt_token isn't tied
- *  to a workspace, so this doesn't take -w. */
+/** Rotates the resource-owner credential for the shared /mcp OAuth resource.
+ *  Every already-authorized client must re-authorize after rotation. Unlike
+ *  gpt_token/link_token/cli_token, hub_gpt_token isn't tied to a workspace,
+ *  so this doesn't take -w. */
 async function cmdRotateHub() {
   const worker = readWorkerConfig();
   if (!worker || !worker.hubGptToken) {
@@ -1126,8 +1124,8 @@ async function cmdRotateHub() {
   }
   writeWorkerConfigAtomic({ ...worker, hubGptToken: result.value });
   console.log("Rotated hub_gpt_token.");
-  console.log(`Update the ChatGPT connector's Server URL to:\n  ${worker.workerUrl}/mcp/${result.value}`);
-  console.log(`(OAuth Server URL is unaffected: ${worker.workerUrl}/mcp — only the owner token you enter in its consent page changes, to the value above.)`);
+  console.log(`The connector Server URL remains:\n  ${worker.workerUrl}/mcp`);
+  console.log("Re-authorize it with the new owner token from: gpt-worker url");
 }
 
 async function cmdRotate(args) {
@@ -1158,8 +1156,8 @@ async function cmdRotate(args) {
   writeTokensAtomic(root, tokens);
   console.log(`Rotated ${which}.`);
   if (which === "gpt_token") {
-    console.log(`Update the ChatGPT connector's Server URL to:\n  ${cfg.workerUrl}/mcp/${cfg.workspaceId}/${result.value}`);
-    console.log(`(This is also the OAuth owner token for this workspace's /mcp/${cfg.workspaceId} resource — see: gpt-worker url --oauth -w ${root})`);
+    console.log(`The workspace OAuth resource remains:\n  ${cfg.workerUrl}/mcp/${cfg.workspaceId}`);
+    console.log(`Re-authorize it with the new owner token from: gpt-worker url -w ${root}`);
   }
   if (which === "link_token") {
     console.log(`Restart the bridge so it reconnects with the new link token: gpt-worker stop -w ${root} && gpt-worker start -w ${root}`);

@@ -34,12 +34,11 @@ gpt-worker init -w /path/to/project
 
 - **First workspace on machine**: If Cloudflare is not already authenticated, `npx wrangler login` needs an interactive browser login; ask the user to perform only that prerequisite. Once authenticated, deploy the Worker, provision the shared connector plus workspace tokens, and output its setup instructions.
 - **Additional workspaces**: Reuse the deployed Worker and the already-configured ChatGPT connector; they can be provisioned non-interactively and only add a new `workspace_id` to the hub.
-- **ChatGPT Setup (Once per machine/account)**:
+- **ChatGPT Setup (Once per machine/account)**: OAuth is required; the shared connector URL never embeds a long-lived secret.
   1. Enable Developer mode in ChatGPT Settings.
   2. Add MCP Connector:
      - Name: `gpt-worker`
-     - Server URL: Printed by `init` or `gpt-worker url` (`<workerUrl>/mcp/<shared-token>`)
-     - Authentication: None
+     - Server URL from `gpt-worker url` (`<workerUrl>/mcp`) — Authentication: OAuth. ChatGPT will dynamically register itself and redirect to a consent page; enter the owner token shown by `gpt-worker url` there (never in the URL). Rotate it any time with `gpt-worker rotate --hub` — this also revokes every OAuth access/refresh token already issued for the shared resource.
   3. Create one ChatGPT Project with "Project only" memory and use it for every registered workspace.
   4. In the Project, call `list_workspaces` first and pass the selected `workspace_id` to every other gpt-worker tool call.
 
@@ -56,7 +55,7 @@ gpt-worker init -w /path/to/project
 | `gpt-worker report -w <dir> --changed <n> --tests "<summary>"` | Submit task execution results (`EXECUTED`) to ChatGPT. |
 | `gpt-worker state -w <dir>` | Output active task checkpoint JSON from the Worker. |
 | `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues. |
-| `gpt-worker url [--oauth [-w <dir>]]` | Print the one shared MCP Server URL for the ChatGPT connector. `--oauth` instead prints the secret-free OAuth Server URL and the existing token that doubles as its resource-owner credential (shared `/mcp`, or `-w <dir>`'s own `/mcp/<workspace_id>`). |
+| `gpt-worker url [-w <dir>]` | Print the secret-free OAuth Server URL and the existing token that doubles as its resource-owner credential (shared `/mcp`, or `-w <dir>`'s own `/mcp/<workspace_id>`). `--oauth` remains an accepted alias. |
 | `gpt-worker workspaces` | List all provisioned workspaces and bridge statuses on this machine. |
 | `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Set/get the shared default Project link or an optional workspace override; `--clear -w` restores the default. Auto-submit settings stay machine-wide. |
 | `gpt-worker show-config [-w <dir>]` | Show allowlisted browser-facing configuration, including shared/default, override, and effective Project URLs; never prints credentials. |

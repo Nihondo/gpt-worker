@@ -1,16 +1,13 @@
 // Phases 1-2 of docs/plans/oauth-mcp-authentication.md:
-//  - Phase 1: OAuth discovery metadata and 401 Bearer challenges on the new
-//    secret-free /mcp and /mcp/<workspace_id> resource URLs, plus regression
-//    coverage that the legacy token-in-URL routes keep routing exactly as
-//    before.
+//  - Phase 1: OAuth discovery metadata and 401 Bearer challenges on the
+//    secret-free /mcp and /mcp/<workspace_id> resource URLs.
 //  - Phase 2: a real Authorization Code + S256 PKCE + refresh-token issuer
 //    (/oauth/authorize, /oauth/token) and Bearer validation that actually
 //    reaches the existing MCP JSON-RPC handlers.
 //
 // Exercises the real top-level Worker `fetch` (the `export default` in
-// worker/src/index.js), not just the OAuth helper functions, so route
-// precedence between the new OAuth resources and the legacy token routes is
-// actually covered.
+// worker/src/index.js), not just the OAuth helper functions, so public route
+// handling is covered end-to-end.
 //
 // Phase 1 tests use a dumb Durable Object stub (just enough to prove
 // forwarding happened). Phase 2 tests need the OAuth flow to actually work
@@ -25,7 +22,6 @@ import worker, { BridgeDO } from "../worker/src/index.js";
 import { makeFakeCtx } from "./helpers/fake-do-ctx.mjs";
 
 const ORIGIN = "https://example.com";
-const HUB_TOKEN = "a".repeat(64); // shape of randomHex(32): 64 hex chars
 const WORKSPACE_ID = "0123456789abcdef"; // shape of a real workspace_id: 16 hex chars
 
 function makeFakeBridgeDoEnv() {
@@ -217,24 +213,22 @@ describe("OAuth MCP resources (/mcp, /mcp/<workspace_id>) — Phase 1: always 40
   });
 });
 
-describe("Legacy token routes keep routing exactly as before", () => {
-  test("/mcp/<64-hex-hub-token> still forwards to the hub DO as /hub-mcp/<token>, not the OAuth workspace route", async () => {
+describe("Token-in-URL MCP routes are closed", () => {
+  test("/mcp/<64-hex-hub-token> is not forwarded to the hub DO", async () => {
     const { env, calls } = makeFakeBridgeDoEnv();
-    const res = await worker.fetch(req(`/mcp/${HUB_TOKEN}`, { method: "POST" }), env);
-    assert.equal(res.status, 200);
-    assert.equal(await res.text(), "stub-forwarded");
-    assert.deepEqual(calls, [{ pathname: `/hub-mcp/${HUB_TOKEN}`, method: "POST" }]);
+    const res = await worker.fetch(req(`/mcp/${"a".repeat(64)}`, { method: "POST" }), env);
+    assert.equal(res.status, 404);
+    assert.deepEqual(calls, []);
   });
 
-  test("/mcp/<workspace_id>/<token> still forwards to the workspace DO as /mcp/<token>", async () => {
+  test("/mcp/<workspace_id>/<token> is not forwarded to a workspace DO", async () => {
     const { env, calls } = makeFakeBridgeDoEnv();
     const res = await worker.fetch(req(`/mcp/${WORKSPACE_ID}/sometoken`, { method: "POST" }), env);
-    assert.equal(res.status, 200);
-    assert.equal(await res.text(), "stub-forwarded");
-    assert.deepEqual(calls, [{ pathname: "/mcp/sometoken", method: "POST" }]);
+    assert.equal(res.status, 404);
+    assert.deepEqual(calls, []);
   });
 
-  test("/mcp/<16-hex-workspace-id> alone is now the OAuth resource (401), not the legacy hub route", async () => {
+  test("/mcp/<16-hex-workspace-id> is the OAuth resource", async () => {
     const { env, calls } = makeFakeBridgeDoEnv();
     const res = await worker.fetch(req(`/mcp/${WORKSPACE_ID}`, { method: "POST" }), env);
     assert.equal(res.status, 401);
@@ -1028,5 +1022,88 @@ describe("Phase 3: GET /oauth/authorize consent form + Dynamic Client Registrati
       );
       assert.equal(tokenRes.status, 200, `token exchange with origin=${origin} should not be blocked`);
     }
+  });
+});
+
+describe("rotating gpt_token/hub_gpt_token revokes already-issued OAuth grants", () => {
+  const RESOURCE = `${ORIGIN}/mcp/${WORKSPACE_ID}`;
+  const REDIRECT_URI = "https://client.example/callback";
+  const CLIENT_ID = "test-client";
+
+  async function issueAccessToken(env, ownerToken, resource = RESOURCE) {
+    const { verifier, challenge } = await pkcePair();
+    const authRes = await worker.fetch(
+      formReq("/oauth/authorize", {
+        resource,
+        client_id: CLIENT_ID,
+        redirect_uri: REDIRECT_URI,
+        response_type: "code",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        owner_token: ownerToken,
+      }),
+      env,
+    );
+    const code = codeFromRedirect(authRes).searchParams.get("code");
+    const tokenRes = await worker.fetch(
+      formReq("/oauth/token", { grant_type: "authorization_code", code, client_id: CLIENT_ID, redirect_uri: REDIRECT_URI, resource, code_verifier: verifier }),
+      env,
+    );
+    return tokenRes.json();
+  }
+
+  async function callMcp(env, path, accessToken) {
+    return worker.fetch(
+      req(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: {} }),
+      }),
+      env,
+    );
+  }
+
+  test("rotating a workspace's gpt_token revokes that workspace's already-issued access token", async () => {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const workspaceDo = instanceFor(WORKSPACE_ID);
+    const { gptToken } = workspaceDo.provision();
+    const { access_token: accessToken } = await issueAccessToken(env, gptToken);
+
+    const before = await callMcp(env, `/mcp/${WORKSPACE_ID}`, accessToken);
+    assert.equal(before.status, 200);
+
+    const rotated = workspaceDo.rotateSecret("gpt_token");
+    assert.equal(typeof rotated.value, "string");
+
+    const after = await callMcp(env, `/mcp/${WORKSPACE_ID}`, accessToken);
+    assert.equal(after.status, 401);
+  });
+
+  test("rotating hub_gpt_token revokes the shared resource's already-issued access token", async () => {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const hubDo = instanceFor("gpt-worker-hub");
+    const { gptToken: hubOwnerToken } = hubDo.provisionHub();
+    const { access_token: accessToken } = await issueAccessToken(env, hubOwnerToken, `${ORIGIN}/mcp`);
+
+    const before = await callMcp(env, "/mcp", accessToken);
+    assert.equal(before.status, 200);
+
+    hubDo.rotateHubToken();
+
+    const after = await callMcp(env, "/mcp", accessToken);
+    assert.equal(after.status, 401);
+  });
+
+  test("rotating link_token or cli_token does not revoke OAuth access tokens (unrelated credentials)", async () => {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const workspaceDo = instanceFor(WORKSPACE_ID);
+    const { gptToken } = workspaceDo.provision();
+    const { access_token: accessToken } = await issueAccessToken(env, gptToken);
+
+    workspaceDo.rotateSecret("link_token");
+    workspaceDo.rotateSecret("cli_token");
+
+    const res = await callMcp(env, `/mcp/${WORKSPACE_ID}`, accessToken);
+    assert.equal(res.status, 200);
   });
 });
