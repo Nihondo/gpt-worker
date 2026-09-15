@@ -219,19 +219,6 @@ function checkOrigin(request) {
   return ALLOWED_ORIGINS.has(origin);
 }
 
-/** Like checkOrigin(), but also allows the request's own origin. Browsers
- *  send an `Origin` header on every POST — including a same-origin one —
- *  and the /oauth/authorize consent form (GET /oauth/authorize) submits
- *  back to itself with a relative, same-origin `action`, so its POST always
- *  carries `Origin: <this Worker's own origin>`, never chatgpt.com. Plain
- *  checkOrigin() would reject that legitimate same-origin submission. */
-function checkOriginAllowSelf(request) {
-  const origin = request.headers.get("origin");
-  if (!origin) return true;
-  if (origin === new URL(request.url).origin) return true;
-  return ALLOWED_ORIGINS.has(origin);
-}
-
 function checkProtocolVersion(request) {
   const v = request.headers.get("mcp-protocol-version");
   if (!v) return DEFAULT_PROTOCOL_VERSION;
@@ -534,19 +521,78 @@ function renderOAuthConsentHtml({ resource, clientId, redirectUri, responseType,
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Authorize gpt-worker</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .card {
+    width: 100%;
+    max-width: 420px;
+    background: #fff;
+    border: 1px solid #e5e5e7;
+    border-radius: 14px;
+    padding: 28px;
+  }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .meta { font-size: 14px; color: #6e6e73; line-height: 1.5; margin: 0 0 8px; word-break: break-all; }
+  .meta strong { color: inherit; font-weight: 600; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 20px 0 6px; }
+  input[type="password"] {
+    width: 100%;
+    padding: 10px 12px;
+    font-size: 15px;
+    border: 1px solid #d2d2d7;
+    border-radius: 8px;
+    background: #fff;
+    color: inherit;
+  }
+  button {
+    width: 100%;
+    margin-top: 16px;
+    padding: 11px 16px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #fff;
+    background: #0071e3;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button:hover { background: #0077ed; }
+  .note { font-size: 12px; color: #86868b; margin-top: 16px; line-height: 1.4; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .card { background: #2c2c2e; border-color: #3a3a3c; }
+    input[type="password"] { background: #1c1c1e; border-color: #48484a; }
+  }
+</style>
 </head>
 <body>
+<div class="card">
 <h1>Authorize access</h1>
-<p><strong>${escapeHtml(clientId)}</strong> is requesting access to <strong>${escapeHtml(resource)}</strong>.</p>
-<p>Redirect URI: ${escapeHtml(redirectUri)}</p>
-${scope ? `<p>Scope: ${escapeHtml(scope)}</p>` : ""}
+<p class="meta"><strong>${escapeHtml(clientId)}</strong> is requesting access to<br><strong>${escapeHtml(resource)}</strong></p>
+<p class="meta">Redirect URI: ${escapeHtml(redirectUri)}</p>
+${scope ? `<p class="meta">Scope: ${escapeHtml(scope)}</p>` : ""}
 <form method="post" action="/oauth/authorize">
 ${hiddenFields}
-<label for="owner_token">gpt-worker owner token</label><br>
-<input type="password" id="owner_token" name="owner_token" autocomplete="off" required>
+<label for="owner_token">gpt-worker owner token</label>
+<input type="password" id="owner_token" name="owner_token" autocomplete="off" autofocus required>
 <button type="submit">Authorize</button>
 </form>
+<p class="note">Only enter this token if you recognize and trust the client above — it grants access to your gpt-worker workspace.</p>
+</div>
 </body>
 </html>
 `;
@@ -557,7 +603,17 @@ ${hiddenFields}
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+      // No form-action directive: this form's own action is hardcoded
+      // (never attacker-controlled), but *after* that same-origin POST
+      // succeeds, the server sends a 302 to the caller-supplied
+      // redirect_uri — a different origin by design, already validated
+      // server-side (isValidRedirectUri / registered-client exact match).
+      // Modern browsers apply form-action to that post-submission redirect
+      // too, not just the form's own action attribute, so form-action
+      // 'self' here doesn't add security — it silently breaks the OAuth
+      // redirect (observed live: clicking "Authorize" did nothing, because
+      // the browser blocked following the 302 to chatgpt.com).
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
     },
   });
 }
@@ -598,7 +654,13 @@ async function handleOAuthAuthorizeRoute(request, env) {
   if (request.method !== "GET" && request.method !== "POST") {
     return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
   }
-  if (!checkOriginAllowSelf(request)) return new Response("forbidden", { status: 403 });
+  // No Origin/Referer check here, unlike the other OAuth/MCP routes: this
+  // endpoint has no ambient credential for a cross-site page to ride along
+  // on (no cookie/session — owner_token only ever travels because the user
+  // typed it into this page's own form), so Origin gating adds no real CSRF
+  // protection, only false positives. Real browsers are inconsistent about
+  // what Origin (if any — including the literal string "null") they send on
+  // this same-origin form POST, which is exactly what broke it before.
 
   let resourceParam = "";
   if (request.method === "GET") {
@@ -620,7 +682,13 @@ async function handleOAuthAuthorizeRoute(request, env) {
 
 async function handleOAuthTokenRoute(request, env) {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-  if (!checkOrigin(request)) return new Response("forbidden", { status: 403 });
+  // No Origin check — same reasoning as handleOAuthAuthorizeRoute. The
+  // credential here is `code`+`code_verifier` (PKCE) or a refresh token,
+  // never a cookie/session, so there's no ambient authority for Origin
+  // gating to protect against. A real OAuth client's token exchange can
+  // legitimately come from any origin (its own backend, a browser context
+  // on a domain we can't enumerate in advance) — Origin-checking this route
+  // only produces false-positive 403s, not real protection.
   const parsed = await parseOAuthForm(request.clone(), MAX_REQUEST_BYTES);
   if (parsed.tooLarge) return oauthError("invalid_request", "payload too large", 413);
   if (parsed.unsupportedMediaType) return oauthError("invalid_request", "expected application/x-www-form-urlencoded", 415);
@@ -642,7 +710,10 @@ async function handleOAuthTokenRoute(request, env) {
  *  hub via BridgeDO.getOAuthClient() (see there for why). */
 async function handleOAuthRegisterRoute(request, env) {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-  if (!checkOrigin(request)) return new Response("forbidden", { status: 403 });
+  // No Origin check — DCR is, by design, meant to be callable by any OAuth
+  // client software from anywhere (that's the point of *dynamic*
+  // registration); there's no ambient credential here at all, so Origin
+  // gating would only ever produce false positives, never real protection.
   const stub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(HUB_DO_NAME));
   const forwardUrl = new URL(request.url);
   forwardUrl.pathname = "/oauth-register";

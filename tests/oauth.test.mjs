@@ -949,44 +949,84 @@ describe("Phase 3: GET /oauth/authorize consent form + Dynamic Client Registrati
     assert.ok((await tokenRes.json()).access_token);
   });
 
-  test("the consent form's same-origin POST back to /oauth/authorize is not blocked by Origin checking, but a genuinely different disallowed Origin still is", async () => {
+  // Regression: POST /oauth/authorize used to be gated by an Origin check
+  // (checkOriginAllowSelf), which broke real-world browser submissions of
+  // the consent form — observed live as a 403 "forbidden" when a real
+  // browser posted the form back to this same page. Real browsers are
+  // inconsistent about the Origin header on this same-origin submission,
+  // including sending the literal string "null" in some circumstances,
+  // which the old same-origin check didn't account for. There's no ambient
+  // credential (cookie/session) here for a cross-site page to ride along
+  // on — owner_token only travels because the user typed it into this
+  // page's own form — so Origin gating added no real CSRF protection here
+  // and was removed entirely rather than special-cased further.
+  test("POST /oauth/authorize is not blocked regardless of Origin — absent, same-origin, the literal string \"null\", or a third-party origin", async () => {
     const { env, gptToken } = setup();
-    const { challenge } = await pkcePair();
 
-    const sameOrigin = await worker.fetch(
-      formReq(
-        "/oauth/authorize",
-        {
+    for (const origin of [undefined, ORIGIN, "null", "https://evil.example"]) {
+      const { challenge } = await pkcePair();
+      const res = await worker.fetch(
+        formReq(
+          "/oauth/authorize",
+          {
+            resource: RESOURCE,
+            client_id: CLIENT_ID,
+            redirect_uri: REDIRECT_URI,
+            response_type: "code",
+            code_challenge: challenge,
+            code_challenge_method: "S256",
+            owner_token: gptToken,
+          },
+          origin === undefined ? {} : { origin },
+        ),
+        env,
+      );
+      assert.equal(res.status, 302, `origin=${origin} should not be blocked`);
+    }
+  });
+
+  // Regression: /oauth/token and /oauth/register also used to be gated by
+  // checkOrigin() (same class of bug as /oauth/authorize above) — a real
+  // OAuth client's token exchange or dynamic client registration can
+  // legitimately arrive from an Origin outside ALLOWED_ORIGINS (its own
+  // backend, or a browser context on a domain we can't enumerate), and
+  // DCR in particular is supposed to be callable by anyone. Neither route
+  // has an ambient credential for Origin-gating to protect, so both checks
+  // were removed.
+  test("POST /oauth/token and POST /oauth/register are not blocked regardless of Origin", async () => {
+    const { env, gptToken } = setup();
+
+    for (const origin of [undefined, ORIGIN, "null", "https://evil.example"]) {
+      const extraHeaders = origin === undefined ? {} : { origin };
+
+      const registerRes = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI] }, extraHeaders), env);
+      assert.equal(registerRes.status, 201, `register with origin=${origin} should not be blocked`);
+      const { client_id: clientId } = await registerRes.json();
+
+      const { verifier, challenge } = await pkcePair();
+      const authRes = await worker.fetch(
+        formReq("/oauth/authorize", {
           resource: RESOURCE,
-          client_id: CLIENT_ID,
+          client_id: clientId,
           redirect_uri: REDIRECT_URI,
           response_type: "code",
           code_challenge: challenge,
           code_challenge_method: "S256",
           owner_token: gptToken,
-        },
-        { origin: ORIGIN }, // exactly what a real browser sends posting this Worker's own consent form back to itself
-      ),
-      env,
-    );
-    assert.equal(sameOrigin.status, 302);
+        }),
+        env,
+      );
+      const code = codeFromRedirect(authRes).searchParams.get("code");
 
-    const disallowedOrigin = await worker.fetch(
-      formReq(
-        "/oauth/authorize",
-        {
-          resource: RESOURCE,
-          client_id: CLIENT_ID,
-          redirect_uri: REDIRECT_URI,
-          response_type: "code",
-          code_challenge: challenge,
-          code_challenge_method: "S256",
-          owner_token: gptToken,
-        },
-        { origin: "https://evil.example" },
-      ),
-      env,
-    );
-    assert.equal(disallowedOrigin.status, 403);
+      const tokenRes = await worker.fetch(
+        formReq(
+          "/oauth/token",
+          { grant_type: "authorization_code", code, client_id: clientId, redirect_uri: REDIRECT_URI, resource: RESOURCE, code_verifier: verifier },
+          extraHeaders,
+        ),
+        env,
+      );
+      assert.equal(tokenRes.status, 200, `token exchange with origin=${origin} should not be blocked`);
+    }
   });
 });
