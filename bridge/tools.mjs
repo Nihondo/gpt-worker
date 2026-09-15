@@ -34,9 +34,9 @@ function rgAvailable() {
   return rgAvailableCache;
 }
 
-/** Return a safe public identity for a github.com remote, never its URL.
- *  Credential-bearing, enterprise and malformed remotes deliberately return
- *  null so workspace_info cannot expose or misidentify them. */
+/** Return a safe public identity and canonical public URL for a github.com
+ *  remote. Credential-bearing, enterprise and malformed remotes deliberately
+ *  return null so workspace_info cannot expose or misidentify them. */
 export function parseGitHubRemote(rawUrl) {
   if (!rawUrl || /[?#]/.test(rawUrl)) return null;
   let match = rawUrl.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/);
@@ -51,7 +51,13 @@ export function parseGitHubRemote(rawUrl) {
     }
   }
   if (!match || !match[1] || !match[2]) return null;
-  return { provider: "github", owner: match[1], name: match[2], host: "github.com" };
+  return {
+    provider: "github",
+    owner: match[1],
+    name: match[2],
+    host: "github.com",
+    url: `https://github.com/${match[1]}/${match[2]}`,
+  };
 }
 
 export class WorkspaceTools {

@@ -4,7 +4,7 @@
     {
       "name": "workspace_info",
       "title": "Workspace info",
-      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. When a safe github.com remote is configured, repository includes its sanitized owner/name, local HEAD commit and branch. If a GitHub connector is available, use it only for a clean tracked file after matching repository and commit SHA; otherwise use this local workspace as authoritative. Call this first to confirm which workspace this connector is bound to.",
+      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. When a safe github.com remote is configured, repository includes its sanitized owner/name, canonical public URL, local HEAD commit and branch. If a GitHub connector is available, use it only for a clean tracked file after matching repository and commit SHA; otherwise use this local workspace as authoritative. Call this first to confirm which workspace this connector is bound to.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "local",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }

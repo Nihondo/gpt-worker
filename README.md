@@ -1,46 +1,56 @@
-# gpt-worker
+# gpt-worker User Manual
 
-Inspired by [XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt), **gpt-worker** is a compact development workflow tool built with Cloudflare Workers, macOS, and Google Chrome.
+**gpt-worker** is a developer workflow tool that pairs the web version of ChatGPT (Plus, Team, Pro) as your planning and review "brain" with a local coding agent (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files, run tests, and manage Git.
 
-It uses your ChatGPT subscription (web browser) as the planning-and-review "brain" for coding tasks, while a local coding agent (such as Claude Code, Antigravity, or yourself) acts as the execution "hands" with full ownership of file edits, shell commands, git operations, and tests. It operates without consuming ChatGPT API tokens, letting you integrate ChatGPT's advanced reasoning into your daily terminal workflow.
+It brings ChatGPT's advanced web reasoning into your daily coding loop without consuming any ChatGPT API tokens.
 
 ```text
-ChatGPT Project ── MCP over HTTPS ──> Shared Hub (CF Workers) ──> Selected Workspace ──> Local Bridge
+[ChatGPT Project] ──(MCP / HTTPS)──> [Cloudflare Worker (Shared Hub)] ──(WebSocket)──> [Local Environment (Bridge)]
 ```
 
 ---
 
-## 🎯 Features & Capabilities
+## Key Features
 
-- **Zero API Token Costs**: Powered by your ChatGPT web subscription (Plus, Team, Pro), eliminating per-token API billing.
-- **One Shared Hub for All Workspaces**: Deploy a single Cloudflare Worker hub once. You register the MCP Connector and create a ChatGPT Project only once. Every subsequent project (workspace) is added instantly via a single local CLI command.
-- **Safe & Sandboxed Execution**: ChatGPT never modifies local files directly. It only inspects workspace files through read-only tools to generate a plan (PLAN). The local agent inspects and validates the plan before executing edits or commands.
-- **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, and `.aws` are automatically blocked from ChatGPT's inspection tools.
-- **Git-Ignore Aware File Access**: Git-ignored files are hidden from MCP browsing and search, and require an owner-controlled exact-file exception for direct reads.
-- **Seamless macOS & Chrome Integration**: Automatically opens the ChatGPT Project in Google Chrome when a task is queued, and can even auto-submit it in the background — no window focus change — when reusing that workspace's tab (`--auto-enter`).
-- **Zero Runtime Dependencies**: Built entirely using Node.js built-in modules without bloated external npm packages or heavy daemon requirements.
+- **Zero API Costs**: Powered by your existing ChatGPT web subscription (Plus, Team, Pro) with no per-token API charges.
+- **One-Time Setup Hub**: Deploy the relay Cloudflare Worker and configure ChatGPT once. Every subsequent project is added instantly with a single local command.
+- **Safe Read-Only Design**: ChatGPT only inspects files and generates plans. File modifications and command executions are always reviewed and run locally.
+- **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT.
+- **Chrome Automation**: Automatically opens the ChatGPT Project in Chrome when a task is queued, and can submit messages in the background without stealing window focus.
+- **Zero Extra Dependencies**: Built purely with standard Node.js built-ins. No bulky npm packages or heavy daemons to install.
 
 ---
 
-## 🛠 Setup & Installation
-
-### Prerequisites
+## Prerequisites
 
 - **OS**: macOS (for automated Chrome integration)
-- **Node.js**: v22 or higher
-- **Cloudflare Account**: Free tier is sufficient (used to deploy the Worker via Wrangler)
+- **Node.js**: v22 or higher (install with `brew install node` if not present)
 - **Google Chrome**: Browser used to run ChatGPT
-- **ChatGPT Subscription**: Plus, Team, or Pro account with Developer mode (MCP Connectors) and Projects enabled
+- **ChatGPT Subscription**: Plus, Team, or Pro (with Developer mode and Projects enabled)
+- **Cloudflare Account**: Free tier is sufficient (used to deploy the relay Worker)
 
-### Step 1: Symlink the CLI Binary
+---
 
-Add the `gpt-worker` command to your `PATH`:
+## Initial Setup (One-Time)
 
-```bash
-ln -s ~/.agents/skills/gpt-worker/bin/gpt-worker ~/.local/bin/gpt-worker
-```
+Setup takes 4 steps. Once completed, the same configuration is reused across all your projects.
 
-### Step 2: Initial Provisioning (Deploy Worker & Register Workspace)
+### Step 1: Clone the Repository & Link the Command
+
+1. Clone the repository into any working directory:
+   ```bash
+   git clone https://github.com/Nihondo/gpt-worker.git
+   cd gpt-worker
+   ```
+
+2. Create a symlink in a directory that is in your `PATH` (such as Homebrew's bin):
+   ```bash
+   # Link into Homebrew's bin directory (/opt/homebrew/bin on Apple Silicon):
+   ln -s "$(pwd)/bin/gpt-worker" "$(brew --prefix)/bin/gpt-worker"
+   ```
+   > **Tip**: On Apple Silicon Macs, you can link directly to `/opt/homebrew/bin/gpt-worker` (or `/usr/local/bin` on Intel Macs). Using `$(brew --prefix)/bin` automatically resolves the correct path for your system. Any directory in your `PATH` (e.g. `~/.local/bin`) works as well.
+
+### Step 2: Initialize & Deploy the Worker
 
 Run `init` targeting your first project directory:
 
@@ -48,23 +58,24 @@ Run `init` targeting your first project directory:
 gpt-worker init -w /path/to/your-project
 ```
 
-- *Note*: On the first run, if Cloudflare is not already logged in, a browser window will open for Wrangler authentication. Once logged in, the Worker deploys automatically and provisions your shared MCP Connector.
-- Copy the displayed `Shared MCP URL: https://...` (you can also view it anytime with `gpt-worker url`).
+- On the first run, a browser window opens for Cloudflare login.
+- Once authenticated, the Cloudflare Worker deploys automatically.
+- Note the `Server URL` printed in the terminal (you can check it anytime with `gpt-worker url`).
 
-### Step 3: ChatGPT Configuration (One-Time Setup)
+### Step 3: Configure ChatGPT
 
 1. **Enable Developer Mode**:
-   - In ChatGPT, open Settings (bottom-left) → **Developer mode** → toggle ON.
+   - In ChatGPT, click your profile (bottom-left) → **Settings** → **Developer mode** and toggle it ON.
 2. **Add MCP Connector**:
-   - Go to Settings → **Connectors** (or Developer mode) and add a new connector:
+   - Go to **Settings** → **Connectors** (or Developer mode settings) and add a new connector.
    - **Name**: `gpt-worker`
-   - **Server URL**: From `gpt-worker url`
-   - **Authentication**: `OAuth`. ChatGPT registers itself and shows a consent page; enter the owner token printed by `gpt-worker url` there (it's never embedded in the URL). Rotate it anytime with `gpt-worker rotate --hub`.
+   - **Server URL**: The URL printed by `gpt-worker url`
+   - **Authentication**: Select `OAuth`. When the consent page appears, enter the owner token printed by `gpt-worker url` to approve it.
 3. **Create a ChatGPT Project**:
-   - Create a new Project in ChatGPT (e.g., `Coding Assistant`).
+   - In ChatGPT's left sidebar, create a **New Project** (e.g., `Coding Assistant`).
    - We recommend enabling **Project-only memory** in the project settings.
-4. **Configure Project Instructions**:
-   - Paste the following instructions into your ChatGPT Project Instructions:
+4. **Set Project Instructions**:
+   - Paste the following instructions into the project's **Instructions** field:
 
 ```text
 You are the planning and review layer. A local coding agent executes changes.
@@ -79,182 +90,152 @@ inspect the workspace through the connector, then call submit_plan with the
 same workspace_id.
 ```
 
-### Step 4: Save the ChatGPT Project URL (Recommended)
+### Step 4: Register the Project URL
 
-Save your ChatGPT Project URL (from your browser's address bar) in the CLI:
+Save your ChatGPT Project URL (from the browser address bar `https://chatgpt.com/g/...`) into the CLI:
 
 ```bash
 gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
 ```
 
-- This command sets the shared default Project URL. A workspace uses it unless you set its optional override:
-
-```bash
-gpt-worker chat-url "https://chatgpt.com/g/g-p-workspace/project" -w /path/to/project
-gpt-worker chat-url --clear -w /path/to/project  # return to the shared default
-```
-
-- With `--auto-enter`, Chrome automatically submits the task prompt when opened. Each workspace has its own reusable Chrome tab, scoped to its effective Project URL (its override, or the shared default). After its first message creates a ChatGPT conversation, later `task` and `report` rounds add their continuation to **that same conversation**; they do not navigate the reused tab back to the Project landing page or create another conversation. **When that tab is reused, preparation and submission happen entirely in the background** — they never move keyboard focus or interrupt whatever you're doing in another window. The first run for a workspace (or after its tab was closed) instead creates a new Chrome window, which — like any new window in any app — does come to the front; only the reuse path stays in the background. Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. `--auto-enter`, `--no-auto-enter`, and `--enter-delay` remain machine-wide settings.
-- Reusing an existing conversation requires Chrome's **View → Developer → Allow JavaScript from Apple Events**, then a Chrome relaunch (a one-time setup step; off by default): gpt-worker uses it to put the continuation into that conversation's composer, and uses it again for `--auto-enter` submission. There is no keystroke-based fallback. If the setting is unavailable, or the composer already has an unsent draft, gpt-worker leaves the existing conversation unchanged and explains what to do instead.
-
-Use `show-config` to inspect these browser-facing settings without exposing connector or workspace credentials:
-
-```bash
-gpt-worker show-config
-gpt-worker show-config -w /path/to/project
-```
-
-The global view lists the shared default and each provisioned workspace's override and effective URL. A workspace view shows only that workspace's resolution. When a workspace has no reusable tab, gpt-worker opens its Project in a new Chrome window without explicitly activating Chrome; later task/report rounds reuse that workspace's tab in the window. The final focus behavior remains subject to Chrome and macOS window-management behavior.
+With `--auto-enter`, Chrome will automatically prepare and submit the prompt when tasks are queued.
 
 ---
 
-## 🚀 Quickstart
+## Daily Usage (Workflow Cycle)
 
-Once setup is complete, you can start a task in just a few steps:
-
-```bash
-# 1. Start the local bridge process
-gpt-worker start -w .
-
-# 2. Queue a new goal for ChatGPT
-gpt-worker task "Fix the validation error styling on the login page" -w .
-
-# 3. Wait for ChatGPT to create a plan (PLAN)
-gpt-worker wait -w .
-```
-
-When ChatGPT submits its plan, `wait` exits and prints the plan in your terminal.
-
-```bash
-# 4. Modify code, run tests, and report results back to ChatGPT
-gpt-worker report --changed 2 --tests "All 8 tests passing" -w .
-
-# 5. Wait for ChatGPT's review / completion check
-gpt-worker wait -w .
-```
-
-When ChatGPT determines the task is complete (`DONE`), the cycle finishes!
-
----
-
-## 📖 Basic Usage
-
-Development follows an iterative cycle: **"Task (`task`) → Wait (`wait`) → Execute locally → Report (`report`) → Wait (`wait`)"**.
+Development follows an iterative cycle: **"Task (`task`) → Wait (`wait`) → Edit & Test → Report (`report`) → Review (`wait`)"**.
 
 ```text
-[You / Local Agent]                       [ChatGPT]
-        │                                     │
-        │── 1. gpt-worker task "<goal>" ────>│
-        │                                     │ (Inspects workspace & drafts PLAN)
-        │<── 2. gpt-worker wait (PLAN) ───────│
-        │                                     │
- (Edit files & run tests locally)             │
-        │                                     │
-        │── 3. gpt-worker report ────────────>│
-        │                                     │ (Reviews diff & verifies tests)
-        │<── 4. gpt-worker wait (DONE / next) │
+[You / Local Agent]                             [ChatGPT]
+        │                                           │
+        │── 1. gpt-worker task "<goal>" ───────────>│
+        │                                           │ (Inspects repo & drafts plan)
+        │<── 2. gpt-worker wait (Receive PLAN) ─────│
+        │                                           │
+   (Edit code & run tests locally)                  │
+        │                                           │
+        │── 3. gpt-worker report ──────────────────>│
+        │                                           │ (Reviews diff & verifies tests)
+        │<── 4. gpt-worker wait (DONE or next step) │
 ```
 
-### 1. Start & Check the Bridge
-Before starting, ensure the local bridge is running for your workspace:
+### 1. Start the Bridge Process
+Before starting work, ensure the local bridge process is running for your workspace:
+
 ```bash
-gpt-worker start -w /path/to/project
-gpt-worker status -w /path/to/project
+gpt-worker start -w .
+gpt-worker status -w .
 ```
 
 ### 2. Queue a Task (`task`)
 Describe your goal in natural language:
+
 ```bash
-gpt-worker task "Add cache headers to the API response" -w /path/to/project
+gpt-worker task "Fix the validation error styling on the login page" -w .
 ```
-If `chat-url` is configured, Chrome opens your ChatGPT Project with the task prompt prepared (and auto-submitted if `--auto-enter` is enabled). Once the workspace has a conversation tab, later continuations are added to that same conversation.
+Chrome opens your ChatGPT Project, and the task prompt is automatically entered and submitted.
 
 ### 3. Wait for the Plan (`wait`)
-ChatGPT inspects the project files via MCP tools and generates an actionable plan:
-```bash
-gpt-worker wait -w /path/to/project
-```
-Review the received plan to ensure there are no suspicious actions or out-of-scope edits.
+ChatGPT inspects workspace files and prepares a plan:
 
-### 4. Execute Changes and Test
-Your local agent (or you) modifies code and executes test suites locally.
+```bash
+gpt-worker wait -w .
+```
+When received, the plan is printed in the terminal. Review it to ensure it is sound and safe.
+
+### 4. Execute Changes & Run Tests
+Your local agent (Claude Code, Antigravity, etc.) or you modify the code and run your test suite locally.
 
 ### 5. Report Results (`report`)
-Send execution metrics and test outcomes back to ChatGPT for review:
-```bash
-gpt-worker report -w /path/to/project --changed 3 --tests "npm test: 15 passed"
-```
-Run `gpt-worker wait -w /path/to/project` again to receive ChatGPT's review response (either a follow-up task or `DONE`).
+Report modified file counts and test results back to ChatGPT:
 
-### 6. Stop the Bridge
-When finished, shut down the local bridge daemon:
 ```bash
-gpt-worker stop -w /path/to/project
+gpt-worker report --changed 2 --tests "All 8 tests passing" -w .
+```
+
+### 6. Receive Review Results (`wait`)
+Run `wait` again to receive ChatGPT's evaluation:
+
+```bash
+gpt-worker wait -w .
+```
+If ChatGPT determines the goal is achieved (`DONE`), you are finished! If there are follow-up instructions, repeat from step 4.
+
+### 7. Stop the Bridge Process
+When finished, stop the local bridge process:
+
+```bash
+gpt-worker stop -w .
 ```
 
 ---
 
-## 💡 Recipes & Use Cases
+## Common Tasks & Recipes
 
-### Adding a Second (or Nth) Workspace
-No need to redeploy the Cloudflare Worker or reconfigure ChatGPT! Simply run `init` in the new project directory:
+### Adding Another Project
+No need to redeploy the Worker or reconfigure ChatGPT. Simply run `init` in the new directory:
 
 ```bash
 gpt-worker init -w /path/to/another-project
 ```
 
-ChatGPT will automatically see the new workspace via its `list_workspaces` tool.
-
-### Configuring Project-Specific Rules (`guidance`)
-You can store persistent standing guidance (such as "Always use Vitest" or "Enforce strict TypeScript"):
+### Setting Project-Specific Guidelines (`guidance`)
+Set standing rules for ChatGPT (e.g., "Always use Vitest", "Enforce strict TypeScript"):
 
 ```bash
 # Set standing guidance
 gpt-worker guidance "Always write tests in Vitest. Prefer functional components." -w .
 
-# Inspect current guidance
+# View current guidance
 gpt-worker guidance -w .
 
 # Clear guidance
 gpt-worker guidance --clear -w .
 ```
 
-### Allowing One Git-Ignored File to Be Read
-Git-ignored files are hidden from listing and search and cannot normally be read through MCP. The workspace owner can allow one existing file for direct reads only:
+### Allowing a Specific Git-Ignored File to Be Read
+Files listed in `.gitignore` are hidden from ChatGPT by default. You can explicitly allow direct reads for a specific file:
 
 ```bash
-# Allow one exact workspace-relative file
-gpt-worker allow-read local/example-fixture.json -w .
+# Allow one exact file
+gpt-worker allow-read config/test-fixture.json -w .
 
-# Inspect exceptions
+# List allowed files
 gpt-worker allow-list -w .
 
-# Remove an exception (works even if the file was deleted)
-gpt-worker deny-read local/example-fixture.json -w .
+# Revoke permission
+gpt-worker deny-read config/test-fixture.json -w .
+```
+*Note*: Sensitive files (like `.env` or private keys) remain protected and cannot be unblocked.
+
+### Inspecting Configuration
+Inspect configured Project URLs and auto-submit preferences:
+
+```bash
+gpt-worker show-config -w .
 ```
 
-Exceptions are stored in private local state outside the repository. They do not expose the file in directory listings or search results, and can never override sensitive-file protection.
-
-### Viewing All Provisioned Workspaces
+### Listing Registered Workspaces
 List all workspaces registered on this machine and their bridge statuses:
 
 ```bash
 gpt-worker workspaces
 ```
 
-### Handling Timeouts & Interrupted Tasks (`state`)
-The default timeout for `wait` is 15 minutes. If a timeout occurs or if you need to check the active task state:
+### Resuming After a Timeout
+The default timeout for `wait` is 15 minutes. If a timeout occurs, you can resume waiting without re-submitting the task:
 
 ```bash
-# Check current active checkpoint state (JSON)
+# Check current task state
 gpt-worker state -w .
 
-# Resume waiting (no need to re-issue the task)
+# Resume waiting
 gpt-worker wait -w .
 ```
 
-### Removing a Workspace
-To unregister a workspace and purge both local state and remote Worker records:
+### Deregistering a Workspace
+To remove a project and purge its records from the local machine and remote Worker:
 
 ```bash
 gpt-worker remove -w /path/to/project --yes
@@ -262,60 +243,52 @@ gpt-worker remove -w /path/to/project --yes
 
 ---
 
-## ⚠️ Important Notes & Security
+## Troubleshooting & Safety
 
-- **Keep the Shared MCP URL Private**:
-  The MCP URL contains a long random authentication token. Do not share it publicly.
-- **Local Configuration & Token Security**:
-  Configuration files (`~/.config/gpt-worker/worker.json` and `~/.local/state/gpt-worker/`) store authentication tokens. Permissions are automatically set to `0700` (directories) and `0600` (files). Do not commit them to Git or modify them manually.
-- **Validate Plans Locally**:
-  Treat ChatGPT's PLAN output as untrusted input. The local agent should verify that the plan does not attempt out-of-bounds file writes, credential exfiltration, unexpected external network commands (`curl`), or unauthorized `git push`.
-- **Automatic Secret File Blocking**:
-  Files like `.env`, private keys, `.ssh`, and `.aws` are always blocked from ChatGPT's inspection tools.
-- **Git-Ignored File Blocking**:
-  In Git workspaces, files ignored by Git are hidden from MCP browsing and search. `allow-read` grants direct access to one exact file only. Non-Git workspaces retain the previous behavior.
-- **Optional GitHub Connector Use**:
-  If ChatGPT has a GitHub connector, it may use GitHub only as a supplement for a clean tracked file after the repository and local HEAD commit SHA match. Local files remain authoritative for changes, SHA mismatches, generated/LFS/submodule files, or any GitHub access failure. gpt-worker never stores or forwards GitHub credentials.
-- **Access Granted Only During Active Tasks**:
-  ChatGPT can only read workspace files while an active task exists (unless the bridge is started with `--always-allow`).
-- **Cloudflare Workers Free Tier**:
-  All communication consists of lightweight WebSocket and HTTPS requests, easily staying well within Cloudflare Workers' free limit (100,000 requests/day).
+### Chrome Auto-Submit Not Working
+To allow background script execution in an existing tab:
+
+1. In Chrome, open **View** → **Developer** → check **Allow JavaScript from Apple Events**.
+2. **Relaunch Chrome completely**.
+3. If an unsent draft already exists in the ChatGPT input box, auto-submission pauses to prevent accidental overwrite. Clear or submit the draft and try again.
+
+### Safety Guarantees
+- **Plan Review**: Always verify the plan generated by ChatGPT before execution. Check for unwanted file deletions or unexpected external commands.
+- **Secret Blocking**: `.env`, private keys, `.ssh`, and `.aws` are always blocked from ChatGPT read requests.
+- **Time-Bounded Access**: ChatGPT can only inspect workspace files while an active task is running.
 
 ---
 
-## 📋 Command Reference
+## Command Reference
 
-| Command | Purpose |
+| Command | Description |
 |---|---|
 | `gpt-worker init -w <dir>` | Register workspace (deploys Worker on first run) |
-| `gpt-worker url [-w <dir>]` | Print the secret-free OAuth Server URL and its resource-owner token (shared, or `-w <dir>`'s own workspace) for the ChatGPT connector. `--oauth` remains an accepted alias. |
-| `gpt-worker workspaces` | List provisioned workspaces and bridge status |
-| `gpt-worker start -w <dir> [--always-allow]` | Start local bridge daemon |
-| `gpt-worker stop -w <dir>` | Stop local bridge daemon |
-| `gpt-worker status -w <dir>` | Check bridge status, Worker connection, and task state |
-| `gpt-worker task "<goal>" -w <dir> [--force]` | Queue a new task (`--force` overwrites active task) |
-| `gpt-worker wait -w <dir> [--timeout <sec>]` | Wait for ChatGPT response (PLAN / DONE / BLOCKED) |
-| `gpt-worker report -w <dir> --changed <n> --tests "<summary>"` | Submit task execution results to ChatGPT |
-| `gpt-worker state -w <dir>` | Display active task checkpoint state (JSON) |
-| `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues |
-| `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Save or inspect the shared default Project URL, or an optional workspace override; `--clear -w` restores the default |
-| `gpt-worker show-config [-w <dir>]` | Show safe browser-facing settings, including default, override, and effective Project URLs; never prints credentials |
-| `gpt-worker guidance [<text>] -w <dir> [--clear]` | Set, inspect, or clear trusted standing guidance |
-| `gpt-worker allow-read <file> -w <dir>` | Allow direct MCP reads of one exact Git-ignored file |
-| `gpt-worker deny-read <file> -w <dir>` | Remove a direct-read exception |
-| `gpt-worker allow-list -w <dir>` | List direct-read exceptions |
-| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate one workspace's authentication tokens |
-| `gpt-worker rotate --hub` | Rotate the shared connector's machine-wide token |
-| `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge local/remote state |
+| `gpt-worker url [-w <dir>]` | Display the secret-free Server URL and authentication token |
+| `gpt-worker start -w <dir>` | Start the local bridge process |
+| `gpt-worker stop -w <dir>` | Stop the local bridge process |
+| `gpt-worker status -w <dir>` | Check bridge process status and active task |
+| `gpt-worker task "<goal>" -w <dir>` | Queue a new task for ChatGPT |
+| `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
+| `gpt-worker report -w <dir>` | Submit execution metrics and test results to ChatGPT |
+| `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
+| `gpt-worker chat-url "<url>" -w <dir>` | Save or inspect ChatGPT Project URL |
+| `gpt-worker show-config [-w <dir>]` | Display browser settings without credentials |
+| `gpt-worker allow-read <file> -w <dir>` | Allow reading a specific Git-ignored file |
+| `gpt-worker allow-list -w <dir>` | List allowed Git-ignored files |
+| `gpt-worker deny-read <file> -w <dir>` | Revoke reading permission for a file |
+| `gpt-worker state -w <dir>` | Display active task checkpoint in JSON |
+| `gpt-worker workspaces` | List all registered workspaces |
+| `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge records |
 
 ---
 
-## 💻 Development
+## Development
 
 To run tests or deploy updates to gpt-worker itself:
 
 ```bash
-npm run check    # Run static checks
+npm run check    # Run syntax checks
 npm test         # Run test suites
 npm run verify   # Run check and tests
 npm run dry-run  # Dry-run Worker deployment
@@ -324,8 +297,6 @@ npm run deploy   # Deploy Cloudflare Worker updates
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
-This project was heavily inspired by **[XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt)**, which pioneered the approach of using ChatGPT's web subscription as the reasoning brain for coding agents.
-
-Special thanks to XiaoDuoYa for creating and sharing such an innovative idea and open-source foundation.
+This project was heavily inspired by **[XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt)**, which pioneered the approach of using ChatGPT's web subscription as the reasoning brain for coding agents. Special thanks to XiaoDuoYa for this innovative concept and open-source contribution.

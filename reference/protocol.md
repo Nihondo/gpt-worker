@@ -113,7 +113,7 @@ reason and waits.
 
 ## Optional GitHub connector use
 
-`workspace_info` returns a `repository` object only when the local remote is a safely normalized `github.com` repository.
+`workspace_info` returns a `repository` object only when the local remote is a safely normalized `github.com` repository. Its `url` is the canonical credential-free public URL (`https://github.com/<owner>/<name>`); the configured remote URL itself is never returned.
 
 If a GitHub connector is available in the ChatGPT session, it may supplement local inspection only after its repository identity and commit SHA match `repository.owner`, `repository.name`, and `repository.headCommit`.
 

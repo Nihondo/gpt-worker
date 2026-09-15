@@ -240,10 +240,10 @@ describe("WorkspaceTools: project overview", () => {
 describe("GitHub repository identity", () => {
   test("normalizes only safe github.com remote forms", () => {
     assert.deepEqual(parseGitHubRemote("https://github.com/acme/widget.git"), {
-      provider: "github", owner: "acme", name: "widget", host: "github.com",
+      provider: "github", owner: "acme", name: "widget", host: "github.com", url: "https://github.com/acme/widget",
     });
     assert.deepEqual(parseGitHubRemote("git@github.com:acme/widget.git"), {
-      provider: "github", owner: "acme", name: "widget", host: "github.com",
+      provider: "github", owner: "acme", name: "widget", host: "github.com", url: "https://github.com/acme/widget",
     });
     for (const remote of [
       "https://token@github.com/acme/widget.git",
@@ -264,6 +264,7 @@ describe("GitHub repository identity", () => {
       owner: "acme",
       name: "widget",
       host: "github.com",
+      url: "https://github.com/acme/widget",
       remote: "origin",
       headCommit: info.git.commit,
       branch: info.git.branch,
