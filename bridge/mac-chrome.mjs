@@ -114,19 +114,27 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
   // of trusting one fixed delay.
   const RETRY_INTERVAL_SEC = 0.4;
   const MAX_RETRY_ATTEMPTS = 8;
+  // A single "execute ... javascript" error is not proof the Apple Events
+  // permission is off — a tab mid-navigation can throw too — so errors get
+  // a couple of retries of their own rather than aborting the whole loop
+  // on the first one. Genuinely missing permission fails the same way on
+  // every attempt, so this still bails quickly (no meaningful added
+  // latency) for the common case of a user who never enabled it.
+  const MAX_JS_ERRORS = 2;
   const submitStep = autoEnter
     ? `
       delay ${(enterDelayMs / 1000).toFixed(2)}
       set submitOutcome to "PENDING"
-      set jsAvailable to true
+      set jsErrorCount to 0
       set attemptCount to 0
-      repeat while submitOutcome is not "CLICKED" and jsAvailable and attemptCount < ${MAX_RETRY_ATTEMPTS}
+      repeat while submitOutcome is not "CLICKED" and jsErrorCount < ${MAX_JS_ERRORS} and attemptCount < ${MAX_RETRY_ATTEMPTS}
         try
           set submitOutcome to (execute selectedTab javascript "${safeClickJs}")
         on error
-          set jsAvailable to false
+          set submitOutcome to "JS_ERROR"
+          set jsErrorCount to jsErrorCount + 1
         end try
-        if submitOutcome is not "CLICKED" and jsAvailable then
+        if submitOutcome is not "CLICKED" then
           delay ${RETRY_INTERVAL_SEC}
         end if
         set attemptCount to attemptCount + 1

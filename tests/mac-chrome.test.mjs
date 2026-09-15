@@ -98,10 +98,17 @@ describe("autoEnter submit step", () => {
     assert.match(script, /if submitOutcome is not "CLICKED" then\s*\n\s*tell application "System Events" to keystroke return/);
   });
 
-  test("falls back to keystroke immediately (no more retries) once execute javascript itself errors", () => {
+  test("tolerates a couple of execute-javascript errors as retryable (a mid-navigation tab can throw transiently) rather than bailing on the first one", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
-    assert.match(script, /on error\s*\n\s*set jsAvailable to false\s*\n\s*end try/);
-    assert.match(script, /repeat while submitOutcome is not "CLICKED" and jsAvailable and attemptCount < \d+/);
+    assert.match(script, /on error\s*\n\s*set submitOutcome to "JS_ERROR"\s*\n\s*set jsErrorCount to jsErrorCount \+ 1\s*\n\s*end try/);
+    assert.match(script, /repeat while submitOutcome is not "CLICKED" and jsErrorCount < \d+ and attemptCount < \d+/);
+  });
+
+  test("still falls back to keystroke once errors (not just disabled-button retries) are exhausted", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
+    const maxErrorsMatch = script.match(/jsErrorCount < (\d+)/);
+    assert.ok(maxErrorsMatch, "expected a jsErrorCount cap in the generated script");
+    assert.ok(Number(maxErrorsMatch[1]) >= 2, "a single transient error must not be treated as permanent");
   });
 });
 
