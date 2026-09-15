@@ -37,8 +37,31 @@ export function escapeForAppleScript(str) {
   return String(str).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-/** Normalize a saved ChatGPT Project landing URL into the only tab locations
- *  this workspace may reuse. Query/hash do not define project identity. */
+// A ChatGPT Project gizmo segment is "g-p-<32 lowercase hex chars>", with an
+// optional "-<human-readable-slug>" suffix that ChatGPT derives from the
+// Project's display name. That suffix is not stable: it changes when the
+// Project is renamed, and ChatGPT's own UI omits it entirely on some
+// navigation paths (e.g. reopening a conversation from the Project's
+// sidebar list lands on ".../g/g-p-<hash>/c/<id>" with no slug, even though
+// ".../g/g-p-<hash>-<slug>/c/<id>" is the same conversation). Only the
+// 32-hex-char id is the stable part.
+const GIZMO_SEGMENT_PATTERN = /^g-p-([0-9a-f]{32})(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$/i;
+
+/** The stable id inside a "g-p-<id>[-slug]" gizmo path segment, or null if
+ *  the segment doesn't look like that shape at all (callers fall back to
+ *  exact-segment matching in that case). */
+export function stableGizmoId(segment) {
+  const match = GIZMO_SEGMENT_PATTERN.exec(String(segment ?? ""));
+  return match ? match[1].toLowerCase() : null;
+}
+
+/** Normalize a saved ChatGPT Project landing URL into the tab locations this
+ *  workspace may reuse. Query/hash do not define project identity. Also
+ *  derives the slug-independent `gizmoId` (see stableGizmoId) when the URL
+ *  has the standard "g-p-<hash>[-slug]" shape, so matching survives a
+ *  Project rename or a slug-less ChatGPT navigation; `projectURL` /
+ *  `conversationPrefix` remain as an exact-segment fallback for URLs that
+ *  don't have that shape. */
 export function chatGptProjectScope(chatUrl) {
   try {
     const parsed = new URL(chatUrl);
@@ -47,6 +70,8 @@ export function chatGptProjectScope(chatUrl) {
     if (!match || !match[1]) return null;
     const projectBase = `${parsed.origin}/g/${match[1]}`;
     return {
+      origin: parsed.origin,
+      gizmoId: stableGizmoId(match[1]),
       projectURL: `${projectBase}/project`,
       conversationPrefix: `${projectBase}/c/`,
     };
@@ -62,6 +87,14 @@ export function matchesChatGptProjectScope(candidateUrl, scope) {
   if (!scope) return false;
   try {
     const candidate = new URL(candidateUrl);
+
+    if (scope.gizmoId && candidate.origin === scope.origin) {
+      const segMatch = candidate.pathname.replace(/\/+$/, "").match(/^\/g\/([^/]+)(?:\/(project|c\/([^/]+)))?$/);
+      if (segMatch && stableGizmoId(segMatch[1]) === scope.gizmoId && (segMatch[2] === "project" || segMatch[3])) {
+        return true;
+      }
+    }
+
     const normalized = candidate.origin + candidate.pathname;
     if (normalized === scope.projectURL) return true;
     if (!normalized.startsWith(scope.conversationPrefix)) return false;
@@ -106,6 +139,10 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
   const safeProjectURL = escapeForAppleScript(scope.projectURL);
   const safeConversationPrefix = escapeForAppleScript(scope.conversationPrefix);
   const safeSavedTabId = escapeForAppleScript(savedTabId);
+  // Slug-independent fast path (see stableGizmoId) — empty when the saved
+  // URL doesn't have the standard "g-p-<hash>[-slug]" shape, in which case
+  // the exact-segment check below is the only match path, same as before.
+  const safeStableGizmoPrefix = scope.gizmoId ? escapeForAppleScript(`${scope.origin}/g/g-p-${scope.gizmoId}`) : "";
   const safeClickJs = escapeForAppleScript(CLICK_SEND_BUTTON_JS);
   // Measured empirically: after navigating a tab to a ChatGPT Project URL
   // with a ?prompt= query, the page load + React hydration + prompt
@@ -149,6 +186,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
     set projectURL to "${safeProjectURL}"
     set conversationPrefix to "${safeConversationPrefix}"
     set savedTabID to "${safeSavedTabId}"
+    set stableGizmoPrefix to "${safeStableGizmoPrefix}"
     tell application "Google Chrome"
       set selectedTab to missing value
       set selectedWindow to missing value
@@ -158,18 +196,24 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
           repeat with t in tabs of w
             if ((id of t) as text) is savedTabID then
               set candidateURL to URL of t
-              set isProjectTab to candidateURL is projectURL or candidateURL starts with projectURL & "?" or candidateURL starts with projectURL & "#"
-              set isConversationTab to false
-              if candidateURL starts with conversationPrefix then
-                if (length of candidateURL) > (length of conversationPrefix) then
-                  set remainderURL to text ((length of conversationPrefix) + 1) thru -1 of candidateURL
-                  set firstRemainderCharacter to character 1 of remainderURL
-                  if firstRemainderCharacter is not "?" and firstRemainderCharacter is not "#" and firstRemainderCharacter is not "/" then
-                    set isConversationTab to true
+              set tabMatchesScope to false
+              if stableGizmoPrefix is not "" and candidateURL contains stableGizmoPrefix then
+                set tabMatchesScope to true
+              else
+                set isProjectTab to candidateURL is projectURL or candidateURL starts with projectURL & "?" or candidateURL starts with projectURL & "#"
+                set isConversationTab to false
+                if candidateURL starts with conversationPrefix then
+                  if (length of candidateURL) > (length of conversationPrefix) then
+                    set remainderURL to text ((length of conversationPrefix) + 1) thru -1 of candidateURL
+                    set firstRemainderCharacter to character 1 of remainderURL
+                    if firstRemainderCharacter is not "?" and firstRemainderCharacter is not "#" and firstRemainderCharacter is not "/" then
+                      set isConversationTab to true
+                    end if
                   end if
                 end if
+                if isProjectTab or isConversationTab then set tabMatchesScope to true
               end if
-              if isProjectTab or isConversationTab then
+              if tabMatchesScope then
                 set selectedTab to t
                 set selectedWindow to w
                 set selectedTabIndex to tabIndex

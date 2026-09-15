@@ -7,12 +7,26 @@ import {
   isChromeAutomationAvailable,
   matchesChatGptProjectScope,
   normalizeChromeTabId,
+  stableGizmoId,
 } from "../bridge/mac-chrome.mjs";
 
 const projectURL = "https://chatgpt.com/g/g-p-example-gpt-worker/project";
 const scope = {
+  origin: "https://chatgpt.com",
+  gizmoId: null,
   projectURL,
   conversationPrefix: "https://chatgpt.com/g/g-p-example-gpt-worker/c/",
+};
+
+// A realistic gizmo hash — "example-gpt-worker" above isn't 32 hex chars,
+// so it never exercises the slug-independent stableGizmoId fast path.
+const gizmoHash = "6aa7981baaa081918029bb0c40b5c795";
+const realProjectURL = `https://chatgpt.com/g/g-p-${gizmoHash}-gpt-worker/project`;
+const realScope = {
+  origin: "https://chatgpt.com",
+  gizmoId: gizmoHash,
+  projectURL: realProjectURL,
+  conversationPrefix: `https://chatgpt.com/g/g-p-${gizmoHash}-gpt-worker/c/`,
 };
 
 describe("escapeForAppleScript", () => {
@@ -150,5 +164,58 @@ describe("ChatGPT Project tab scope", () => {
     ]) {
       assert.equal(matchesChatGptProjectScope(value, scope), false, value);
     }
+  });
+});
+
+describe("stableGizmoId", () => {
+  test("extracts the 32-hex-char id and ignores any -slug suffix", () => {
+    assert.equal(stableGizmoId(`g-p-${gizmoHash}`), gizmoHash);
+    assert.equal(stableGizmoId(`g-p-${gizmoHash}-gpt-worker`), gizmoHash);
+    assert.equal(stableGizmoId(`g-p-${gizmoHash.toUpperCase()}-GPTWorker`), gizmoHash);
+  });
+
+  test("returns null for anything that isn't a 32-hex-char g-p- segment", () => {
+    for (const value of ["g-p-example-gpt-worker", `g-${gizmoHash}`, `g-p-${gizmoHash.slice(0, 31)}`, "", undefined]) {
+      assert.equal(stableGizmoId(value), null, String(value));
+    }
+  });
+});
+
+describe("ChatGPT Project tab scope: slug-independent gizmo id matching", () => {
+  test("chatGptProjectScope derives gizmoId only for the real g-p-<hash>[-slug] shape", () => {
+    assert.equal(chatGptProjectScope(realProjectURL).gizmoId, gizmoHash);
+    assert.equal(chatGptProjectScope(projectURL).gizmoId, null);
+  });
+
+  test("matches a same-gizmo conversation whether the URL keeps, drops, or changes the slug", () => {
+    for (const value of [
+      realProjectURL,
+      `https://chatgpt.com/g/g-p-${gizmoHash}/project`, // slug dropped
+      `https://chatgpt.com/g/g-p-${gizmoHash}-gptworker/project`, // Project renamed (different slug)
+      `https://chatgpt.com/g/g-p-${gizmoHash}-gpt-worker/c/6aa8cee8-e7c8-83e8-b6d0-7d8143fc8004`,
+      `https://chatgpt.com/g/g-p-${gizmoHash}/c/6aa8cee8-e7c8-83e8-b6d0-7d8143fc8004`, // reopened from the sidebar: no slug
+    ]) {
+      assert.equal(matchesChatGptProjectScope(value, realScope), true, value);
+    }
+  });
+
+  test("still rejects a different gizmo hash even with a similar slug, and a bare gizmo segment with no /project or /c/", () => {
+    const otherHash = "0".repeat(32);
+    for (const value of [
+      `https://chatgpt.com/g/g-p-${otherHash}-gpt-worker/project`,
+      `https://chatgpt.com/g/g-p-${gizmoHash}-gpt-worker`,
+      `https://example.com/g/g-p-${gizmoHash}-gpt-worker/project`,
+    ]) {
+      assert.equal(matchesChatGptProjectScope(value, realScope), false, value);
+    }
+  });
+
+  test("buildChromeTabScript embeds a slug-independent containment check for real gizmo ids, and omits it otherwise", () => {
+    const realScript = buildChromeTabScript(`${realProjectURL}?prompt=test`, realScope, { tabId: "540586144" });
+    assert.match(realScript, new RegExp(`set stableGizmoPrefix to "https://chatgpt\\.com/g/g-p-${gizmoHash}"`));
+    assert.match(realScript, /if stableGizmoPrefix is not "" and candidateURL contains stableGizmoPrefix then/);
+
+    const fallbackScript = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
+    assert.match(fallbackScript, /set stableGizmoPrefix to ""/);
   });
 });
