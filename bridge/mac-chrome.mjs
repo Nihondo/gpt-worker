@@ -1,11 +1,21 @@
 // macOS + Google Chrome only: reuse the workspace's own gpt-worker ChatGPT
-// tab (rather than opening a new one every round) and, optionally, send Enter
-// for the user. Everything here is best-effort — on any failure the caller
-// falls back to the cross-platform `openBrowser()` (a fresh tab, no auto-Enter).
+// tab (rather than opening a new one every round) and, optionally, submit
+// the task prompt for the user. Everything here is best-effort — on any
+// failure the caller falls back to the cross-platform `openBrowser()` (a
+// fresh tab, no auto-Enter).
+//
+// Submission itself is two-tiered: first try clicking ChatGPT's send button
+// via Chrome's own "execute ... javascript" Apple Event, which needs no
+// window focus — but only works once the user has enabled Chrome's View >
+// Developer > "Allow JavaScript from Apple Events" (off by default, and not
+// something gpt-worker can detect or set). If that's unavailable or the
+// button never becomes clickable, fall back to a `keystroke return` sent to
+// the frontmost window, same as before this existed.
 //
 // Why AppleScript and not just `open`: `open <url>` always creates a new
 // tab, so tabs pile up over many task/report rounds. Driving Chrome directly
-// lets us find and reuse the tab ID previously assigned to this workspace.
+// lets us find and reuse the tab ID previously assigned to this workspace
+// without explicitly activating Chrome.
 //
 // A tab ID alone is not enough: it must also still be in this ChatGPT Project.
 // This protects unrelated ChatGPT tabs, while the workspace-specific tab ID
@@ -69,6 +79,25 @@ export function normalizeChromeTabId(tabId) {
   return /^[1-9]\d*$/.test(value) ? value : null;
 }
 
+/** Clicks ChatGPT's send button via Chrome's own "execute ... javascript"
+ *  Apple Event (needs no window focus, unlike the `keystroke return`
+ *  fallback below) — but only works once the user has enabled Chrome's
+ *  View > Developer > "Allow JavaScript from Apple Events" and relaunched
+ *  Chrome, which is off by default and not something gpt-worker can detect
+ *  or set for them. Selector values are unquoted CSS idents (valid since
+ *  none contain spaces or special characters) and every JS string uses
+ *  single quotes, so this snippet has no double quotes or backslashes and
+ *  needs no escaping beyond the routine escapeForAppleScript() pass applied
+ *  where it's interpolated. */
+const CLICK_SEND_BUTTON_JS = `(() => {
+  const btn = document.querySelector('[data-testid=send-button]') ||
+    document.querySelector('button[aria-label*=Send]') ||
+    document.querySelector('button[aria-label*=送信]');
+  if (!btn || btn.disabled) return 'RETRY';
+  btn.click();
+  return 'CLICKED';
+})()`;
+
 /** Build the AppleScript separately so its generated syntax can be compiled
  *  in a macOS test without opening or changing a Chrome window. */
 export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelayMs = 1500, tabId } = {}) {
@@ -77,8 +106,34 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
   const safeProjectURL = escapeForAppleScript(scope.projectURL);
   const safeConversationPrefix = escapeForAppleScript(scope.conversationPrefix);
   const safeSavedTabId = escapeForAppleScript(savedTabId);
-  const enterStep = autoEnter
-    ? `delay ${(enterDelayMs / 1000).toFixed(2)}\n    tell application "System Events" to keystroke return`
+  const safeClickJs = escapeForAppleScript(CLICK_SEND_BUTTON_JS);
+  // Measured empirically: after navigating a tab to a ChatGPT Project URL
+  // with a ?prompt= query, the page load + React hydration + prompt
+  // prefill + send-button enable can take several seconds — a single
+  // check right after enterDelayMs is not reliable, so this polls instead
+  // of trusting one fixed delay.
+  const RETRY_INTERVAL_SEC = 0.4;
+  const MAX_RETRY_ATTEMPTS = 8;
+  const submitStep = autoEnter
+    ? `
+      delay ${(enterDelayMs / 1000).toFixed(2)}
+      set submitOutcome to "PENDING"
+      set jsAvailable to true
+      set attemptCount to 0
+      repeat while submitOutcome is not "CLICKED" and jsAvailable and attemptCount < ${MAX_RETRY_ATTEMPTS}
+        try
+          set submitOutcome to (execute selectedTab javascript "${safeClickJs}")
+        on error
+          set jsAvailable to false
+        end try
+        if submitOutcome is not "CLICKED" and jsAvailable then
+          delay ${RETRY_INTERVAL_SEC}
+        end if
+        set attemptCount to attemptCount + 1
+      end repeat
+      if submitOutcome is not "CLICKED" then
+        tell application "System Events" to keystroke return
+      end if`
     : "";
 
   return `
@@ -124,19 +179,16 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
           set selectedTab to tab 1
           set URL of selectedTab to targetURL
           set active tab index to 1
-          set index to 1
         end tell
       else
         set URL of selectedTab to targetURL
         tell selectedWindow
           set active tab index to selectedTabIndex
-          set index to 1
         end tell
       end if
-      activate
       set selectedTabID to (id of selectedTab) as text
+      ${submitStep}
     end tell
-    ${enterStep}
     return selectedTabID
   `;
 }

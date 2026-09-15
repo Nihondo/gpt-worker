@@ -53,12 +53,14 @@ describe("normalizeChromeTabId", () => {
 });
 
 describe("workspace tab AppleScript", () => {
-  test("creates a dedicated new window instead of appending a fresh tab", () => {
+  test("creates a dedicated new window without explicitly foregrounding Chrome", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
 
     assert.match(script, /set selectedWindow to make new window/);
     assert.match(script, /set selectedTab to tab 1/);
     assert.doesNotMatch(script, /make new tab/);
+    assert.doesNotMatch(script, /\n\s*activate\s*\n/);
+    assert.doesNotMatch(script, /set index to 1/);
   });
 
   test("targets only the saved tab ID while retaining the Project scope check", () => {
@@ -74,6 +76,32 @@ describe("workspace tab AppleScript", () => {
     const script = buildChromeTabScript(projectURL, scope, { tabId: '1; tell application "Finder"' });
     assert.match(script, /set savedTabID to ""/);
     assert.doesNotMatch(script, /Finder/);
+  });
+});
+
+describe("autoEnter submit step", () => {
+  test("omits the submit step entirely when autoEnter is off (the default)", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
+    assert.doesNotMatch(script, /execute selectedTab javascript/);
+    assert.doesNotMatch(script, /keystroke return/);
+  });
+
+  test("tries clicking ChatGPT's send button via Chrome's own JS execution before falling back to keystroke return", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true, enterDelayMs: 2000 });
+
+    assert.match(script, /delay 2\.00/);
+    assert.match(script, /execute selectedTab javascript "/);
+    // send-button click JS must reach AppleScript with no unescaped quotes
+    assert.match(script, /document\.querySelector\('\[data-testid=send-button\]'\)/);
+    assert.match(script, /repeat while submitOutcome is not "CLICKED"/);
+    // the keystroke fallback must still run whenever the JS route never clicks
+    assert.match(script, /if submitOutcome is not "CLICKED" then\s*\n\s*tell application "System Events" to keystroke return/);
+  });
+
+  test("falls back to keystroke immediately (no more retries) once execute javascript itself errors", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
+    assert.match(script, /on error\s*\n\s*set jsAvailable to false\s*\n\s*end try/);
+    assert.match(script, /repeat while submitOutcome is not "CLICKED" and jsAvailable and attemptCount < \d+/);
   });
 });
 

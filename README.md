@@ -95,6 +95,7 @@ gpt-worker chat-url --clear -w /path/to/project  # return to the shared default
 ```
 
 - With `--auto-enter`, Chrome automatically submits the task prompt when opened. Each workspace has its own reusable Chrome tab, scoped to its effective Project URL (its override, or the shared default). Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. `--auto-enter`, `--no-auto-enter`, and `--enter-delay` remain machine-wide settings. (Grant macOS Accessibility permissions when prompted on the first run).
+- To submit without moving keyboard focus (so it doesn't interrupt whatever you're doing in another window), enable Chrome's **View → Developer → Allow JavaScript from Apple Events** and relaunch Chrome. This is optional: without it, `--auto-enter` still works by sending a keystroke to the frontmost window instead.
 
 Use `show-config` to inspect these browser-facing settings without exposing connector or workspace credentials:
 
@@ -103,7 +104,7 @@ gpt-worker show-config
 gpt-worker show-config -w /path/to/project
 ```
 
-The global view lists the shared default and each provisioned workspace's override and effective URL. A workspace view shows only that workspace's resolution. When a workspace has no reusable tab, gpt-worker opens its Project in a new foreground Chrome window; later task/report rounds reuse that workspace's tab in the window.
+The global view lists the shared default and each provisioned workspace's override and effective URL. A workspace view shows only that workspace's resolution. When a workspace has no reusable tab, gpt-worker opens its Project in a new Chrome window without explicitly activating Chrome; later task/report rounds reuse that workspace's tab in the window. The final focus behavior remains subject to Chrome and macOS window-management behavior.
 
 ---
 
