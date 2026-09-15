@@ -135,6 +135,44 @@ const CLICK_SEND_BUTTON_JS = `(() => {
   return 'CLICKED';
 })()`;
 
+/** Prepare a continuation in an existing ChatGPT conversation without
+ * navigating away from it. ChatGPT currently uses a ProseMirror
+ * contenteditable composer, with a textarea retained as a fallback. Do not
+ * replace a user's unsent draft: report COMPOSER_BUSY so the caller can leave
+ * the conversation untouched. `execCommand("insertText")` dispatches the
+ * input change ChatGPT's editor consumes; the textarea branch uses its native
+ * setter and an InputEvent for the same reason. */
+export function buildChatGptComposerScript(prompt) {
+  const message = String(prompt || "");
+  const messageLiteral = JSON.stringify(message);
+  return `(() => {
+  const message = ${messageLiteral};
+  const composer = document.querySelector('#prompt-textarea[contenteditable=true]') ||
+    document.querySelector('textarea[aria-label*=ChatGPT]');
+  if (!composer || !message) return 'RETRY';
+  const existingText = composer.tagName === 'TEXTAREA' ? composer.value : composer.innerText;
+  if (existingText.trim()) return 'COMPOSER_BUSY';
+  composer.focus();
+  if (composer.tagName === 'TEXTAREA') {
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(composer, message);
+    composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
+  } else {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(composer);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    if (!document.execCommand('insertText', false, message)) {
+      composer.textContent = message;
+      composer.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
+    }
+  }
+  return 'READY';
+})()`;
+}
+
 /** Build the AppleScript separately so its generated syntax can be compiled
  *  in a macOS test without opening or changing a Chrome window. */
 export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelayMs = 1500, tabId } = {}) {
@@ -148,6 +186,11 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
   // the exact-segment check below is the only match path, same as before.
   const safeStableGizmoPrefix = scope.gizmoId ? escapeForAppleScript(`${scope.origin}/g/g-p-${scope.gizmoId}`) : "";
   const safeClickJs = escapeForAppleScript(CLICK_SEND_BUTTON_JS);
+  let prompt = "";
+  try {
+    prompt = new URL(url).searchParams.get("prompt") || "";
+  } catch {}
+  const safeComposerJs = escapeForAppleScript(buildChatGptComposerScript(prompt));
   // Measured empirically: after navigating a tab to a ChatGPT Project URL
   // with a ?prompt= query, the page load + React hydration + prompt
   // prefill + send-button enable can take several seconds — a single
@@ -182,6 +225,23 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
       end repeat`
     : "";
 
+  const prepareContinuationStep = `
+      set prepareOutcome to "PENDING"
+      set prepareErrorCount to 0
+      set prepareAttemptCount to 0
+      repeat while prepareOutcome is not "READY" and prepareOutcome is not "COMPOSER_BUSY" and prepareErrorCount < ${MAX_JS_ERRORS} and prepareAttemptCount < ${MAX_RETRY_ATTEMPTS}
+        try
+          set prepareOutcome to (execute selectedTab javascript "${safeComposerJs}")
+        on error
+          set prepareOutcome to "JS_ERROR"
+          set prepareErrorCount to prepareErrorCount + 1
+        end try
+        if prepareOutcome is not "READY" and prepareOutcome is not "COMPOSER_BUSY" then
+          delay ${RETRY_INTERVAL_SEC}
+        end if
+        set prepareAttemptCount to prepareAttemptCount + 1
+      end repeat`;
+
   return `
     set targetURL to "${safeUrl}"
     set projectURL to "${safeProjectURL}"
@@ -191,6 +251,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
     tell application "Google Chrome"
       set selectedTab to missing value
       set selectedWindow to missing value
+      set selectedTabIsConversation to false
       if savedTabID is not "" then
         repeat with w in windows
           set tabIndex to 1
@@ -198,26 +259,28 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
             if ((id of t) as text) is savedTabID then
               set candidateURL to URL of t
               set tabMatchesScope to false
-              if stableGizmoPrefix is not "" and candidateURL contains stableGizmoPrefix then
-                set tabMatchesScope to true
-              else
-                set isProjectTab to candidateURL is projectURL or candidateURL starts with projectURL & "?" or candidateURL starts with projectURL & "#"
-                set isConversationTab to false
-                if candidateURL starts with conversationPrefix then
-                  if (length of candidateURL) > (length of conversationPrefix) then
-                    set remainderURL to text ((length of conversationPrefix) + 1) thru -1 of candidateURL
-                    set firstRemainderCharacter to character 1 of remainderURL
-                    if firstRemainderCharacter is not "?" and firstRemainderCharacter is not "#" and firstRemainderCharacter is not "/" then
-                      set isConversationTab to true
-                    end if
+              set isProjectTab to candidateURL is projectURL or candidateURL starts with projectURL & "?" or candidateURL starts with projectURL & "#"
+              set isConversationTab to false
+              if candidateURL starts with conversationPrefix then
+                if (length of candidateURL) > (length of conversationPrefix) then
+                  set remainderURL to text ((length of conversationPrefix) + 1) thru -1 of candidateURL
+                  set firstRemainderCharacter to character 1 of remainderURL
+                  if firstRemainderCharacter is not "?" and firstRemainderCharacter is not "#" and firstRemainderCharacter is not "/" then
+                    set isConversationTab to true
                   end if
                 end if
+              end if
+              if stableGizmoPrefix is not "" and candidateURL contains stableGizmoPrefix then
+                set tabMatchesScope to true
+                if candidateURL contains "/c/" then set isConversationTab to true
+              else
                 if isProjectTab or isConversationTab then set tabMatchesScope to true
               end if
               if tabMatchesScope then
                 set selectedTab to t
                 set selectedWindow to w
                 set selectedTabIndex to tabIndex
+                set selectedTabIsConversation to isConversationTab
               end if
               exit repeat
             end if
@@ -236,21 +299,29 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
         end tell
       else
         set didReuseTab to true
-        set URL of selectedTab to targetURL
+        if selectedTabIsConversation then
+          ${prepareContinuationStep}
+        else
+          set URL of selectedTab to targetURL
+          set prepareOutcome to "URL"
+        end if
         tell selectedWindow
           set active tab index to selectedTabIndex
         end tell
       end if
       set selectedTabID to (id of selectedTab) as text
       set submitOutcome to "SKIPPED"
-      ${submitStep}
+      if didReuseTab is false then set prepareOutcome to "URL"
+      if prepareOutcome is "READY" or prepareOutcome is "URL" then
+        ${submitStep}
+      end if
     end tell
     if didReuseTab then
       set reuseFlag to "REUSED"
     else
       set reuseFlag to "NEW"
     end if
-    return selectedTabID & "|" & submitOutcome & "|" & reuseFlag
+    return selectedTabID & "|" & submitOutcome & "|" & reuseFlag & "|" & prepareOutcome
   `;
 }
 
@@ -267,7 +338,12 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
  *  no window focus change of any kind) or had to open a new Chrome window
  *  (false — that window comes to the front like any new window would,
  *  regardless of `submitted`). Callers should not describe a `submitted:
- *  true` result as "in the background" without also checking `reused`. */
+ *  true` result as "in the background" without also checking `reused`.
+ *
+ *  When reusing a conversation tab, its URL is deliberately left unchanged:
+ *  the task prompt is inserted into that conversation's composer instead.
+ *  `prepared` reports whether that injection (or the new-tab URL prompt)
+ *  succeeded; a non-empty user draft is never overwritten. */
 export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
@@ -278,9 +354,17 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
 
   try {
     const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" }).trim();
-    const [tabIdPart, submitOutcome, reuseFlag] = output.split("|");
+    const [tabIdPart, submitOutcome, reuseFlag, prepareOutcome] = output.split("|");
     const selectedTabId = normalizeChromeTabId(tabIdPart);
-    return selectedTabId ? { tabId: selectedTabId, submitted: submitOutcome === "CLICKED", reused: reuseFlag === "REUSED" } : false;
+    return selectedTabId
+      ? {
+          tabId: selectedTabId,
+          submitted: submitOutcome === "CLICKED",
+          reused: reuseFlag === "REUSED",
+          prepared: ["READY", "URL"].includes(prepareOutcome),
+          preparationOutcome: prepareOutcome || "UNKNOWN",
+        }
+      : false;
   } catch {
     return false;
   }

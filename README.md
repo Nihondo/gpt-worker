@@ -94,8 +94,8 @@ gpt-worker chat-url "https://chatgpt.com/g/g-p-workspace/project" -w /path/to/pr
 gpt-worker chat-url --clear -w /path/to/project  # return to the shared default
 ```
 
-- With `--auto-enter`, Chrome automatically submits the task prompt when opened. Each workspace has its own reusable Chrome tab, scoped to its effective Project URL (its override, or the shared default). **When that tab is reused, submission happens entirely in the background** — it never moves keyboard focus or interrupts whatever you're doing in another window. The first run for a workspace (or after its tab was closed) instead creates a new Chrome window, which — like any new window in any app — does come to the front; only the reuse path stays in the background. Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. `--auto-enter`, `--no-auto-enter`, and `--enter-delay` remain machine-wide settings.
-- `--auto-enter` requires enabling Chrome's **View → Developer → Allow JavaScript from Apple Events**, then relaunching Chrome (a one-time setup step; off by default). There is no keystroke-based fallback — if this isn't enabled, gpt-worker opens the prompt ready to go and tells you to press Enter/Send yourself instead of silently sending a keystroke to whatever window happens to be focused.
+- With `--auto-enter`, Chrome automatically submits the task prompt when opened. Each workspace has its own reusable Chrome tab, scoped to its effective Project URL (its override, or the shared default). After its first message creates a ChatGPT conversation, later `task` and `report` rounds add their continuation to **that same conversation**; they do not navigate the reused tab back to the Project landing page or create another conversation. **When that tab is reused, preparation and submission happen entirely in the background** — they never move keyboard focus or interrupt whatever you're doing in another window. The first run for a workspace (or after its tab was closed) instead creates a new Chrome window, which — like any new window in any app — does come to the front; only the reuse path stays in the background. Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. `--auto-enter`, `--no-auto-enter`, and `--enter-delay` remain machine-wide settings.
+- Reusing an existing conversation requires Chrome's **View → Developer → Allow JavaScript from Apple Events**, then a Chrome relaunch (a one-time setup step; off by default): gpt-worker uses it to put the continuation into that conversation's composer, and uses it again for `--auto-enter` submission. There is no keystroke-based fallback. If the setting is unavailable, or the composer already has an unsent draft, gpt-worker leaves the existing conversation unchanged and explains what to do instead.
 
 Use `show-config` to inspect these browser-facing settings without exposing connector or workspace credentials:
 
@@ -167,7 +167,7 @@ Describe your goal in natural language:
 ```bash
 gpt-worker task "Add cache headers to the API response" -w /path/to/project
 ```
-If `chat-url` is configured, Chrome opens your ChatGPT Project with the task prompt prepared (and auto-submitted if `--auto-enter` is enabled).
+If `chat-url` is configured, Chrome opens your ChatGPT Project with the task prompt prepared (and auto-submitted if `--auto-enter` is enabled). Once the workspace has a conversation tab, later continuations are added to that same conversation.
 
 ### 3. Wait for the Plan (`wait`)
 ChatGPT inspects the project files via MCP tools and generates an actionable plan:

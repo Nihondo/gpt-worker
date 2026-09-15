@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   chatGptProjectScope,
+  buildChatGptComposerScript,
   buildChromeTabScript,
   escapeForAppleScript,
   isChromeAutomationAvailable,
@@ -92,19 +93,47 @@ describe("workspace tab AppleScript", () => {
     assert.doesNotMatch(script, /Finder/);
   });
 
-  test("returns a 3-part tabId|submitOutcome|reuseFlag string so the caller can tell reuse (background) apart from a new window (comes to the front)", () => {
+  test("returns tab, submission, reuse, and preparation outcomes so the caller can distinguish an injected continuation from a new-tab URL prompt", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
     assert.match(script, /set didReuseTab to false/);
     assert.match(script, /set didReuseTab to true/);
+    assert.match(script, /if selectedTabIsConversation then\s*[\s\S]*set prepareOutcome to "PENDING"[\s\S]*else\s*set URL of selectedTab to targetURL\s*set prepareOutcome to "URL"/);
+    assert.match(script, /set selectedTabIsConversation to isConversationTab/);
     assert.match(script, /if didReuseTab then\s*\n\s*set reuseFlag to "REUSED"\s*\n\s*else\s*\n\s*set reuseFlag to "NEW"\s*\n\s*end if/);
-    assert.match(script, /return selectedTabID & "\|" & submitOutcome & "\|" & reuseFlag/);
+    assert.match(script, /return selectedTabID & "\|" & submitOutcome & "\|" & reuseFlag & "\|" & prepareOutcome/);
+  });
+});
+
+describe("existing-conversation composer preparation", () => {
+  test("uses ChatGPT's contenteditable composer and reports a user draft as busy instead of overwriting it", () => {
+    const script = buildChatGptComposerScript("@gpt-worker continue task abc123");
+    assert.match(script, /#prompt-textarea\[contenteditable=true\]/);
+    assert.match(script, /if \(existingText\.trim\(\)\) return 'COMPOSER_BUSY'/);
+    assert.match(script, /document\.execCommand\('insertText', false, message\)/);
+    assert.match(script, /new InputEvent\('input', \{ bubbles: true, inputType: 'insertText', data: message \}\)/);
+  });
+
+  test("encodes arbitrary prompt text as a JavaScript literal rather than interpolating it as code", () => {
+    const script = buildChatGptComposerScript('continue "quoted" \\ task');
+    assert.ok(script.includes(`const message = ${JSON.stringify('continue "quoted" \\ task')};`));
+    assert.doesNotMatch(script, /const message = continue/);
+  });
+
+  test("includes the continuation preparation before auto-submit when reusing a conversation tab", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=%40gpt-worker%20continue%20task%20abc123`, scope, {
+      autoEnter: true,
+      tabId: "540586144",
+    });
+    assert.match(script, /set prepareOutcome to "PENDING"/);
+    assert.match(script, /continue task abc123/);
+    assert.match(script, /if prepareOutcome is "READY" or prepareOutcome is "URL" then[\s\S]*execute selectedTab javascript/);
   });
 });
 
 describe("autoEnter submit step", () => {
-  test("omits the submit step entirely when autoEnter is off (the default), and still reports SKIPPED", () => {
+  test("omits the send-button click when autoEnter is off (the default), while retaining safe composer preparation for a reused conversation", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
-    assert.doesNotMatch(script, /execute selectedTab javascript/);
+    assert.doesNotMatch(script, /data-testid=send-button/);
     assert.doesNotMatch(script, /keystroke return/);
     assert.doesNotMatch(script, /System Events/);
     assert.match(script, /set submitOutcome to "SKIPPED"/);
