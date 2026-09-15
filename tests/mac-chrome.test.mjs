@@ -53,6 +53,14 @@ describe("normalizeChromeTabId", () => {
 });
 
 describe("workspace tab AppleScript", () => {
+  test("creates a dedicated new window instead of appending a fresh tab", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
+
+    assert.match(script, /set selectedWindow to make new window/);
+    assert.match(script, /set selectedTab to tab 1/);
+    assert.doesNotMatch(script, /make new tab/);
+  });
+
   test("targets only the saved tab ID while retaining the Project scope check", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
 

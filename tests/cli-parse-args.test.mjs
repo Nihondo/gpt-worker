@@ -10,6 +10,7 @@ import {
   effectiveChatUrl,
   isChatGptUrl,
   parseArgs,
+  safeBrowserConfig,
   selectWaitMessages,
   withChatUrl,
   withWorkspaceChatUrl,
@@ -180,6 +181,40 @@ describe("workspace Chrome tab mapping", () => {
     assert.equal(workspaceChatUrl(result, workspaceA), null);
     assert.equal(workspaceChromeTabId(result, workspaceB), "202");
     assert.equal(workspaceChatUrl(result, workspaceB), base.chatUrlsByWorkspace[workspaceB]);
+  });
+
+  test("creates an allowlisted config view without credentials or tab IDs", () => {
+    const settings = {
+      workerUrl: "https://worker.example",
+      adminToken: "admin-secret",
+      hubGptToken: "hub-secret",
+      chatUrl: "https://chatgpt.com/g/g-p-default/project",
+      autoEnter: true,
+      enterDelayMs: 1500,
+      chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+    };
+    const workspaces = [
+      { workspaceId: workspaceA, workspacePath: "/tmp/a", gptToken: "gpt-secret" },
+      { workspaceId: workspaceB, workspacePath: "/tmp/b", cliToken: "cli-secret" },
+    ];
+    const view = safeBrowserConfig(settings, workspaces);
+    const text = JSON.stringify(view);
+
+    assert.equal(view.sharedChatUrl, settings.chatUrl);
+    assert.equal(view.workspaces[0].chatUrlOverride, null);
+    assert.equal(view.workspaces[0].effectiveChatUrl, settings.chatUrl);
+    assert.equal(view.workspaces[1].chatUrlOverride, settings.chatUrlsByWorkspace[workspaceB]);
+    assert.equal(view.workspaces[1].effectiveChatUrl, settings.chatUrlsByWorkspace[workspaceB]);
+    for (const secret of ["worker.example", "admin-secret", "hub-secret", "gpt-secret", "cli-secret", "101", "202"]) {
+      assert.equal(text.includes(secret), false, secret);
+    }
+  });
+
+  test("filters the config view to the requested workspace", () => {
+    const workspaces = [{ workspaceId: workspaceA }, { workspaceId: workspaceB }];
+    const view = safeBrowserConfig({ chatUrl: "https://chatgpt.com/g/g-p-default/project" }, workspaces, workspaceB);
+    assert.deepEqual(view.workspaces.map((workspace) => workspace.workspaceId), [workspaceB]);
   });
 });
 

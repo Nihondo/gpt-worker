@@ -96,6 +96,15 @@ gpt-worker chat-url --clear -w /path/to/project  # 共有デフォルトへ戻�
 
 - `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。各ワークスペースには、実効 Project URL（個別 override、または共有デフォルト）に紐付く再利用可能な Chrome タブがあります。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません。`--auto-enter`、`--no-auto-enter`、`--enter-delay` は引き続きマシン全体の設定です（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
 
+コネクタやワークスペースの認証情報を出さずに、これらのブラウザ向け設定を確認するには `show-config` を使います。
+
+```bash
+gpt-worker show-config
+gpt-worker show-config -w /path/to/project
+```
+
+全体表示では共有デフォルトと、プロビジョニング済み各ワークスペースの override／実効 URL を表示します。ワークスペース表示では、そのワークスペースの解決結果だけを表示します。再利用可能なタブがないワークスペースは、gpt-worker が前面の新規 Chrome ウィンドウで Project を開きます。以後の task/report は、そのウィンドウ内のワークスペース専用タブを再利用します。
+
 ---
 
 ## 🚀 クイックスタート
@@ -289,6 +298,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker state -w <dir>` | 現在のアクティブなタスク状態（JSON）を表示 |
 | `gpt-worker queue -w <dir> [--discard <id>]` | 未処理メッセージキューの確認・破棄 |
 | `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | 共有デフォルト Project URL または任意のワークスペース override を確認・設定。`--clear -w` でデフォルトへ戻す |
+| `gpt-worker show-config [-w <dir>]` | default・override・実効 Project URL など、安全なブラウザ向け設定を表示。認証情報は表示しない |
 | `gpt-worker guidance [<text>] -w <dir> [--clear]` | プロジェクト固有の計画指針を設定・確認・消去 |
 | `gpt-worker allow-read <file> -w <dir>` | Git ignore された exact file 1つの MCP direct read を許可 |
 | `gpt-worker deny-read <file> -w <dir>` | direct read の例外を取り消し |

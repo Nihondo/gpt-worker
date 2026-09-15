@@ -2,8 +2,8 @@
 // gpt-worker CLI. See ~/.agents/skills/gpt-worker/SKILL.md for the operating
 // loop and ~/.agents/skills/gpt-worker/reference/protocol.md for message formats.
 //
-// Subcommands: init, url, chat-url, start, stop, status, queue, task, wait,
-// report, state, rotate, workspaces, allow-read, deny-read, allow-list.
+// Subcommands: init, url, chat-url, show-config, start, stop, status, queue,
+// task, wait, report, state, rotate, workspaces, allow-read, deny-read, allow-list.
 // There is deliberately no `doctor`: the Worker URL never expires, so the
 // only thing that can go wrong locally is "the WS link isn't connected",
 // which `status` already shows.
@@ -196,6 +196,25 @@ export function workspaceChatUrl(settings, workspaceId) {
 
 export function effectiveChatUrl(settings, workspaceId) {
   return workspaceChatUrl(settings, workspaceId) || settings?.chatUrl || null;
+}
+
+/** A deliberately allowlisted view of local browser-facing preferences. Do
+ *  not return worker URLs, tokens, or raw config objects from this helper. */
+export function safeBrowserConfig(settings, workspaces, workspaceId = null) {
+  const workspaceViews = (Array.isArray(workspaces) ? workspaces : [])
+    .filter((workspace) => !workspaceId || workspace.workspaceId === workspaceId)
+    .map((workspace) => ({
+      workspaceId: workspace.workspaceId,
+      workspacePath: workspace.workspacePath || null,
+      chatUrlOverride: workspaceChatUrl(settings, workspace.workspaceId),
+      effectiveChatUrl: effectiveChatUrl(settings, workspace.workspaceId),
+    }));
+  return {
+    sharedChatUrl: settings?.chatUrl || null,
+    autoEnter: !!settings?.autoEnter,
+    enterDelayMs: Number.isFinite(settings?.enterDelayMs) ? settings.enterDelayMs : null,
+    workspaces: workspaceViews,
+  };
 }
 
 export function withWorkspaceChromeTab(settings, workspaceId, tabId) {
@@ -484,6 +503,46 @@ async function cmdWorkspaces() {
     console.log(`${w.workspacePath || "(path unknown — pre-dates workspacePath tracking)"}`);
     console.log(`  workspace_id=${w.workspaceId}  bridge=${pidStatus}`);
   }
+}
+
+function formatConfigUrl(url) {
+  return url || "(none)";
+}
+
+function printBrowserConfig(config) {
+  console.log(`shared default : ${formatConfigUrl(config.sharedChatUrl)}`);
+  console.log(`auto-enter     : ${config.autoEnter}`);
+  console.log(`enter delay    : ${config.enterDelayMs ?? "(default)"}`);
+  if (config.workspaces.length === 0) {
+    console.log("workspaces     : (none provisioned)");
+    return;
+  }
+  console.log("workspaces:");
+  for (const workspace of config.workspaces) {
+    console.log(`  ${workspace.workspacePath || "(path unknown)"}`);
+    console.log(`    workspace_id : ${workspace.workspaceId}`);
+    console.log(`    override     : ${formatConfigUrl(workspace.chatUrlOverride)}`);
+    console.log(`    effective    : ${formatConfigUrl(workspace.effectiveChatUrl)}`);
+  }
+}
+
+function cmdShowConfig(args) {
+  const worker = readWorkerConfig();
+  if (!worker) {
+    console.error("Not initialized. Run: gpt-worker init -w <workspace>");
+    process.exit(1);
+  }
+  let workspaceId = null;
+  let workspaces = listProvisionedWorkspaces();
+  if (args.workspace) {
+    const root = workspaceRoot(args);
+    const cfg = requireWorkspaceConfig(root);
+    workspaceId = cfg.workspaceId;
+    if (!workspaces.some((workspace) => workspace.workspaceId === workspaceId)) {
+      workspaces = [...workspaces, { workspaceId, workspacePath: root }];
+    }
+  }
+  printBrowserConfig(safeBrowserConfig(worker, workspaces, workspaceId));
 }
 
 /** Deregisters a workspace. Destructive and, on the remote side, permanent
@@ -1052,6 +1111,8 @@ async function main() {
       return cmdRemove(args);
     case "chat-url":
       return cmdChatUrl(args);
+    case "show-config":
+      return cmdShowConfig(args);
     case "guidance":
       return cmdGuidance(args);
     case "allow-read":
@@ -1079,7 +1140,7 @@ async function main() {
     case "rotate":
       return cmdRotate(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
+      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
       process.exit(cmd ? 1 : 0);
   }
 }

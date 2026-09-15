@@ -96,6 +96,15 @@ gpt-worker chat-url --clear -w /path/to/project  # return to the shared default
 
 - With `--auto-enter`, Chrome automatically submits the task prompt when opened. Each workspace has its own reusable Chrome tab, scoped to its effective Project URL (its override, or the shared default). Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. `--auto-enter`, `--no-auto-enter`, and `--enter-delay` remain machine-wide settings. (Grant macOS Accessibility permissions when prompted on the first run).
 
+Use `show-config` to inspect these browser-facing settings without exposing connector or workspace credentials:
+
+```bash
+gpt-worker show-config
+gpt-worker show-config -w /path/to/project
+```
+
+The global view lists the shared default and each provisioned workspace's override and effective URL. A workspace view shows only that workspace's resolution. When a workspace has no reusable tab, gpt-worker opens its Project in a new foreground Chrome window; later task/report rounds reuse that workspace's tab in the window.
+
 ---
 
 ## 🚀 Quickstart
@@ -289,6 +298,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker state -w <dir>` | Display active task checkpoint state (JSON) |
 | `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues |
 | `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Save or inspect the shared default Project URL, or an optional workspace override; `--clear -w` restores the default |
+| `gpt-worker show-config [-w <dir>]` | Show safe browser-facing settings, including default, override, and effective Project URLs; never prints credentials |
 | `gpt-worker guidance [<text>] -w <dir> [--clear]` | Set, inspect, or clear trusted standing guidance |
 | `gpt-worker allow-read <file> -w <dir>` | Allow direct MCP reads of one exact Git-ignored file |
 | `gpt-worker deny-read <file> -w <dir>` | Remove a direct-read exception |

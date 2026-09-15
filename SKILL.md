@@ -59,6 +59,7 @@ gpt-worker init -w /path/to/project
 | `gpt-worker url` | Print the one shared MCP Server URL for the ChatGPT connector. |
 | `gpt-worker workspaces` | List all provisioned workspaces and bridge statuses on this machine. |
 | `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Set/get the shared default Project link or an optional workspace override; `--clear -w` restores the default. Auto-submit settings stay machine-wide. |
+| `gpt-worker show-config [-w <dir>]` | Show allowlisted browser-facing configuration, including shared/default, override, and effective Project URLs; never prints credentials. |
 | `gpt-worker guidance [<text>\|-] -w <dir> [--clear]` | Set/inspect trusted standing guidance for ChatGPT. |
 | `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate workspace authentication tokens. |
 | `gpt-worker remove -w <dir> [--yes]` | Deregister workspace and purge remote Worker state. |
@@ -130,4 +131,4 @@ gpt-worker state
 
 ## Browser Automation
 
-When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the workspace's dedicated Project tab. The shared Project URL remains the default, but a workspace may override it with `gpt-worker chat-url <url> -w <dir>` and return to the default with `--clear -w <dir>`. A closed tab or Chrome restart creates a replacement for that workspace. If no effective URL is configured, require user manual submission.
+When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the workspace's dedicated Project tab. The shared Project URL remains the default, but a workspace may override it with `gpt-worker chat-url <url> -w <dir>` and return to the default with `--clear -w <dir>`. A closed tab or Chrome restart creates a replacement in a new foreground Chrome window for that workspace. If no effective URL is configured, require user manual submission. `gpt-worker show-config [-w <dir>]` reports the default/override/effective URL resolution without printing credentials.

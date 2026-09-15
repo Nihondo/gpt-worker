@@ -70,7 +70,7 @@ export function normalizeChromeTabId(tabId) {
 }
 
 /** Build the AppleScript separately so its generated syntax can be compiled
- *  in a macOS test without opening or changing a Chrome tab. */
+ *  in a macOS test without opening or changing a Chrome window. */
 export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelayMs = 1500, tabId } = {}) {
   const savedTabId = normalizeChromeTabId(tabId) || "";
   const safeUrl = escapeForAppleScript(url);
@@ -119,13 +119,11 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
       end repeat
       end if
       if selectedTab is missing value then
-        if (count of windows) is 0 then
-          make new window
-        end if
-        set selectedWindow to front window
+        set selectedWindow to make new window
         tell selectedWindow
-          set selectedTab to make new tab with properties {URL:targetURL}
-          set active tab index to (count of tabs)
+          set selectedTab to tab 1
+          set URL of selectedTab to targetURL
+          set active tab index to 1
           set index to 1
         end tell
       else
