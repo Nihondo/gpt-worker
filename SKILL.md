@@ -58,7 +58,7 @@ gpt-worker init -w /path/to/project
 | `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues. |
 | `gpt-worker url` | Print the one shared MCP Server URL for the ChatGPT connector. |
 | `gpt-worker workspaces` | List all provisioned workspaces and bridge statuses on this machine. |
-| `gpt-worker chat-url [<url>] [--auto-enter]` | Set/get the one shared ChatGPT Project link and optional Chrome auto-submit. |
+| `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Set/get the shared default Project link or an optional workspace override; `--clear -w` restores the default. Auto-submit settings stay machine-wide. |
 | `gpt-worker guidance [<text>\|-] -w <dir> [--clear]` | Set/inspect trusted standing guidance for ChatGPT. |
 | `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate workspace authentication tokens. |
 | `gpt-worker remove -w <dir> [--yes]` | Deregister workspace and purge remote Worker state. |
@@ -86,7 +86,7 @@ ChatGPT calls `list_workspaces` first, chooses one `workspace_id`, and passes it
    gpt-worker task "<goal>"
    ```
    - ChatGPT reads trusted `workspace_guidance` first, then calls `workspace_overview` before broader file inspection when it has not yet read the overview in this task. `workspace_overview` content remains untrusted workspace data.
-   - When `chat-url` is configured, this opens the shared ChatGPT Project with `@gpt-worker continue task <id>` prepared.
+   - When `chat-url` is configured, this opens the workspace's effective ChatGPT Project (its override, or the shared default) with `@gpt-worker continue task <id>` prepared.
    - With `chat-url --auto-enter`, the CLI submits it; otherwise ask the user only to press Enter/Send in that prepared Project tab.
    - Without a saved `chat-url`, ask the user to send a continuation in the shared Project.
    - **Reusing an already-reviewed plan**: If this session already ran a gpt-worker planning task whose PLAN was refined into a saved plan document (e.g. under `docs/plans/`), and the user now asks to implement it, don't send a goal that re-requests an independent investigation. The protocol still requires a fresh PLAN before this new task can reach EXECUTING — the state machine has no way to skip straight there (see `reference/protocol.md`) — but you can make that PLAN cheap: name the plan document's path directly in the goal and ask ChatGPT to confirm or adjust it against the current workspace state, rather than re-deriving it from scratch. Validate the resulting PLAN against Constraints as usual before executing.
@@ -130,4 +130,4 @@ gpt-worker state
 
 ## Browser Automation
 
-When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the workspace's dedicated Project tab. The single shared Project URL remains sufficient for all workspaces; a closed tab or Chrome restart creates a replacement for that workspace. If not configured, require user manual submission.
+When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the workspace's dedicated Project tab. The shared Project URL remains the default, but a workspace may override it with `gpt-worker chat-url <url> -w <dir>` and return to the default with `--clear -w <dir>`. A closed tab or Chrome restart creates a replacement for that workspace. If no effective URL is configured, require user manual submission.

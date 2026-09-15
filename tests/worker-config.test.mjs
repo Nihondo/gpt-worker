@@ -10,10 +10,10 @@ const { readWorkerConfig, updateWorkerConfigAtomic, writeWorkerConfigAtomic } = 
 
 after(() => fs.rmSync(configDir, { recursive: true, force: true }));
 
-test("serialized config updates preserve mappings added from stale snapshots", () => {
+test("serialized config updates preserve URL and tab mappings added from stale snapshots", () => {
   const workspaceA = "a1b2c3d4e5f60708";
   const workspaceB = "b1b2c3d4e5f60708";
-  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-example/project", chromeTabsByWorkspace: {} });
+  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-example/project", chromeTabsByWorkspace: {}, chatUrlsByWorkspace: {} });
 
   // Two CLIs may both have seen this old state before either writes.
   const staleA = readWorkerConfig();
@@ -23,34 +23,45 @@ test("serialized config updates preserve mappings added from stale snapshots", (
   updateWorkerConfigAtomic((current) => ({
     ...current,
     chromeTabsByWorkspace: { ...current.chromeTabsByWorkspace, [workspaceA]: "101" },
+    chatUrlsByWorkspace: { ...current.chatUrlsByWorkspace, [workspaceA]: "https://chatgpt.com/g/g-p-a/project" },
   }));
   updateWorkerConfigAtomic((current) => ({
     ...current,
     chromeTabsByWorkspace: { ...current.chromeTabsByWorkspace, [workspaceB]: "202" },
+    chatUrlsByWorkspace: { ...current.chatUrlsByWorkspace, [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
   }));
 
   assert.deepEqual(readWorkerConfig().chromeTabsByWorkspace, { [workspaceA]: "101", [workspaceB]: "202" });
+  assert.deepEqual(readWorkerConfig().chatUrlsByWorkspace, {
+    [workspaceA]: "https://chatgpt.com/g/g-p-a/project",
+    [workspaceB]: "https://chatgpt.com/g/g-p-b/project",
+  });
 });
 
-test("a removal based on an old snapshot retains a later workspace mapping", () => {
+test("a removal based on an old snapshot retains a later workspace URL and tab mapping", () => {
   const workspaceA = "a1b2c3d4e5f60708";
   const workspaceB = "b1b2c3d4e5f60708";
   writeWorkerConfigAtomic({
     chatUrl: "https://chatgpt.com/g/g-p-example/project",
     chromeTabsByWorkspace: { [workspaceA]: "101" },
+    chatUrlsByWorkspace: { [workspaceA]: "https://chatgpt.com/g/g-p-a/project" },
   });
 
   const staleRemoval = readWorkerConfig();
   updateWorkerConfigAtomic((current) => ({
     ...current,
     chromeTabsByWorkspace: { ...current.chromeTabsByWorkspace, [workspaceB]: "202" },
+    chatUrlsByWorkspace: { ...current.chatUrlsByWorkspace, [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
   }));
   updateWorkerConfigAtomic((current) => {
     const tabs = { ...current.chromeTabsByWorkspace };
+    const urls = { ...current.chatUrlsByWorkspace };
     delete tabs[workspaceA];
-    return { ...current, chromeTabsByWorkspace: tabs };
+    delete urls[workspaceA];
+    return { ...current, chromeTabsByWorkspace: tabs, chatUrlsByWorkspace: urls };
   });
 
   assert.equal(staleRemoval.chromeTabsByWorkspace[workspaceA], "101");
   assert.deepEqual(readWorkerConfig().chromeTabsByWorkspace, { [workspaceB]: "202" });
+  assert.deepEqual(readWorkerConfig().chatUrlsByWorkspace, { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" });
 });

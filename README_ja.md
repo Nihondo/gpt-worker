@@ -87,7 +87,14 @@ same workspace_id.
 gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
 ```
 
-- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。Project の `/project` URL は一度だけ保存してください。複数のワークスペースがその Project を共有していても、gpt-worker がワークスペースごとに専用の Chrome タブを自動管理します。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
+- このコマンドは共有のデフォルト Project URL を設定します。ワークスペースは個別 override を設定しない限り、この URL を使います。
+
+```bash
+gpt-worker chat-url "https://chatgpt.com/g/g-p-workspace/project" -w /path/to/project
+gpt-worker chat-url --clear -w /path/to/project  # 共有デフォルトへ戻す
+```
+
+- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。各ワークスペースには、実効 Project URL（個別 override、または共有デフォルト）に紐付く再利用可能な Chrome タブがあります。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません。`--auto-enter`、`--no-auto-enter`、`--enter-delay` は引き続きマシン全体の設定です（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
 
 ---
 
@@ -281,7 +288,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker report -w <dir> --changed <n> --tests "<summary>"` | 実行結果を ChatGPT に報告 |
 | `gpt-worker state -w <dir>` | 現在のアクティブなタスク状態（JSON）を表示 |
 | `gpt-worker queue -w <dir> [--discard <id>]` | 未処理メッセージキューの確認・破棄 |
-| `gpt-worker chat-url [<url>] [--auto-enter]` | 共通 ChatGPT Project URL の確認・設定（自動送信設定） |
+| `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | 共有デフォルト Project URL または任意のワークスペース override を確認・設定。`--clear -w` でデフォルトへ戻す |
 | `gpt-worker guidance [<text>] -w <dir> [--clear]` | プロジェクト固有の計画指針を設定・確認・消去 |
 | `gpt-worker allow-read <file> -w <dir>` | Git ignore された exact file 1つの MCP direct read を許可 |
 | `gpt-worker deny-read <file> -w <dir>` | direct read の例外を取り消し |

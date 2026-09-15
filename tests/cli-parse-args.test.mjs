@@ -7,10 +7,16 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildChatOpenUrl,
+  effectiveChatUrl,
+  isChatGptUrl,
   parseArgs,
   selectWaitMessages,
   withChatUrl,
+  withWorkspaceChatUrl,
   withWorkspaceChromeTab,
+  withoutWorkspaceChatSettings,
+  withoutWorkspaceChatUrl,
+  workspaceChatUrl,
   withoutWorkspaceChromeTab,
   workspaceChromeTabId,
 } from "../bridge/cli.mjs";
@@ -112,6 +118,68 @@ describe("workspace Chrome tab mapping", () => {
 
     assert.equal(Object.hasOwn(changed, "chromeTabsByWorkspace"), false);
     assert.deepEqual(unchanged.chromeTabsByWorkspace, settings.chromeTabsByWorkspace);
+  });
+
+  test("resolves a workspace override, or falls back to the shared default", () => {
+    const settings = {
+      chatUrl: "https://chatgpt.com/g/g-p-default/project",
+      chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
+    };
+    assert.equal(workspaceChatUrl(settings, workspaceA), null);
+    assert.equal(workspaceChatUrl(settings, workspaceB), "https://chatgpt.com/g/g-p-b/project");
+    assert.equal(effectiveChatUrl(settings, workspaceA), settings.chatUrl);
+    assert.equal(effectiveChatUrl(settings, workspaceB), "https://chatgpt.com/g/g-p-b/project");
+    assert.equal(workspaceChatUrl({ chatUrlsByWorkspace: [] }, workspaceA), null);
+    assert.equal(workspaceChatUrl({ chatUrlsByWorkspace: { [workspaceA]: 42 } }, workspaceA), null);
+    assert.equal(workspaceChatUrl({ chatUrlsByWorkspace: { [workspaceA]: "not a URL" } }, workspaceA), null);
+    assert.equal(isChatGptUrl("https://chatgpt.com/g/g-p-example/project"), true);
+    assert.equal(isChatGptUrl("https://example.com/g/g-p-example/project"), false);
+  });
+
+  test("changing or clearing an override invalidates only that workspace's tab", () => {
+    const base = {
+      chatUrl: "https://chatgpt.com/g/g-p-default/project",
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      chatUrlsByWorkspace: { [workspaceA]: "https://chatgpt.com/g/g-p-a-old/project" },
+    };
+    const changed = withWorkspaceChatUrl(base, workspaceA, "https://chatgpt.com/g/g-p-a-new/project");
+    assert.equal(workspaceChromeTabId(changed, workspaceA), null);
+    assert.equal(workspaceChromeTabId(changed, workspaceB), "202");
+    assert.equal(workspaceChatUrl(changed, workspaceA), "https://chatgpt.com/g/g-p-a-new/project");
+
+    const cleared = withoutWorkspaceChatUrl(changed, workspaceA);
+    assert.equal(workspaceChatUrl(cleared, workspaceA), null);
+    assert.equal(effectiveChatUrl(cleared, workspaceA), base.chatUrl);
+    assert.equal(workspaceChromeTabId(cleared, workspaceB), "202");
+  });
+
+  test("changing the default preserves tabs for explicit overrides only", () => {
+    const base = {
+      chatUrl: "https://chatgpt.com/g/g-p-old-default/project",
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
+    };
+    const changed = withChatUrl(base, "https://chatgpt.com/g/g-p-new-default/project");
+    assert.equal(workspaceChromeTabId(changed, workspaceA), null);
+    assert.equal(workspaceChromeTabId(changed, workspaceB), "202");
+    assert.equal(effectiveChatUrl(changed, workspaceA), "https://chatgpt.com/g/g-p-new-default/project");
+    assert.equal(effectiveChatUrl(changed, workspaceB), base.chatUrlsByWorkspace[workspaceB]);
+  });
+
+  test("workspace removal cleans both its override and tab metadata only", () => {
+    const base = {
+      chatUrl: "https://chatgpt.com/g/g-p-default/project",
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      chatUrlsByWorkspace: {
+        [workspaceA]: "https://chatgpt.com/g/g-p-a/project",
+        [workspaceB]: "https://chatgpt.com/g/g-p-b/project",
+      },
+    };
+    const result = withoutWorkspaceChatSettings(base, workspaceA);
+    assert.equal(workspaceChromeTabId(result, workspaceA), null);
+    assert.equal(workspaceChatUrl(result, workspaceA), null);
+    assert.equal(workspaceChromeTabId(result, workspaceB), "202");
+    assert.equal(workspaceChatUrl(result, workspaceB), base.chatUrlsByWorkspace[workspaceB]);
   });
 });
 

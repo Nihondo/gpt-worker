@@ -171,11 +171,31 @@ export function buildChatOpenUrl(chatUrl, taskId) {
   }
 }
 
+export function isChatGptUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && parsed.hostname === "chatgpt.com";
+  } catch {
+    return false;
+  }
+}
+
 export function workspaceChromeTabId(settings, workspaceId) {
   const tabs = settings?.chromeTabsByWorkspace;
   if (!workspaceId || !tabs || typeof tabs !== "object" || Array.isArray(tabs)) return null;
   const tabId = tabs[workspaceId];
   return typeof tabId === "string" && /^[1-9]\d*$/.test(tabId) ? tabId : null;
+}
+
+export function workspaceChatUrl(settings, workspaceId) {
+  const urls = settings?.chatUrlsByWorkspace;
+  if (!workspaceId || !urls || typeof urls !== "object" || Array.isArray(urls)) return null;
+  const url = urls[workspaceId];
+  return typeof url === "string" && isChatGptUrl(url) ? url : null;
+}
+
+export function effectiveChatUrl(settings, workspaceId) {
+  return workspaceChatUrl(settings, workspaceId) || settings?.chatUrl || null;
 }
 
 export function withWorkspaceChromeTab(settings, workspaceId, tabId) {
@@ -203,21 +223,64 @@ export function withoutWorkspaceChromeTab(settings, workspaceId) {
   return next;
 }
 
+/** Set a workspace-only Project URL. A tab can be kept only when the actual
+ *  effective URL did not change. */
+export function withWorkspaceChatUrl(settings, workspaceId, chatUrl) {
+  if (!settings || !workspaceId || !isChatGptUrl(chatUrl)) return settings;
+  const previousEffectiveUrl = effectiveChatUrl(settings, workspaceId);
+  const currentOverride = workspaceChatUrl(settings, workspaceId);
+  if (currentOverride === chatUrl) return settings;
+  const next = {
+    ...settings,
+    chatUrlsByWorkspace: {
+      ...(settings.chatUrlsByWorkspace && typeof settings.chatUrlsByWorkspace === "object" && !Array.isArray(settings.chatUrlsByWorkspace)
+        ? settings.chatUrlsByWorkspace
+        : {}),
+      [workspaceId]: chatUrl,
+    },
+  };
+  return previousEffectiveUrl === chatUrl ? next : withoutWorkspaceChromeTab(next, workspaceId);
+}
+
+/** Remove a workspace-only Project URL and return the workspace to the
+ *  machine-wide default. */
+export function withoutWorkspaceChatUrl(settings, workspaceId) {
+  const urls = settings?.chatUrlsByWorkspace;
+  if (!settings || !workspaceId || !urls || typeof urls !== "object" || Array.isArray(urls) || !Object.hasOwn(urls, workspaceId)) return settings;
+  const previousEffectiveUrl = effectiveChatUrl(settings, workspaceId);
+  const nextUrls = { ...urls };
+  delete nextUrls[workspaceId];
+  const next = { ...settings };
+  if (Object.keys(nextUrls).length === 0) delete next.chatUrlsByWorkspace;
+  else next.chatUrlsByWorkspace = nextUrls;
+  return previousEffectiveUrl === effectiveChatUrl(next, workspaceId) ? next : withoutWorkspaceChromeTab(next, workspaceId);
+}
+
+export function withoutWorkspaceChatSettings(settings, workspaceId) {
+  return withoutWorkspaceChromeTab(withoutWorkspaceChatUrl(settings, workspaceId), workspaceId);
+}
+
 export function withChatUrl(settings, chatUrl) {
   const next = { ...settings, chatUrl };
-  if (settings?.chatUrl !== chatUrl) delete next.chromeTabsByWorkspace;
+  if (settings?.chatUrl === chatUrl) return next;
+  const tabs = settings?.chromeTabsByWorkspace;
+  if (!tabs || typeof tabs !== "object" || Array.isArray(tabs)) return next;
+  const overrideTabs = Object.fromEntries(Object.entries(tabs).filter(([workspaceId]) => workspaceChatUrl(settings, workspaceId)));
+  if (Object.keys(overrideTabs).length === 0) delete next.chromeTabsByWorkspace;
+  else next.chromeTabsByWorkspace = overrideTabs;
   return next;
 }
 
 function nudgeChatGpt(settings, taskId, workspaceId) {
-  if (!(settings && settings.chatUrl)) {
+  const chatUrl = effectiveChatUrl(settings, workspaceId);
+  if (!chatUrl) {
     console.log('Ask the user to tell ChatGPT "continue" in the gpt-worker project (set a one-click link with: gpt-worker chat-url <url>).');
     return;
   }
-  const url = buildChatOpenUrl(settings.chatUrl, taskId);
+  const url = buildChatOpenUrl(chatUrl, taskId);
 
   const chromeResult = isChromeAutomationAvailable()
-    ? openInChromeAndSubmit(url, settings.chatUrl, {
+    ? openInChromeAndSubmit(url, chatUrl, {
         autoEnter: !!settings.autoEnter,
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
@@ -225,7 +288,7 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
     : false;
   if (chromeResult) {
     updateWorkerConfigAtomic((current) => {
-      if (!current || current.chatUrl !== settings.chatUrl) return current;
+      if (!current || effectiveChatUrl(current, workspaceId) !== chatUrl) return current;
       return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
     });
     console.log(
@@ -257,13 +320,15 @@ async function sharedChatSettings(cfg) {
   if (!worker || worker.chatUrl) return worker;
   const legacy = await localCall(cfg, "settings_get");
   if (legacy.error || !legacy.chatUrl) return worker;
-  worker = {
-    ...worker,
-    chatUrl: legacy.chatUrl,
-    autoEnter: !!legacy.autoEnter,
-    enterDelayMs: legacy.enterDelayMs,
-  };
-  writeWorkerConfigAtomic(worker);
+  worker = updateWorkerConfigAtomic((current) => {
+    if (!current || current.chatUrl) return current;
+    return {
+      ...current,
+      chatUrl: legacy.chatUrl,
+      autoEnter: !!legacy.autoEnter,
+      enterDelayMs: legacy.enterDelayMs,
+    };
+  });
   return worker;
 }
 
@@ -479,7 +544,7 @@ async function cmdRemove(args) {
   }
 
   if (worker) {
-    updateWorkerConfigAtomic((current) => withoutWorkspaceChromeTab(current, tokens.workspaceId));
+    updateWorkerConfigAtomic((current) => withoutWorkspaceChatSettings(current, tokens.workspaceId));
   }
   removeWorkspaceStateDir(root);
   console.log("Removed.");
@@ -582,10 +647,21 @@ async function cmdChatUrl(args) {
     console.error("Not initialized. Run: gpt-worker init -w <workspace>");
     process.exit(1);
   }
+  const workspaceCfg = args.workspace ? requireWorkspaceConfig(workspaceRoot(args)) : null;
+  const workspaceId = workspaceCfg?.workspaceId;
   const url = args._[0];
   const current = worker;
   const next = {};
   let flagsChanged = false;
+
+  if (args.clear && !workspaceId) {
+    console.error("--clear requires -w <workspace>; the shared chat-url is the default and cannot be cleared this way.");
+    process.exit(1);
+  }
+  if (args.clear && url) {
+    console.error("Use either a URL or --clear, not both.");
+    process.exit(1);
+  }
 
   if (args["auto-enter"]) {
     if (!isChromeAutomationAvailable()) {
@@ -603,31 +679,45 @@ async function cmdChatUrl(args) {
     flagsChanged = true;
   }
 
+  if (args.clear) {
+    const saved = updateWorkerConfigAtomic((config) => ({ ...withoutWorkspaceChatUrl(config || worker, workspaceId), ...next }));
+    console.log(`Cleared this workspace's Project URL override. Effective URL: ${effectiveChatUrl(saved, workspaceId) || "(none; set the shared default with: gpt-worker chat-url <url>)"}`);
+    if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+    return;
+  }
+
   if (!url) {
     if (flagsChanged) {
       const saved = updateWorkerConfigAtomic((current) => ({ ...(current || worker), ...next }));
-      console.log(`Saved. autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""}`);
+      console.log(`Saved. autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+      return;
+    }
+    if (workspaceId) {
+      const override = workspaceChatUrl(current, workspaceId);
+      console.log(`workspace override: ${override || "(none; using the shared default)"}`);
+      console.log(`shared default    : ${current.chatUrl || "(none)"}`);
+      console.log(`effective URL     : ${effectiveChatUrl(current, workspaceId) || "(none)"}`);
       return;
     }
     console.log(current.chatUrl || "(none set for the shared ChatGPT Project)");
     return;
   }
 
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    console.error("Not a valid URL.");
-    process.exit(1);
-  }
-  if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") {
+  if (!isChatGptUrl(url)) {
     console.error("Expected an https://chatgpt.com/... Project URL.");
     process.exit(1);
   }
+  if (workspaceId) {
+    const saved = updateWorkerConfigAtomic((config) => ({ ...withWorkspaceChatUrl(config || worker, workspaceId, url), ...next }));
+    console.log(`Saved this workspace's ChatGPT Project URL override. 'gpt-worker task' / 'gpt-worker report' will use it for this workspace.`);
+    if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
+    return;
+  }
+
   next.chatUrl = url;
-  const saved = updateWorkerConfigAtomic((current) => ({ ...withChatUrl(current || worker, url), ...next }));
-  console.log(`Saved. 'gpt-worker task' / 'gpt-worker report' will open this shared ChatGPT Project automatically from now on.`);
-  if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""}`);
+  const saved = updateWorkerConfigAtomic((config) => ({ ...withChatUrl(config || worker, url), ...next }));
+  console.log(`Saved the shared default. Workspaces without an override will use this ChatGPT Project automatically.`);
+  if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""} (machine-wide)`);
 }
 
 /** Standing planning/review guidance is owner-authenticated and stored with
