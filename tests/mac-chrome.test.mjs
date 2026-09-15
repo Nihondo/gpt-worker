@@ -94,13 +94,16 @@ describe("workspace tab AppleScript", () => {
 });
 
 describe("autoEnter submit step", () => {
-  test("omits the submit step entirely when autoEnter is off (the default)", () => {
+  test("omits the submit step entirely when autoEnter is off (the default), and still reports SKIPPED", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope);
     assert.doesNotMatch(script, /execute selectedTab javascript/);
     assert.doesNotMatch(script, /keystroke return/);
+    assert.doesNotMatch(script, /System Events/);
+    assert.match(script, /set submitOutcome to "SKIPPED"/);
+    assert.match(script, /return selectedTabID & "\|" & submitOutcome/);
   });
 
-  test("tries clicking ChatGPT's send button via Chrome's own JS execution before falling back to keystroke return", () => {
+  test("tries clicking ChatGPT's send button via Chrome's own JS execution, with no keystroke fallback of any kind", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true, enterDelayMs: 2000 });
 
     assert.match(script, /delay 2\.00/);
@@ -108,8 +111,10 @@ describe("autoEnter submit step", () => {
     // send-button click JS must reach AppleScript with no unescaped quotes
     assert.match(script, /document\.querySelector\('\[data-testid=send-button\]'\)/);
     assert.match(script, /repeat while submitOutcome is not "CLICKED"/);
-    // the keystroke fallback must still run whenever the JS route never clicks
-    assert.match(script, /if submitOutcome is not "CLICKED" then\s*\n\s*tell application "System Events" to keystroke return/);
+    // no System Events / keystroke fallback anywhere — a failed JS submit must
+    // stay a no-op rather than sending a keystroke to whatever window has focus
+    assert.doesNotMatch(script, /keystroke/);
+    assert.doesNotMatch(script, /System Events/);
   });
 
   test("tolerates a couple of execute-javascript errors as retryable (a mid-navigation tab can throw transiently) rather than bailing on the first one", () => {
@@ -118,11 +123,13 @@ describe("autoEnter submit step", () => {
     assert.match(script, /repeat while submitOutcome is not "CLICKED" and jsErrorCount < \d+ and attemptCount < \d+/);
   });
 
-  test("still falls back to keystroke once errors (not just disabled-button retries) are exhausted", () => {
+  test("leaves submitOutcome as the last failure reason (not CLICKED) once errors or disabled-button retries are exhausted, for the caller to report", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { autoEnter: true });
     const maxErrorsMatch = script.match(/jsErrorCount < (\d+)/);
     assert.ok(maxErrorsMatch, "expected a jsErrorCount cap in the generated script");
     assert.ok(Number(maxErrorsMatch[1]) >= 2, "a single transient error must not be treated as permanent");
+    // the loop's own exit condition is the only thing that stops retries — nothing forces submitOutcome to CLICKED
+    assert.doesNotMatch(script, /set submitOutcome to "CLICKED"/);
   });
 });
 

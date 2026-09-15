@@ -94,8 +94,8 @@ gpt-worker chat-url "https://chatgpt.com/g/g-p-workspace/project" -w /path/to/pr
 gpt-worker chat-url --clear -w /path/to/project  # 共有デフォルトへ戻す
 ```
 
-- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。各ワークスペースには、実効 Project URL（個別 override、または共有デフォルト）に紐付く再利用可能な Chrome タブがあります。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません。`--auto-enter`、`--no-auto-enter`、`--enter-delay` は引き続きマシン全体の設定です（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
-- キーボードフォーカスを奪わずに送信したい場合（他のウィンドウでの作業を妨げたくない場合）は、Chrome の **表示 → 開発 → Apple Eventsからのjavascriptを許可** を有効にして Chrome を再起動してください。これは任意設定です。無効のままでも `--auto-enter` は動作しますが、その場合は最前面のウィンドウへキー入力を送る方式になります。
+- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後、**完全にバックグラウンドで**メッセージを自動送信します（キーボードフォーカスを奪わず、他のウィンドウでの作業を妨げません）。各ワークスペースには、実効 Project URL（個別 override、または共有デフォルト）に紐付く再利用可能な Chrome タブがあります。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません。`--auto-enter`、`--no-auto-enter`、`--enter-delay` は引き続きマシン全体の設定です。
+- `--auto-enter` を使うには、Chrome の **表示 → 開発 → Apple Eventsからのjavascriptを許可** を有効にして Chrome を再起動する必要があります（初回のみの設定、デフォルトは無効）。キー入力送信によるフォールバックはありません。この設定が無効な場合、gpt-worker はプロンプトを準備した状態でタブを開き、その場でEnter/送信を押すようユーザーに伝えます（最前面のウィンドウへ黙ってキー入力を送ることはしません）。
 
 コネクタやワークスペースの認証情報を出さずに、これらのブラウザ向け設定を確認するには `show-config` を使います。
 

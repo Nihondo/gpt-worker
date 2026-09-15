@@ -2,15 +2,19 @@
 // tab (rather than opening a new one every round) and, optionally, submit
 // the task prompt for the user. Everything here is best-effort — on any
 // failure the caller falls back to the cross-platform `openBrowser()` (a
-// fresh tab, no auto-Enter).
+// fresh tab, no auto-submit).
 //
-// Submission itself is two-tiered: first try clicking ChatGPT's send button
-// via Chrome's own "execute ... javascript" Apple Event, which needs no
-// window focus — but only works once the user has enabled Chrome's View >
-// Developer > "Allow JavaScript from Apple Events" (off by default, and not
-// something gpt-worker can detect or set). If that's unavailable or the
-// button never becomes clickable, fall back to a `keystroke return` sent to
-// the frontmost window, same as before this existed.
+// Submission clicks ChatGPT's send button via Chrome's own
+// "execute ... javascript" Apple Event, which needs no window focus — but
+// only works once the user has enabled Chrome's View > Developer > "Allow
+// JavaScript from Apple Events" (off by default, and not something
+// gpt-worker can detect or set). There is deliberately no fallback that
+// sends a keystroke to the frontmost window instead: doing so would depend
+// on whichever window happens to be focused, which is exactly the kind of
+// side effect this background-only design exists to avoid. When submission
+// doesn't happen, the caller reports the outcome (see `submitted` on
+// `openInChromeAndSubmit`'s return value) so it can point the user at that
+// Chrome setting instead of silently misfiring a keystroke elsewhere.
 //
 // Why AppleScript and not just `open`: `open <url>` always creates a new
 // tab, so tabs pile up over many task/report rounds. Driving Chrome directly
@@ -113,12 +117,12 @@ export function normalizeChromeTabId(tabId) {
 }
 
 /** Clicks ChatGPT's send button via Chrome's own "execute ... javascript"
- *  Apple Event (needs no window focus, unlike the `keystroke return`
- *  fallback below) — but only works once the user has enabled Chrome's
- *  View > Developer > "Allow JavaScript from Apple Events" and relaunched
- *  Chrome, which is off by default and not something gpt-worker can detect
- *  or set for them. Selector values are unquoted CSS idents (valid since
- *  none contain spaces or special characters) and every JS string uses
+ *  Apple Event (needs no window focus) — but only works once the user has
+ *  enabled Chrome's View > Developer > "Allow JavaScript from Apple Events"
+ *  and relaunched Chrome, which is off by default and not something
+ *  gpt-worker can detect or set for them. Selector values are unquoted CSS
+ *  idents (valid since none contain spaces or special characters) and
+ *  every JS string uses
  *  single quotes, so this snippet has no double quotes or backslashes and
  *  needs no escaping beyond the routine escapeForAppleScript() pass applied
  *  where it's interpolated. */
@@ -175,10 +179,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
           delay ${RETRY_INTERVAL_SEC}
         end if
         set attemptCount to attemptCount + 1
-      end repeat
-      if submitOutcome is not "CLICKED" then
-        tell application "System Events" to keystroke return
-      end if`
+      end repeat`
     : "";
 
   return `
@@ -239,15 +240,20 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
         end tell
       end if
       set selectedTabID to (id of selectedTab) as text
+      set submitOutcome to "SKIPPED"
       ${submitStep}
     end tell
-    return selectedTabID
+    return selectedTabID & "|" & submitOutcome
   `;
 }
 
 /** Reuse only the tab previously assigned to this workspace when it is still
  *  in the saved ChatGPT Project. If it is absent or stale, create a new tab
- *  and return its ID so the caller can associate it with the workspace. */
+ *  and return its ID so the caller can associate it with the workspace.
+ *  `submitted` is only ever true when the send button was actually clicked
+ *  in the background — false means nothing was submitted (autoEnter was
+ *  off, or the JS route never became available/clickable), so the caller
+ *  can tell the user what to do instead of assuming it went through. */
 export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
@@ -257,9 +263,12 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   const script = buildChromeTabScript(url, scope, options);
 
   try {
-    const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" });
-    const selectedTabId = normalizeChromeTabId(output);
-    return selectedTabId ? { tabId: selectedTabId } : false;
+    const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" }).trim();
+    const separatorIndex = output.indexOf("|");
+    const tabIdPart = separatorIndex === -1 ? output : output.slice(0, separatorIndex);
+    const submitOutcome = separatorIndex === -1 ? "" : output.slice(separatorIndex + 1);
+    const selectedTabId = normalizeChromeTabId(tabIdPart);
+    return selectedTabId ? { tabId: selectedTabId, submitted: submitOutcome === "CLICKED" } : false;
   } catch {
     return false;
   }

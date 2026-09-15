@@ -310,11 +310,16 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
       if (!current || effectiveChatUrl(current, workspaceId) !== chatUrl) return current;
       return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
     });
-    console.log(
-      settings.autoEnter
-        ? "Sent to ChatGPT automatically (workspace tab reused, Enter sent) — check that it went through."
-        : "Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready — press Enter/Send there."
-    );
+    if (chromeResult.submitted) {
+      console.log("Sent to ChatGPT automatically in the background (workspace tab reused, no window focus change) — check that it went through.");
+    } else if (settings.autoEnter) {
+      console.log(
+        "Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready, but could not auto-submit in the background — press Enter/Send there.\n" +
+          'For background auto-submit, enable Chrome\'s View > Developer > "Allow JavaScript from Apple Events" and relaunch Chrome.'
+      );
+    } else {
+      console.log("Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready — press Enter/Send there.");
+    }
     return;
   }
 
