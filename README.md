@@ -87,7 +87,7 @@ Save your ChatGPT Project URL (from your browser's address bar) in the CLI:
 gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
 ```
 
-- With `--auto-enter`, Chrome automatically submits the task prompt when opened. Save the Project's `/project` URL: after a submission changes it to the same Project's `/c/<conversation-id>` URL, gpt-worker reuses that tab. Tabs from other Projects and ordinary ChatGPT conversations are never reused. (Grant macOS Accessibility permissions when prompted on the first run).
+- With `--auto-enter`, Chrome automatically submits the task prompt when opened. Save the Project's `/project` URL once: gpt-worker automatically keeps a dedicated Chrome tab for each registered workspace, even though they share that Project. Closing a tab or restarting Chrome safely creates a replacement for only that workspace. Tabs from other Projects and ordinary ChatGPT conversations are never reused. (Grant macOS Accessibility permissions when prompted on the first run).
 
 ---
 

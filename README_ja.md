@@ -87,7 +87,7 @@ same workspace_id.
 gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project" --auto-enter
 ```
 
-- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。Project の `/project` URL を保存してください。送信後に同じ Project の `/c/<conversation-id>` URL へ遷移しても、gpt-worker はそのタブを再利用します。別 Project と通常の ChatGPT 会話のタブは再利用しません（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
+- `--auto-enter` オプションを指定すると、Chrome でタブを開いた後にメッセージを自動送信します。Project の `/project` URL は一度だけ保存してください。複数のワークスペースがその Project を共有していても、gpt-worker がワークスペースごとに専用の Chrome タブを自動管理します。タブを閉じた場合や Chrome を再起動した場合も、該当ワークスペースのタブだけを安全に作り直します。別 Project と通常の ChatGPT 会話のタブは再利用しません（初回実行時に macOS の「アクセシビリティ」許可ダイアログが表示された場合は許可してください）。
 
 ---
 

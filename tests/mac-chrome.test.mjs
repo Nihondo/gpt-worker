@@ -2,9 +2,11 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   chatGptProjectScope,
+  buildChromeTabScript,
   escapeForAppleScript,
   isChromeAutomationAvailable,
   matchesChatGptProjectScope,
+  normalizeChromeTabId,
 } from "../bridge/mac-chrome.mjs";
 
 const projectURL = "https://chatgpt.com/g/g-p-example-gpt-worker/project";
@@ -33,6 +35,37 @@ describe("isChromeAutomationAvailable", () => {
     if (process.platform !== "darwin") {
       assert.equal(isChromeAutomationAvailable(), false);
     }
+  });
+});
+
+describe("normalizeChromeTabId", () => {
+  test("accepts Chrome's positive numeric tab IDs as strings", () => {
+    assert.equal(normalizeChromeTabId(540586144), "540586144");
+    assert.equal(normalizeChromeTabId("42"), "42");
+    assert.equal(normalizeChromeTabId(" 42 "), "42");
+  });
+
+  test("rejects empty, non-numeric, and unsafe persisted IDs", () => {
+    for (const value of [undefined, null, "", "0", "-1", "1.5", "1; tell application \"Finder\""]) {
+      assert.equal(normalizeChromeTabId(value), null, String(value));
+    }
+  });
+});
+
+describe("workspace tab AppleScript", () => {
+  test("targets only the saved tab ID while retaining the Project scope check", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
+
+    assert.match(script, /set savedTabID to "540586144"/);
+    assert.match(script, /if \(\(id of t\) as text\) is savedTabID then/);
+    assert.match(script, /set isProjectTab to candidateURL is projectURL/);
+    assert.match(script, /set selectedTabID to \(id of selectedTab\) as text/);
+  });
+
+  test("does not interpolate malformed persisted values into the script", () => {
+    const script = buildChromeTabScript(projectURL, scope, { tabId: '1; tell application "Finder"' });
+    assert.match(script, /set savedTabID to ""/);
+    assert.doesNotMatch(script, /Finder/);
   });
 });
 

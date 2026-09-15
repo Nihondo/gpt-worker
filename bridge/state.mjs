@@ -4,7 +4,8 @@
 //
 // Machine/account-wide (one Worker deployment, shared by every workspace):
 //   ~/.config/gpt-worker/worker.json                 {workerUrl, adminToken,
-//                                                       hubGptToken, chatUrl, ...} (mode 600)
+//                                                       hubGptToken, chatUrl,
+//                                                       chromeTabsByWorkspace, ...} (mode 600)
 //
 // Per workspace (one Durable Object, its own gpt/link/cli tokens):
 //   ~/.local/state/gpt-worker/<slug>-<hash8>/tokens.json  {workspaceId, gptToken, linkToken, cliToken}
@@ -20,8 +21,11 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 
-const CONFIG_DIR = path.join(os.homedir(), ".config", "gpt-worker");
+// Tests can isolate the machine-wide config without touching a developer's
+// real connector settings. Production does not set this variable.
+const CONFIG_DIR = process.env.GPT_WORKER_CONFIG_DIR || path.join(os.homedir(), ".config", "gpt-worker");
 const WORKER_CONFIG_PATH = path.join(CONFIG_DIR, "worker.json");
+const WORKER_CONFIG_LOCK_PATH = `${WORKER_CONFIG_PATH}.lock`;
 // Tests point this at a temporary directory so they never write a developer's
 // real local bridge state. Production intentionally ignores it unless set.
 const STATE_ROOT = process.env.GPT_WORKER_STATE_ROOT || path.join(os.homedir(), ".local", "state", "gpt-worker");
@@ -86,7 +90,8 @@ export function fixPermissions() {
 
 // ---------------------------------------------------------------------------
 // Worker config (machine/account-wide: one Worker URL + the admin token used
-// to provision new workspaces — never a per-workspace secret).
+// to provision new workspaces — never a per-workspace secret). chatUrl and
+// chromeTabsByWorkspace are local browser UI preferences, not protocol state.
 // ---------------------------------------------------------------------------
 
 export function readWorkerConfig() {
@@ -99,6 +104,44 @@ export function readWorkerConfig() {
 
 export function writeWorkerConfigAtomic(data) {
   atomicWrite(WORKER_CONFIG_PATH, JSON.stringify(data, null, 2) + "\n", 0o600);
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Serialize small machine-wide config mutations across simultaneous CLI
+ *  processes. The lock protects read-modify-write callers from replacing a
+ *  tab association another workspace just added. */
+export function updateWorkerConfigAtomic(update) {
+  const deadline = Date.now() + 5_000;
+  let lockFd;
+  while (lockFd === undefined) {
+    try {
+      lockFd = fs.openSync(WORKER_CONFIG_LOCK_PATH, "wx", 0o600);
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      if (Date.now() >= deadline) throw new Error("Timed out acquiring the gpt-worker config lock.");
+      sleepSync(10);
+    }
+  }
+
+  try {
+    const current = readWorkerConfig();
+    const next = update(current);
+    if (next && next !== current) writeWorkerConfigAtomic(next);
+    return next;
+  } finally {
+    try {
+      fs.closeSync(lockFd);
+    } finally {
+      try {
+        fs.unlinkSync(WORKER_CONFIG_LOCK_PATH);
+      } catch {
+        /* lock already cleaned up by a failed process */
+      }
+    }
+  }
 }
 
 export function workerConfigPath() {

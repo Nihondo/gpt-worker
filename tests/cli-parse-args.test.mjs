@@ -5,7 +5,15 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildChatOpenUrl, parseArgs, selectWaitMessages } from "../bridge/cli.mjs";
+import {
+  buildChatOpenUrl,
+  parseArgs,
+  selectWaitMessages,
+  withChatUrl,
+  withWorkspaceChromeTab,
+  withoutWorkspaceChromeTab,
+  workspaceChromeTabId,
+} from "../bridge/cli.mjs";
 
 describe("parseArgs", () => {
   test("-w after a bare boolean flag is not swallowed as that flag's value", () => {
@@ -56,6 +64,54 @@ describe("buildChatOpenUrl", () => {
     const url = buildChatOpenUrl("https://chatgpt.com/g/g-p-example/project?prompt=@custom-worker", "task-123");
     const parsed = new URL(url);
     assert.equal(parsed.searchParams.get("prompt"), "@custom-worker continue task task-123");
+  });
+});
+
+describe("workspace Chrome tab mapping", () => {
+  const workspaceA = "a1b2c3d4e5f60708";
+  const workspaceB = "b1b2c3d4e5f60708";
+
+  test("keeps a dedicated tab ID per workspace without changing shared settings", () => {
+    const base = { workerUrl: "https://example.test", chatUrl: "https://chatgpt.com/g/g-p-example/project" };
+    const withA = withWorkspaceChromeTab(base, workspaceA, "101");
+    const withBoth = withWorkspaceChromeTab(withA, workspaceB, 202);
+
+    assert.equal(workspaceChromeTabId(withBoth, workspaceA), "101");
+    assert.equal(workspaceChromeTabId(withBoth, workspaceB), "202");
+    assert.equal(withBoth.chatUrl, base.chatUrl);
+    assert.deepEqual(base, { workerUrl: "https://example.test", chatUrl: "https://chatgpt.com/g/g-p-example/project" });
+  });
+
+  test("does not persist malformed IDs or rewrite an unchanged mapping", () => {
+    const base = { chromeTabsByWorkspace: { [workspaceA]: "101" } };
+    assert.equal(withWorkspaceChromeTab(base, workspaceA, "101"), base);
+    assert.equal(withWorkspaceChromeTab(base, workspaceB, "not-a-tab"), base);
+    assert.equal(workspaceChromeTabId({ chromeTabsByWorkspace: { [workspaceA]: "0" } }, workspaceA), null);
+  });
+
+  test("removes only the deregistered workspace's tab association", () => {
+    const base = { chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" } };
+    const result = withoutWorkspaceChromeTab(base, workspaceA);
+    assert.equal(workspaceChromeTabId(result, workspaceA), null);
+    assert.equal(workspaceChromeTabId(result, workspaceB), "202");
+    assert.deepEqual(base.chromeTabsByWorkspace, { [workspaceA]: "101", [workspaceB]: "202" });
+  });
+
+  test("drops the map entirely after its last workspace is removed", () => {
+    const result = withoutWorkspaceChromeTab({ chromeTabsByWorkspace: { [workspaceA]: "101" } }, workspaceA);
+    assert.equal(Object.hasOwn(result, "chromeTabsByWorkspace"), false);
+  });
+
+  test("clears all tab IDs when the shared Project URL changes", () => {
+    const settings = {
+      chatUrl: "https://chatgpt.com/g/g-p-old/project",
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+    };
+    const changed = withChatUrl(settings, "https://chatgpt.com/g/g-p-new/project");
+    const unchanged = withChatUrl(settings, settings.chatUrl);
+
+    assert.equal(Object.hasOwn(changed, "chromeTabsByWorkspace"), false);
+    assert.deepEqual(unchanged.chromeTabsByWorkspace, settings.chromeTabsByWorkspace);
   });
 });
 

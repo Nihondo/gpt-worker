@@ -130,4 +130,4 @@ gpt-worker state
 
 ## Browser Automation
 
-When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the project tab. If not configured, require user manual submission.
+When `chat-url --auto-enter` is configured (macOS Chrome), the CLI auto-submits continuation messages in the workspace's dedicated Project tab. The single shared Project URL remains sufficient for all workspaces; a closed tab or Chrome restart creates a replacement for that workspace. If not configured, require user manual submission.

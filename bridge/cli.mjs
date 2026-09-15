@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import {
-  readWorkerConfig, writeWorkerConfigAtomic, workerConfigPath,
+  readWorkerConfig, writeWorkerConfigAtomic, updateWorkerConfigAtomic, workerConfigPath,
   readTokens, writeTokensAtomic,
   readState, clearLegacyState,
   writePidFile, checkPid, removePidFile,
@@ -171,21 +171,67 @@ export function buildChatOpenUrl(chatUrl, taskId) {
   }
 }
 
-function nudgeChatGpt(settings, taskId) {
+export function workspaceChromeTabId(settings, workspaceId) {
+  const tabs = settings?.chromeTabsByWorkspace;
+  if (!workspaceId || !tabs || typeof tabs !== "object" || Array.isArray(tabs)) return null;
+  const tabId = tabs[workspaceId];
+  return typeof tabId === "string" && /^[1-9]\d*$/.test(tabId) ? tabId : null;
+}
+
+export function withWorkspaceChromeTab(settings, workspaceId, tabId) {
+  if (!settings || !workspaceId || !/^[1-9]\d*$/.test(String(tabId))) return settings;
+  if (workspaceChromeTabId(settings, workspaceId) === String(tabId)) return settings;
+  return {
+    ...settings,
+    chromeTabsByWorkspace: {
+      ...(settings.chromeTabsByWorkspace && typeof settings.chromeTabsByWorkspace === "object" && !Array.isArray(settings.chromeTabsByWorkspace)
+        ? settings.chromeTabsByWorkspace
+        : {}),
+      [workspaceId]: String(tabId),
+    },
+  };
+}
+
+export function withoutWorkspaceChromeTab(settings, workspaceId) {
+  const tabs = settings?.chromeTabsByWorkspace;
+  if (!settings || !workspaceId || !tabs || typeof tabs !== "object" || Array.isArray(tabs) || !Object.hasOwn(tabs, workspaceId)) return settings;
+  const nextTabs = { ...tabs };
+  delete nextTabs[workspaceId];
+  const next = { ...settings };
+  if (Object.keys(nextTabs).length === 0) delete next.chromeTabsByWorkspace;
+  else next.chromeTabsByWorkspace = nextTabs;
+  return next;
+}
+
+export function withChatUrl(settings, chatUrl) {
+  const next = { ...settings, chatUrl };
+  if (settings?.chatUrl !== chatUrl) delete next.chromeTabsByWorkspace;
+  return next;
+}
+
+function nudgeChatGpt(settings, taskId, workspaceId) {
   if (!(settings && settings.chatUrl)) {
     console.log('Ask the user to tell ChatGPT "continue" in the gpt-worker project (set a one-click link with: gpt-worker chat-url <url>).');
     return;
   }
   const url = buildChatOpenUrl(settings.chatUrl, taskId);
 
-  if (
-    isChromeAutomationAvailable() &&
-    openInChromeAndSubmit(url, settings.chatUrl, { autoEnter: !!settings.autoEnter, enterDelayMs: settings.enterDelayMs })
-  ) {
+  const chromeResult = isChromeAutomationAvailable()
+    ? openInChromeAndSubmit(url, settings.chatUrl, {
+        autoEnter: !!settings.autoEnter,
+        enterDelayMs: settings.enterDelayMs,
+        tabId: workspaceChromeTabId(settings, workspaceId),
+      })
+    : false;
+  if (chromeResult) {
+    updateWorkerConfigAtomic((current) => {
+      if (!current || current.chatUrl !== settings.chatUrl) return current;
+      return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
+    });
     console.log(
       settings.autoEnter
-        ? "Sent to ChatGPT automatically (Chrome tab reused, Enter sent) — check that it went through."
-        : "Opened ChatGPT in the reused Chrome tab with the connector mention (and this task's id) ready — press Enter/Send there."
+        ? "Sent to ChatGPT automatically (workspace tab reused, Enter sent) — check that it went through."
+        : "Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready — press Enter/Send there."
     );
     return;
   }
@@ -432,6 +478,9 @@ async function cmdRemove(args) {
     if (unregistered.error) console.error(`Warning: shared connector cleanup failed (${unregistered.error}).`);
   }
 
+  if (worker) {
+    updateWorkerConfigAtomic((current) => withoutWorkspaceChromeTab(current, tokens.workspaceId));
+  }
   removeWorkspaceStateDir(root);
   console.log("Removed.");
 }
@@ -556,8 +605,7 @@ async function cmdChatUrl(args) {
 
   if (!url) {
     if (flagsChanged) {
-      const saved = { ...worker, ...next };
-      writeWorkerConfigAtomic(saved);
+      const saved = updateWorkerConfigAtomic((current) => ({ ...(current || worker), ...next }));
       console.log(`Saved. autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""}`);
       return;
     }
@@ -577,8 +625,7 @@ async function cmdChatUrl(args) {
     process.exit(1);
   }
   next.chatUrl = url;
-  const saved = { ...worker, ...next };
-  writeWorkerConfigAtomic(saved);
+  const saved = updateWorkerConfigAtomic((current) => ({ ...withChatUrl(current || worker, url), ...next }));
   console.log(`Saved. 'gpt-worker task' / 'gpt-worker report' will open this shared ChatGPT Project automatically from now on.`);
   if (flagsChanged) console.log(`autoEnter=${!!saved.autoEnter}${saved.enterDelayMs ? ` enterDelayMs=${saved.enterDelayMs}` : ""}`);
 }
@@ -707,7 +754,7 @@ async function cmdTask(args) {
   }
 
   console.log(`Task ${taskId} queued.`);
-  nudgeChatGpt(await sharedChatSettings(cfg), taskId);
+  nudgeChatGpt(await sharedChatSettings(cfg), taskId, cfg.workspaceId);
   console.log("Then run: gpt-worker wait");
 }
 
@@ -835,7 +882,7 @@ async function cmdReport(args) {
   }
 
   console.log(`Reported iteration ${newIteration}.`);
-  nudgeChatGpt(await sharedChatSettings(cfg), task.taskId);
+  nudgeChatGpt(await sharedChatSettings(cfg), task.taskId, cfg.workspaceId);
   console.log("Then run: gpt-worker wait");
 }
 
