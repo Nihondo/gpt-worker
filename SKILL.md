@@ -56,12 +56,13 @@ gpt-worker init -w /path/to/project
 | `gpt-worker report -w <dir> --changed <n> --tests "<summary>"` | Submit task execution results (`EXECUTED`) to ChatGPT. |
 | `gpt-worker state -w <dir>` | Output active task checkpoint JSON from the Worker. |
 | `gpt-worker queue -w <dir> [--discard <id>]` | Inspect or purge unacknowledged message queues. |
-| `gpt-worker url` | Print the one shared MCP Server URL for the ChatGPT connector. |
+| `gpt-worker url [--oauth [-w <dir>]]` | Print the one shared MCP Server URL for the ChatGPT connector. `--oauth` instead prints the secret-free OAuth Server URL and the existing token that doubles as its resource-owner credential (shared `/mcp`, or `-w <dir>`'s own `/mcp/<workspace_id>`). |
 | `gpt-worker workspaces` | List all provisioned workspaces and bridge statuses on this machine. |
 | `gpt-worker chat-url [<url>] [--clear] [-w <dir>] [--auto-enter]` | Set/get the shared default Project link or an optional workspace override; `--clear -w` restores the default. Auto-submit settings stay machine-wide. |
 | `gpt-worker show-config [-w <dir>]` | Show allowlisted browser-facing configuration, including shared/default, override, and effective Project URLs; never prints credentials. |
 | `gpt-worker guidance [<text>\|-] -w <dir> [--clear]` | Set/inspect trusted standing guidance for ChatGPT. |
-| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate workspace authentication tokens. |
+| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate one workspace's authentication tokens. |
+| `gpt-worker rotate --hub` | Rotate the one machine-wide `hub_gpt_token` (shared connector's legacy URL token / shared `/mcp` OAuth owner token). |
 | `gpt-worker remove -w <dir> [--yes]` | Deregister workspace and purge remote Worker state. |
 
 ## ChatGPT MCP Tools Reference

@@ -508,7 +508,33 @@ function cmdUrl(args) {
     console.error("Shared connector is not initialized. Run: gpt-worker init -w <workspace>");
     process.exit(1);
   }
-  console.log(`${worker.workerUrl}/mcp/${worker.hubGptToken}`);
+
+  if (!args.oauth) {
+    // Unchanged default: the one legacy token-in-URL shared connector URL.
+    console.log(`${worker.workerUrl}/mcp/${worker.hubGptToken}`);
+    return;
+  }
+
+  // --oauth: the secret-free OAuth Server URL plus the existing token that
+  // doubles as the resource-owner credential you type into the consent page
+  // an OAuth client redirects you to (see docs/plans/oauth-mcp-authentication.md).
+  // No separate OAuth token is minted — gpt_token/hub_gpt_token are reused.
+  if (args.workspace) {
+    const root = workspaceRoot(args);
+    const tokens = readTokens(root);
+    if (!tokens) {
+      console.error(`This workspace isn't provisioned yet. Run: gpt-worker init -w ${root}`);
+      process.exit(1);
+    }
+    console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp/${tokens.workspaceId}
+OAuth owner token: ${tokens.gptToken}
+Rotate the owner token with: gpt-worker rotate --gpt -w ${root}`);
+    return;
+  }
+
+  console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp
+OAuth owner token: ${worker.hubGptToken}
+Rotate the owner token with: gpt-worker rotate --hub`);
 }
 
 async function cmdWorkspaces() {
@@ -1081,12 +1107,37 @@ async function cmdState(args) {
 // rotate
 // ---------------------------------------------------------------------------
 
+/** Rotates the one machine-wide hub_gpt_token: the shared ChatGPT
+ *  connector's legacy URL token, and — since Phase 2/3 — the resource-owner
+ *  credential for the shared /mcp OAuth resource's consent page. Every
+ *  already-registered workspace keeps working; only this one shared value
+ *  changes. Unlike gpt_token/link_token/cli_token, hub_gpt_token isn't tied
+ *  to a workspace, so this doesn't take -w. */
+async function cmdRotateHub() {
+  const worker = readWorkerConfig();
+  if (!worker || !worker.hubGptToken) {
+    console.error("Shared connector is not initialized. Run: gpt-worker init -w <workspace>");
+    process.exit(1);
+  }
+  const result = await adminCall(worker, "rotate_hub");
+  if (result.error) {
+    console.error(`Rotate failed: ${result.error}`);
+    process.exit(1);
+  }
+  writeWorkerConfigAtomic({ ...worker, hubGptToken: result.value });
+  console.log("Rotated hub_gpt_token.");
+  console.log(`Update the ChatGPT connector's Server URL to:\n  ${worker.workerUrl}/mcp/${result.value}`);
+  console.log(`(OAuth Server URL is unaffected: ${worker.workerUrl}/mcp — only the owner token you enter in its consent page changes, to the value above.)`);
+}
+
 async function cmdRotate(args) {
+  if (args.hub) return cmdRotateHub();
+
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
   const which = args.gpt ? "gpt_token" : args.link ? "link_token" : args.cli ? "cli_token" : null;
   if (!which) {
-    console.error("Usage: gpt-worker rotate --gpt | --link | --cli [-w <dir>]");
+    console.error("Usage: gpt-worker rotate --gpt | --link | --cli | --hub [-w <dir>]");
     process.exit(1);
   }
   // Per-workspace tokens live in that workspace's own Durable Object (not a
@@ -1108,6 +1159,7 @@ async function cmdRotate(args) {
   console.log(`Rotated ${which}.`);
   if (which === "gpt_token") {
     console.log(`Update the ChatGPT connector's Server URL to:\n  ${cfg.workerUrl}/mcp/${cfg.workspaceId}/${result.value}`);
+    console.log(`(This is also the OAuth owner token for this workspace's /mcp/${cfg.workspaceId} resource — see: gpt-worker url --oauth -w ${root})`);
   }
   if (which === "link_token") {
     console.log(`Restart the bridge so it reconnects with the new link token: gpt-worker stop -w ${root} && gpt-worker start -w ${root}`);

@@ -288,7 +288,7 @@ gpt-worker remove -w /path/to/project --yes
 | コマンド | 説明 |
 |---|---|
 | `gpt-worker init -w <dir>` | ワークスペースを登録（初回実行時は Worker のデプロイも実施） |
-| `gpt-worker url` | ChatGPT に登録する共有 MCP URL を表示 |
+| `gpt-worker url [--oauth [-w <dir>]]` | ChatGPT に登録する共有 MCP URL を表示。`--oauth` を付けると、秘密を含まない OAuth Server URL とそのresource-owner token(共有、または `-w <dir>` で指定したワークスペース自身)を表示 |
 | `gpt-worker workspaces` | 登録済みワークスペースとブリッジの状態を一覧表示 |
 | `gpt-worker start -w <dir> [--always-allow]` | ローカルブリッジ（中継デーモン）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
@@ -304,7 +304,8 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker allow-read <file> -w <dir>` | Git ignore された exact file 1つの MCP direct read を許可 |
 | `gpt-worker deny-read <file> -w <dir>` | direct read の例外を取り消し |
 | `gpt-worker allow-list -w <dir>` | direct read の例外一覧を表示 |
-| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | 認証トークンを再生成 |
+| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | 1つのワークスペースの認証トークンを再生成 |
+| `gpt-worker rotate --hub` | 共有コネクタのマシン全体トークンを再生成 |
 | `gpt-worker remove -w <dir> --yes` | ワークスペースの登録を解除し状態を削除 |
 
 ---

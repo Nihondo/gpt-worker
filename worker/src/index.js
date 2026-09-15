@@ -113,6 +113,9 @@ export default {
     if (parts.length === 2 && parts[0] === "oauth" && parts[1] === "token") {
       return handleOAuthTokenRoute(request, env);
     }
+    if (parts.length === 2 && parts[0] === "oauth" && parts[1] === "register") {
+      return handleOAuthRegisterRoute(request, env);
+    }
 
     // Secret-free OAuth resource URL, shared connector: exactly "/mcp".
     if (parts.length === 1 && parts[0] === "mcp") {
@@ -216,6 +219,19 @@ function checkOrigin(request) {
   return ALLOWED_ORIGINS.has(origin);
 }
 
+/** Like checkOrigin(), but also allows the request's own origin. Browsers
+ *  send an `Origin` header on every POST — including a same-origin one —
+ *  and the /oauth/authorize consent form (GET /oauth/authorize) submits
+ *  back to itself with a relative, same-origin `action`, so its POST always
+ *  carries `Origin: <this Worker's own origin>`, never chatgpt.com. Plain
+ *  checkOrigin() would reject that legitimate same-origin submission. */
+function checkOriginAllowSelf(request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  if (origin === new URL(request.url).origin) return true;
+  return ALLOWED_ORIGINS.has(origin);
+}
+
 function checkProtocolVersion(request) {
   const v = request.headers.get("mcp-protocol-version");
   if (!v) return DEFAULT_PROTOCOL_VERSION;
@@ -279,6 +295,7 @@ function oauthAuthorizationServerMetadata(requestUrl) {
     grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
+    authorization_response_iss_parameter_supported: true,
   };
 }
 
@@ -485,6 +502,66 @@ function oauthUnauthorized(resourceMetadataUrl, { invalidToken = false } = {}) {
   return new Response(null, { status: 401, headers: { "www-authenticate": `Bearer ${params.join(", ")}` } });
 }
 
+const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
+}
+
+/** The GET /oauth/authorize consent form (see
+ *  BridgeDO.renderOAuthAuthorizeForm): a plain, dependency-free HTML page —
+ *  no framework, no external script/style. Every already-validated OAuth
+ *  parameter round-trips as a hidden field so the POST submission (handled
+ *  by BridgeDO.processOAuthAuthorizePost, the same code path a
+ *  non-interactive POST caller uses) re-validates them identically; the only
+ *  new field is the resource-owner's token, entered here and never
+ *  pre-filled or echoed anywhere. */
+function renderOAuthConsentHtml({ resource, clientId, redirectUri, responseType, codeChallenge, codeChallengeMethod, state, scope }) {
+  const hidden = (name, value) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}">`;
+  const hiddenFields = [
+    hidden("resource", resource),
+    hidden("client_id", clientId),
+    hidden("redirect_uri", redirectUri),
+    hidden("response_type", responseType),
+    hidden("code_challenge", codeChallenge),
+    hidden("code_challenge_method", codeChallengeMethod),
+    state !== null ? hidden("state", state) : "",
+    scope ? hidden("scope", scope) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Authorize gpt-worker</title>
+</head>
+<body>
+<h1>Authorize access</h1>
+<p><strong>${escapeHtml(clientId)}</strong> is requesting access to <strong>${escapeHtml(resource)}</strong>.</p>
+<p>Redirect URI: ${escapeHtml(redirectUri)}</p>
+${scope ? `<p>Scope: ${escapeHtml(scope)}</p>` : ""}
+<form method="post" action="/oauth/authorize">
+${hiddenFields}
+<label for="owner_token">gpt-worker owner token</label><br>
+<input type="password" id="owner_token" name="owner_token" autocomplete="off" required>
+<button type="submit">Authorize</button>
+</form>
+</body>
+</html>
+`;
+
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    },
+  });
+}
+
 /** Handles the secret-free OAuth MCP resource routes ("/mcp" and
  *  "/mcp/<workspace_id>"): Bearer-authenticates the request against the
  *  owning DO's issued access tokens, then forwards the original request
@@ -510,18 +587,30 @@ async function handleOAuthMcpResource(request, env, workspaceId) {
   return stub.fetch(new Request(forwardUrl, request));
 }
 
-/** POST /oauth/authorize and POST /oauth/token: peek `resource` from a
- *  cloned body (same pattern as handleAdminRoute) to pick the owning DO,
- *  then forward the original, still-unread request into it. Credentials
- *  (owner_token / codes / refresh tokens) travel only in the POST body,
- *  never in the URL these functions build. */
+/** GET/POST /oauth/authorize, POST /oauth/token, POST /oauth/register: pick
+ *  `resource` from the query string (GET) or a cloned body (POST — same
+ *  pattern as handleAdminRoute) to pick the owning DO, then forward the
+ *  original, still-unread request into it. Credentials (owner_token / codes
+ *  / refresh tokens) travel only in a POST body, never in the URL these
+ *  functions build; GET /oauth/authorize itself carries no credential (see
+ *  BridgeDO.renderOAuthAuthorizeForm). */
 async function handleOAuthAuthorizeRoute(request, env) {
-  if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-  if (!checkOrigin(request)) return new Response("forbidden", { status: 403 });
-  const parsed = await parseOAuthForm(request.clone(), MAX_REQUEST_BYTES);
-  if (parsed.tooLarge) return oauthError("invalid_request", "payload too large", 413);
-  if (parsed.unsupportedMediaType) return oauthError("invalid_request", "expected application/x-www-form-urlencoded", 415);
-  const resolved = resolveOAuthResource(parsed.params.get("resource") || "", request.url);
+  if (request.method !== "GET" && request.method !== "POST") {
+    return new Response(null, { status: 405, headers: { allow: "GET, POST" } });
+  }
+  if (!checkOriginAllowSelf(request)) return new Response("forbidden", { status: 403 });
+
+  let resourceParam = "";
+  if (request.method === "GET") {
+    resourceParam = new URL(request.url).searchParams.get("resource") || "";
+  } else {
+    const parsed = await parseOAuthForm(request.clone(), MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return oauthError("invalid_request", "payload too large", 413);
+    if (parsed.unsupportedMediaType) return oauthError("invalid_request", "expected application/x-www-form-urlencoded", 415);
+    resourceParam = parsed.params.get("resource") || "";
+  }
+
+  const resolved = resolveOAuthResource(resourceParam, request.url);
   if (resolved.error) return oauthError(resolved.error, "resource must be this server's /mcp or /mcp/<workspace_id>", 400);
   const stub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(resolved.doName));
   const forwardUrl = new URL(request.url);
@@ -540,6 +629,23 @@ async function handleOAuthTokenRoute(request, env) {
   const stub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(resolved.doName));
   const forwardUrl = new URL(request.url);
   forwardUrl.pathname = "/oauth-token";
+  return stub.fetch(new Request(forwardUrl, request));
+}
+
+/** RFC 7591-style Dynamic Client Registration. Unlike every other OAuth
+ *  route here, this is NOT resource-scoped: a real DCR client (ChatGPT, the
+ *  MCP SDK) POSTs plain client metadata with no `resource` field, so this
+ *  can't route by resource like handleOAuthAuthorizeRoute/handleOAuthTokenRoute
+ *  do. Client records are instead kept globally in the hub DO — every
+ *  registration goes there regardless of which resource(s) the client will
+ *  later request, and any resource-owning DO looks a client_id up from the
+ *  hub via BridgeDO.getOAuthClient() (see there for why). */
+async function handleOAuthRegisterRoute(request, env) {
+  if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+  if (!checkOrigin(request)) return new Response("forbidden", { status: 403 });
+  const stub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(HUB_DO_NAME));
+  const forwardUrl = new URL(request.url);
+  forwardUrl.pathname = "/oauth-register";
   return stub.fetch(new Request(forwardUrl, request));
 }
 
@@ -728,6 +834,19 @@ export class BridgeDO {
     `);
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_family ON oauth_refresh_tokens(family_id)`);
 
+    // Dynamic Client Registration records (Phase 3). Public clients only —
+    // no client secret, since this Worker authenticates the resource owner
+    // (see checkResourceOwnerToken), not the OAuth client itself.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id                  TEXT PRIMARY KEY,
+        redirect_uris_json         TEXT NOT NULL,
+        token_endpoint_auth_method TEXT NOT NULL,
+        client_name                TEXT,
+        created_at                 INTEGER NOT NULL
+      )
+    `);
+
     // Used only by the dedicated hub Durable Object. Keeping the registry in
     // the same class makes it easy to evolve without another Worker binding;
     // individual workspace instances simply leave this table empty.
@@ -756,6 +875,8 @@ export class BridgeDO {
     // handleOAuthMcpResource), never mapped to from a public URL there.
     if (parts.length === 1 && parts[0] === "oauth-authorize") return this.handleOAuthAuthorize(request);
     if (parts.length === 1 && parts[0] === "oauth-token") return this.handleOAuthToken(request);
+    if (parts.length === 1 && parts[0] === "oauth-register") return this.handleOAuthRegister(request);
+    if (parts.length === 1 && parts[0] === "oauth-client-lookup") return this.handleOAuthClientLookup(request);
     if (parts.length === 1 && parts[0] === "oauth-validate") return this.handleOAuthValidate(request);
     if (parts.length === 1 && parts[0] === "oauth-mcp") return this.handleOAuthMcpDispatch(request, false);
     if (parts.length === 1 && parts[0] === "oauth-hub-mcp") return this.handleOAuthMcpDispatch(request, true);
@@ -820,6 +941,7 @@ export class BridgeDO {
     this.sql.exec(`DELETE FROM oauth_authorization_codes`);
     this.sql.exec(`DELETE FROM oauth_access_tokens`);
     this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
+    this.sql.exec(`DELETE FROM oauth_clients`);
     return { ok: true };
   }
 
@@ -1015,12 +1137,63 @@ export class BridgeDO {
     return this.checkToken("hub_gpt_token", ownerToken) || this.checkToken("gpt_token", ownerToken);
   }
 
-  /** POST /oauth-authorize (internal). Resource-owner auth for Phase 2 is
-   *  this workspace's/the hub's own existing gpt token, submitted in the POST
-   *  body as `owner_token` — never in the URL, query string, or redirect.
-   *  On success, issues a short-lived one-time authorization code and
-   *  redirects to `redirect_uri` with only `code` and the original `state`. */
+  /** GET/POST /oauth-authorize (internal). GET renders a minimal HTML
+   *  consent form (a real OAuth client navigates the browser here); POST
+   *  processes that form's submission — or a direct POST from a
+   *  non-interactive caller — and, on success, issues a short-lived
+   *  one-time authorization code. Resource-owner auth is this workspace's/
+   *  the hub's own existing gpt token, submitted only as POST body field
+   *  `owner_token` — never in the URL, query string, or redirect. */
   async handleOAuthAuthorize(request) {
+    return request.method === "GET" ? this.renderOAuthAuthorizeForm(request) : this.processOAuthAuthorizePost(request);
+  }
+
+  /** Shared by both the GET form-render path and the POST code-issuing
+   *  path, so the two can never validate a request differently. Excludes
+   *  `owner_token`, which only ever appears in a POST body and is checked
+   *  separately by processOAuthAuthorizePost. Async because client lookup
+   *  may be a cross-DO call (see getOAuthClient). */
+  async validateOAuthAuthorizeRequest({ resource, clientId, redirectUri, responseType, codeChallenge, codeChallengeMethod, state, rawScope }) {
+    if (!resource || !clientId || !redirectUri) {
+      return { error: "invalid_request", description: "missing required parameter" };
+    }
+    if (clientId.length > 256) return { error: "invalid_request", description: "client_id too long" };
+    if (byteLength(redirectUri) > OAUTH_REDIRECT_URI_MAX_BYTES) return { error: "invalid_request", description: "redirect_uri too long" };
+    if (!isValidRedirectUri(redirectUri)) return { error: "invalid_request", description: "malformed redirect_uri" };
+    if (responseType !== "code") return { error: "unsupported_response_type" };
+    if (codeChallengeMethod !== "S256") return { error: "invalid_request", description: "code_challenge_method must be S256" };
+    if (!isValidPkceChallenge(codeChallenge)) return { error: "invalid_request", description: "malformed code_challenge" };
+    if (!isValidOAuthState(state)) return { error: "invalid_request", description: "malformed state" };
+    if (!isValidOAuthScope(rawScope)) return { error: "invalid_request", description: "malformed scope" };
+
+    // A DCR-registered client_id is bound to its registered redirect URIs;
+    // an unregistered client_id keeps the Phase 2 compatibility behavior
+    // (any syntactically valid redirect_uri, bound exactly into the code).
+    const client = await this.getOAuthClient(clientId, resource);
+    if (client && !client.redirectUris.includes(redirectUri)) {
+      return { error: "invalid_request", description: "redirect_uri is not registered for this client" };
+    }
+    return { ok: true, client };
+  }
+
+  async renderOAuthAuthorizeForm(request) {
+    const params = new URL(request.url).searchParams;
+    const fields = {
+      resource: params.get("resource") || "",
+      clientId: params.get("client_id") || "",
+      redirectUri: params.get("redirect_uri") || "",
+      responseType: params.get("response_type") || "",
+      codeChallenge: params.get("code_challenge") || "",
+      codeChallengeMethod: params.get("code_challenge_method") || "",
+      state: params.get("state"),
+      rawScope: params.get("scope"),
+    };
+    const validation = await this.validateOAuthAuthorizeRequest(fields);
+    if (validation.error) return oauthError(validation.error, validation.description, 400);
+    return renderOAuthConsentHtml({ ...fields, scope: normalizeOAuthScope(fields.rawScope) });
+  }
+
+  async processOAuthAuthorizePost(request) {
     const parsed = await parseOAuthForm(request, MAX_REQUEST_BYTES);
     if (parsed.tooLarge) return oauthError("invalid_request", "payload too large", 413);
     if (parsed.unsupportedMediaType) return oauthError("invalid_request", "expected application/x-www-form-urlencoded", 415);
@@ -1036,18 +1209,9 @@ export class BridgeDO {
     const state = params.get("state");
     const rawScope = params.get("scope");
 
-    if (!resource || !clientId || !redirectUri || !ownerToken) {
-      return oauthError("invalid_request", "missing required parameter", 400);
-    }
-    if (clientId.length > 256) return oauthError("invalid_request", "client_id too long", 400);
-    if (byteLength(redirectUri) > OAUTH_REDIRECT_URI_MAX_BYTES) return oauthError("invalid_request", "redirect_uri too long", 400);
-    if (!isValidRedirectUri(redirectUri)) return oauthError("invalid_request", "malformed redirect_uri", 400);
-    if (responseType !== "code") return oauthError("unsupported_response_type", null, 400);
-    if (codeChallengeMethod !== "S256") return oauthError("invalid_request", "code_challenge_method must be S256", 400);
-    if (!isValidPkceChallenge(codeChallenge)) return oauthError("invalid_request", "malformed code_challenge", 400);
-    if (!isValidOAuthState(state)) return oauthError("invalid_request", "malformed state", 400);
-    if (!isValidOAuthScope(rawScope)) return oauthError("invalid_request", "malformed scope", 400);
-    const scope = normalizeOAuthScope(rawScope);
+    if (!ownerToken) return oauthError("invalid_request", "missing required parameter", 400);
+    const validation = await this.validateOAuthAuthorizeRequest({ resource, clientId, redirectUri, responseType, codeChallenge, codeChallengeMethod, state, rawScope });
+    if (validation.error) return oauthError(validation.error, validation.description, 400);
 
     if (!this.checkResourceOwnerToken(ownerToken)) {
       // Deliberately a JSON error, not a redirect: an owner-auth failure
@@ -1057,6 +1221,7 @@ export class BridgeDO {
       return oauthError("access_denied", "invalid owner credential", 403);
     }
 
+    const scope = normalizeOAuthScope(rawScope);
     const rawCode = randomHex(32);
     const codeHash = await sha256Hex(rawCode);
     const now = Date.now();
@@ -1075,7 +1240,165 @@ export class BridgeDO {
     const redirect = new URL(redirectUri);
     redirect.searchParams.set("code", rawCode);
     if (state !== null) redirect.searchParams.set("state", state);
+    // RFC 9207: lets the client confirm which authorization server this
+    // redirect actually came from (advertised via AS metadata's
+    // authorization_response_iss_parameter_supported).
+    redirect.searchParams.set("iss", new URL(request.url).origin);
     return new Response(null, { status: 302, headers: { location: redirect.toString(), "cache-control": "no-store" } });
+  }
+
+  /** True only for the one dedicated hub DO instance (see the same disjoint-
+   *  secret reasoning as checkResourceOwnerToken): it alone ever gets
+   *  hub_gpt_token set, via provisionHub(). */
+  isHubInstance() {
+    return this.getSecret("hub_gpt_token") !== null;
+  }
+
+  /** Reads a client_id's DCR record straight from this instance's own
+   *  oauth_clients table. Only ever populated on the hub DO — see
+   *  getOAuthClient for why — but harmless to expose on any instance. */
+  getOAuthClientLocal(clientId) {
+    const rows = this.sql.exec(`SELECT * FROM oauth_clients WHERE client_id = ?`, clientId).toArray();
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    let redirectUris;
+    try {
+      redirectUris = JSON.parse(row.redirect_uris_json);
+    } catch {
+      redirectUris = [];
+    }
+    return { clientId: row.client_id, redirectUris, tokenEndpointAuthMethod: row.token_endpoint_auth_method, clientName: row.client_name };
+  }
+
+  /** Registered-client metadata from DCR, or null for an unregistered
+   *  client_id (Phase 2 compatibility clients). Client registrations are
+   *  global — kept only in the hub DO's oauth_clients table (see
+   *  handleOAuthRegisterRoute for why: a real DCR request carries no
+   *  `resource` to route by) — so a workspace DO asks the hub DO over an
+   *  internal binding call rather than checking its own (always-empty)
+   *  copy of the table. `resource` supplies the origin for that internal
+   *  call; it carries no other meaning here. */
+  async getOAuthClient(clientId, resource) {
+    if (this.isHubInstance()) return this.getOAuthClientLocal(clientId);
+    const hub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(HUB_DO_NAME));
+    const forwardUrl = new URL(resource);
+    forwardUrl.pathname = "/oauth-client-lookup";
+    const res = await hub.fetch(
+      new Request(forwardUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clientId }),
+      }),
+    );
+    if (res.status !== 200) return null;
+    try {
+      const data = await res.json();
+      return data.client || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** POST /oauth-client-lookup (internal, hub DO only): looks up one
+   *  client_id for a resource-owning DO's getOAuthClient() cross-DO call. */
+  async handleOAuthClientLookup(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge || parsed.parseError || !parsed.value || typeof parsed.value.clientId !== "string") {
+      return json({ client: null });
+    }
+    return json({ client: this.getOAuthClientLocal(parsed.value.clientId) });
+  }
+
+  /** POST /oauth-register (internal, reached only via the hub DO — see
+   *  handleOAuthRegisterRoute): minimal RFC 7591-style Dynamic Client
+   *  Registration. Public clients only (token_endpoint_auth_method=none, no
+   *  client secret) — this Worker never authenticates an OAuth client
+   *  itself, only the resource owner (see checkResourceOwnerToken). Accepts
+   *  (and ignores beyond validating/echoing) the standard optional metadata
+   *  fields grant_types/response_types/application_type a real DCR client
+   *  such as ChatGPT or the MCP SDK sends, so registration doesn't require
+   *  any gpt-worker-specific field. */
+  async handleOAuthRegister(request) {
+    if (!this.rateLimit("oauth-register", 10)) {
+      return new Response(null, { status: 429, headers: { "retry-after": "60" } });
+    }
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return oauthError("invalid_request", "payload too large", 413);
+    if (parsed.parseError || !parsed.value || typeof parsed.value !== "object") {
+      return oauthError("invalid_request", "malformed JSON body", 400);
+    }
+    const body = parsed.value;
+
+    const authMethod = body.token_endpoint_auth_method;
+    if (authMethod !== undefined && authMethod !== "none") {
+      return oauthError("invalid_client_metadata", "only token_endpoint_auth_method=none is supported", 400);
+    }
+
+    // grant_types/response_types/application_type are standard RFC 7591
+    // fields a real DCR client commonly sends; validate them against what
+    // this server actually supports (see oauthAuthorizationServerMetadata)
+    // and echo them back, but don't require them — a minimal request with
+    // only redirect_uris is equally valid.
+    const grantTypes = body.grant_types;
+    if (grantTypes !== undefined) {
+      if (!Array.isArray(grantTypes) || grantTypes.length === 0 || !grantTypes.every((g) => g === "authorization_code" || g === "refresh_token")) {
+        return oauthError("invalid_client_metadata", 'grant_types must be a subset of ["authorization_code","refresh_token"]', 400);
+      }
+    }
+    const responseTypes = body.response_types;
+    if (responseTypes !== undefined) {
+      if (!Array.isArray(responseTypes) || responseTypes.length === 0 || !responseTypes.every((r) => r === "code")) {
+        return oauthError("invalid_client_metadata", 'response_types must be a subset of ["code"]', 400);
+      }
+    }
+    const applicationType = body.application_type;
+    if (applicationType !== undefined && applicationType !== "web" && applicationType !== "native") {
+      return oauthError("invalid_client_metadata", 'application_type must be "web" or "native"', 400);
+    }
+
+    const redirectUris = body.redirect_uris;
+    if (!Array.isArray(redirectUris) || redirectUris.length === 0) {
+      return oauthError("invalid_client_metadata", "redirect_uris must be a non-empty array", 400);
+    }
+    if (redirectUris.length > 10) return oauthError("invalid_client_metadata", "too many redirect_uris", 400);
+    if (new Set(redirectUris).size !== redirectUris.length) {
+      return oauthError("invalid_client_metadata", "duplicate redirect_uris", 400);
+    }
+    for (const uri of redirectUris) {
+      if (typeof uri !== "string" || byteLength(uri) > OAUTH_REDIRECT_URI_MAX_BYTES || !isValidRedirectUri(uri)) {
+        return oauthError("invalid_client_metadata", "malformed redirect_uri", 400);
+      }
+    }
+
+    let clientName = null;
+    if (body.client_name !== undefined) {
+      if (typeof body.client_name !== "string" || byteLength(body.client_name) > 200) {
+        return oauthError("invalid_client_metadata", "malformed client_name", 400);
+      }
+      clientName = body.client_name;
+    }
+
+    const clientId = randomHex(16);
+    const now = Date.now();
+    this.sql.exec(
+      `INSERT INTO oauth_clients (client_id, redirect_uris_json, token_endpoint_auth_method, client_name, created_at) VALUES (?, ?, ?, ?, ?)`,
+      clientId,
+      JSON.stringify(redirectUris),
+      "none",
+      clientName,
+      now,
+    );
+
+    const response = {
+      client_id: clientId,
+      redirect_uris: redirectUris,
+      token_endpoint_auth_method: "none",
+      grant_types: grantTypes ?? ["authorization_code", "refresh_token"],
+      response_types: responseTypes ?? ["code"],
+      client_name: clientName ?? undefined,
+      application_type: applicationType ?? undefined,
+    };
+    return json(response, 201, { "cache-control": "no-store" });
   }
 
   /** POST /oauth-token (internal). Dispatches on `grant_type`. */
@@ -1112,6 +1435,13 @@ export class BridgeDO {
     if (row.expires_at < Date.now()) return oauthError("invalid_grant", "code expired", 400);
     if (row.client_id !== clientId || row.redirect_uri !== redirectUri || row.resource !== resource) {
       return oauthError("invalid_grant", "client_id/redirect_uri/resource mismatch", 400);
+    }
+    // Belt-and-suspenders: if client_id is (now) registered, its redirect_uri
+    // set is the current authority, so a code issued before a registration
+    // change can't redeem against a URI that's since been dropped.
+    const client = await this.getOAuthClient(clientId, resource);
+    if (client && !client.redirectUris.includes(redirectUri)) {
+      return oauthError("invalid_grant", "redirect_uri is not registered for this client", 400);
     }
     const computedChallenge = await pkceChallengeFromVerifier(codeVerifier);
     if (!constantTimeEqual(computedChallenge, row.code_challenge)) {

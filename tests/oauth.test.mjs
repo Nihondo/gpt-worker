@@ -22,7 +22,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import worker, { BridgeDO } from "../worker/src/index.js";
-import { makeFakeCtx, makeFakeEnv } from "./helpers/fake-do-ctx.mjs";
+import { makeFakeCtx } from "./helpers/fake-do-ctx.mjs";
 
 const ORIGIN = "https://example.com";
 const HUB_TOKEN = "a".repeat(64); // shape of randomHex(32): 64 hex chars
@@ -50,22 +50,23 @@ function makeFakeBridgeDoEnv() {
 
 /** Real BridgeDO instances behind the same env.BRIDGE_DO binding shape, keyed
  *  by idFromName(name) exactly like the real multi-tenant routing (hub DO =
- *  HUB_DO_NAME, one DO per workspace_id). */
+ *  HUB_DO_NAME, one DO per workspace_id). Each instance is constructed with
+ *  this same `env` (not makeFakeEnv()'s bare `{}`), so a workspace DO's own
+ *  cross-DO calls to the hub — e.g. BridgeDO.getOAuthClient()'s DCR lookup —
+ *  resolve correctly instead of throwing on a missing `env.BRIDGE_DO`. */
 function makeRealBridgeDoEnv() {
   const instances = new Map();
-  function instanceFor(name) {
-    if (!instances.has(name)) instances.set(name, new BridgeDO(makeFakeCtx(), makeFakeEnv()));
-    return instances.get(name);
-  }
-  return {
-    instanceFor,
-    env: {
-      BRIDGE_DO: {
-        idFromName: (name) => name,
-        get: (name) => ({ fetch: (request) => instanceFor(name).fetch(request) }),
-      },
+  const env = {
+    BRIDGE_DO: {
+      idFromName: (name) => name,
+      get: (name) => ({ fetch: (request) => instanceFor(name).fetch(request) }),
     },
   };
+  function instanceFor(name) {
+    if (!instances.has(name)) instances.set(name, new BridgeDO(makeFakeCtx(), env));
+    return instances.get(name);
+  }
+  return { instanceFor, env };
 }
 
 function req(path, init = {}) {
@@ -77,6 +78,14 @@ function formReq(path, params, extraHeaders = {}) {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", ...extraHeaders },
     body: new URLSearchParams(params).toString(),
+  });
+}
+
+function jsonReq(path, body, extraHeaders = {}) {
+  return req(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...extraHeaders },
+    body: JSON.stringify(body),
   });
 }
 
@@ -628,5 +637,356 @@ describe("Phase 2: authorization-code + PKCE + refresh, against real BridgeDO in
     );
     assert.equal(mcpRes.status, 200);
     assert.deepEqual(await mcpRes.json(), { jsonrpc: "2.0", id: 1, result: {} });
+  });
+});
+
+describe("Phase 3: GET /oauth/authorize consent form + Dynamic Client Registration", () => {
+  function setup() {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const workspaceDo = instanceFor(WORKSPACE_ID);
+    const { gptToken } = workspaceDo.provision();
+    return { env, workspaceDo, gptToken };
+  }
+
+  const RESOURCE = `${ORIGIN}/mcp/${WORKSPACE_ID}`;
+  const REDIRECT_URI = "https://client.example/callback";
+  const CLIENT_ID = "test-client"; // never registered via DCR in this describe block, unless noted
+
+  function authorizeGetUrl(overrides = {}) {
+    const params = new URLSearchParams({
+      resource: RESOURCE,
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      response_type: "code",
+      code_challenge: "x".repeat(43), // syntactically valid; only used where the actual value doesn't matter
+      code_challenge_method: "S256",
+      ...overrides,
+    });
+    return `/oauth/authorize?${params.toString()}`;
+  }
+
+  test("GET renders an HTML consent form with hidden OAuth params, no owner secret in the page", async () => {
+    const { env } = setup();
+    const { challenge } = await pkcePair();
+    const res = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, state: "abc123", scope: "read" }), { method: "GET" }), env);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/html/);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    const html = await res.text();
+    assert.match(html, /<form method="post" action="\/oauth\/authorize">/);
+    assert.match(html, new RegExp(`name="code_challenge" value="${challenge}"`));
+    assert.match(html, /name="state" value="abc123"/);
+    assert.match(html, /name="scope" value="read"/);
+    assert.match(html, /type="password"[^>]*name="owner_token"/);
+  });
+
+  test("GET rejects malformed/cross-origin resource, non-code response_type, non-S256 method, invalid state/scope, malformed redirect_uri", async () => {
+    const { env } = setup();
+    const { challenge } = await pkcePair();
+
+    const crossOrigin = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, resource: "https://not-this-host/mcp" }), { method: "GET" }), env);
+    assert.equal(crossOrigin.status, 400);
+    assert.equal((await crossOrigin.json()).error, "invalid_target");
+
+    const wrongResponseType = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, response_type: "token" }), { method: "GET" }), env);
+    assert.equal(wrongResponseType.status, 400);
+    assert.equal((await wrongResponseType.json()).error, "unsupported_response_type");
+
+    const wrongMethod = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, code_challenge_method: "plain" }), { method: "GET" }), env);
+    assert.equal(wrongMethod.status, 400);
+    assert.equal((await wrongMethod.json()).error, "invalid_request");
+
+    const badState = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, state: "a\nb" }), { method: "GET" }), env);
+    assert.equal(badState.status, 400);
+
+    const badScope = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, scope: "bad\tscope" }), { method: "GET" }), env);
+    assert.equal(badScope.status, 400);
+
+    const badRedirect = await worker.fetch(req(authorizeGetUrl({ code_challenge: challenge, redirect_uri: "not-a-url" }), { method: "GET" }), env);
+    assert.equal(badRedirect.status, 400);
+  });
+
+  test("DCR: POST /oauth/register succeeds with a standard body — no `resource` field, exactly what a real RFC 7591/MCP SDK client sends", async () => {
+    const { env } = setup();
+    const res = await worker.fetch(
+      jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI], token_endpoint_auth_method: "none", client_name: "Test Client" }),
+      env,
+    );
+    assert.equal(res.status, 201);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    const body = await res.json();
+    assert.ok(body.client_id);
+    assert.equal(body.client_secret, undefined);
+    assert.deepEqual(body.redirect_uris, [REDIRECT_URI]);
+    assert.equal(body.token_endpoint_auth_method, "none");
+    assert.equal(body.client_name, "Test Client");
+  });
+
+  test("DCR accepts and echoes a typical MCP-SDK-style body with grant_types/response_types/application_type", async () => {
+    const { env } = setup();
+    const res = await worker.fetch(
+      jsonReq("/oauth/register", {
+        redirect_uris: [REDIRECT_URI],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        application_type: "web",
+      }),
+      env,
+    );
+    assert.equal(res.status, 201);
+    const body = await res.json();
+    assert.ok(body.client_id);
+    assert.deepEqual(body.grant_types, ["authorization_code", "refresh_token"]);
+    assert.deepEqual(body.response_types, ["code"]);
+    assert.equal(body.application_type, "web");
+  });
+
+  test("DCR rejects an unsupported grant_types/response_types/application_type value", async () => {
+    const { env } = setup();
+
+    const badGrant = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI], grant_types: ["client_credentials"] }), env);
+    assert.equal(badGrant.status, 400);
+    assert.equal((await badGrant.json()).error, "invalid_client_metadata");
+
+    const badResponseType = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI], response_types: ["token"] }), env);
+    assert.equal(badResponseType.status, 400);
+    assert.equal((await badResponseType.json()).error, "invalid_client_metadata");
+
+    const badAppType = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI], application_type: "mobile" }), env);
+    assert.equal(badAppType.status, 400);
+    assert.equal((await badAppType.json()).error, "invalid_client_metadata");
+  });
+
+  test("DCR rejects missing/empty, too-many, duplicate, and malformed redirect_uris; unsupported auth method", async () => {
+    const { env } = setup();
+
+    const empty = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [] }), env);
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json()).error, "invalid_client_metadata");
+
+    const tooMany = await worker.fetch(
+      jsonReq("/oauth/register", { redirect_uris: Array.from({ length: 11 }, (_, i) => `https://client.example/cb${i}`) }),
+      env,
+    );
+    assert.equal(tooMany.status, 400);
+    assert.equal((await tooMany.json()).error, "invalid_client_metadata");
+
+    const duplicate = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI, REDIRECT_URI] }), env);
+    assert.equal(duplicate.status, 400);
+    assert.equal((await duplicate.json()).error, "invalid_client_metadata");
+
+    const invalidUri = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: ["not-a-url"] }), env);
+    assert.equal(invalidUri.status, 400);
+    assert.equal((await invalidUri.json()).error, "invalid_client_metadata");
+
+    const unsupportedAuth = await worker.fetch(
+      jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI], token_endpoint_auth_method: "client_secret_basic" }),
+      env,
+    );
+    assert.equal(unsupportedAuth.status, 400);
+    assert.equal((await unsupportedAuth.json()).error, "invalid_client_metadata");
+  });
+
+  test("DCR is rate-limited (429 after the per-minute cap)", async () => {
+    const { env } = setup();
+    const statuses = [];
+    for (let i = 0; i < 11; i++) {
+      const res = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI] }), env);
+      statuses.push(res.status);
+    }
+    assert.equal(statuses.filter((s) => s === 201).length, 10);
+    assert.equal(statuses[10], 429);
+  });
+
+  test("a client_id from one DCR registration works for both the hub resource and a workspace resource", async () => {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const workspaceDo = instanceFor(WORKSPACE_ID);
+    const { gptToken: workspaceOwnerToken } = workspaceDo.provision();
+    const { gptToken: hubOwnerToken } = instanceFor("gpt-worker-hub").provisionHub();
+
+    const registerRes = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI] }), env);
+    const { client_id: registeredClientId } = await registerRes.json();
+
+    for (const [resource, ownerToken] of [
+      [RESOURCE, workspaceOwnerToken],
+      [`${ORIGIN}/mcp`, hubOwnerToken],
+    ]) {
+      const { challenge } = await pkcePair();
+      const formOk = await worker.fetch(
+        req(`/oauth/authorize?${new URLSearchParams({ resource, client_id: registeredClientId, redirect_uri: REDIRECT_URI, response_type: "code", code_challenge: challenge, code_challenge_method: "S256" }).toString()}`, {
+          method: "GET",
+        }),
+        env,
+      );
+      assert.equal(formOk.status, 200, `GET form should accept the registered client for resource ${resource}`);
+
+      const authRes = await worker.fetch(
+        formReq("/oauth/authorize", {
+          resource,
+          client_id: registeredClientId,
+          redirect_uri: REDIRECT_URI,
+          response_type: "code",
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+          owner_token: ownerToken,
+        }),
+        env,
+      );
+      const location = codeFromRedirect(authRes);
+      assert.ok(location.searchParams.get("code"), `authorize should issue a code for resource ${resource}`);
+      assert.equal(location.searchParams.get("iss"), ORIGIN);
+    }
+  });
+
+  test("registered client, full flow: DCR -> GET form (registered redirect ok, unregistered rejected) -> POST authorize (unregistered redirect rejected, registered redirect issues code) -> token exchange -> Bearer reaches the real MCP handler", async () => {
+    const { env, gptToken } = setup();
+    const registerRes = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI] }), env);
+    const { client_id: registeredClientId } = await registerRes.json();
+    const { verifier, challenge } = await pkcePair();
+
+    const formOk = await worker.fetch(
+      req(authorizeGetUrl({ client_id: registeredClientId, code_challenge: challenge }), { method: "GET" }),
+      env,
+    );
+    assert.equal(formOk.status, 200);
+
+    const formRejected = await worker.fetch(
+      req(
+        authorizeGetUrl({ client_id: registeredClientId, code_challenge: challenge, redirect_uri: "https://attacker.example/callback" }),
+        { method: "GET" },
+      ),
+      env,
+    );
+    assert.equal(formRejected.status, 400);
+    assert.equal((await formRejected.json()).error, "invalid_request");
+
+    const postRejected = await worker.fetch(
+      formReq("/oauth/authorize", {
+        resource: RESOURCE,
+        client_id: registeredClientId,
+        redirect_uri: "https://attacker.example/callback",
+        response_type: "code",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        owner_token: gptToken,
+      }),
+      env,
+    );
+    assert.equal(postRejected.status, 400);
+    assert.equal((await postRejected.json()).error, "invalid_request");
+
+    const authRes = await worker.fetch(
+      formReq("/oauth/authorize", {
+        resource: RESOURCE,
+        client_id: registeredClientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: "code",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        owner_token: gptToken,
+      }),
+      env,
+    );
+    const code = codeFromRedirect(authRes).searchParams.get("code");
+
+    const tokenRes = await worker.fetch(
+      formReq("/oauth/token", {
+        grant_type: "authorization_code",
+        code,
+        client_id: registeredClientId,
+        redirect_uri: REDIRECT_URI,
+        resource: RESOURCE,
+        code_verifier: verifier,
+      }),
+      env,
+    );
+    assert.equal(tokenRes.status, 200);
+    const { access_token: accessToken } = await tokenRes.json();
+
+    const mcpRes = await worker.fetch(
+      req(`/mcp/${WORKSPACE_ID}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: {} }),
+      }),
+      env,
+    );
+    assert.equal(mcpRes.status, 200);
+    assert.deepEqual(await mcpRes.json(), { jsonrpc: "2.0", id: 1, result: {} });
+  });
+
+  test("an unregistered client_id keeps the Phase 2 compatibility path: any syntactically valid redirect_uri is accepted and bound into the code", async () => {
+    const { env, gptToken } = setup();
+    const { verifier, challenge } = await pkcePair();
+    const unusualButValidRedirect = "https://another-client.example/cb?x=1";
+
+    const authRes = await worker.fetch(
+      formReq("/oauth/authorize", {
+        resource: RESOURCE,
+        client_id: CLIENT_ID, // never registered
+        redirect_uri: unusualButValidRedirect,
+        response_type: "code",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        owner_token: gptToken,
+      }),
+      env,
+    );
+    const code = codeFromRedirect(authRes).searchParams.get("code");
+
+    const tokenRes = await worker.fetch(
+      formReq("/oauth/token", {
+        grant_type: "authorization_code",
+        code,
+        client_id: CLIENT_ID,
+        redirect_uri: unusualButValidRedirect,
+        resource: RESOURCE,
+        code_verifier: verifier,
+      }),
+      env,
+    );
+    assert.equal(tokenRes.status, 200);
+    assert.ok((await tokenRes.json()).access_token);
+  });
+
+  test("the consent form's same-origin POST back to /oauth/authorize is not blocked by Origin checking, but a genuinely different disallowed Origin still is", async () => {
+    const { env, gptToken } = setup();
+    const { challenge } = await pkcePair();
+
+    const sameOrigin = await worker.fetch(
+      formReq(
+        "/oauth/authorize",
+        {
+          resource: RESOURCE,
+          client_id: CLIENT_ID,
+          redirect_uri: REDIRECT_URI,
+          response_type: "code",
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+          owner_token: gptToken,
+        },
+        { origin: ORIGIN }, // exactly what a real browser sends posting this Worker's own consent form back to itself
+      ),
+      env,
+    );
+    assert.equal(sameOrigin.status, 302);
+
+    const disallowedOrigin = await worker.fetch(
+      formReq(
+        "/oauth/authorize",
+        {
+          resource: RESOURCE,
+          client_id: CLIENT_ID,
+          redirect_uri: REDIRECT_URI,
+          response_type: "code",
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+          owner_token: gptToken,
+        },
+        { origin: "https://evil.example" },
+      ),
+      env,
+    );
+    assert.equal(disallowedOrigin.status, 403);
   });
 });

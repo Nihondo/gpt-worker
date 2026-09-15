@@ -288,7 +288,7 @@ gpt-worker remove -w /path/to/project --yes
 | Command | Purpose |
 |---|---|
 | `gpt-worker init -w <dir>` | Register workspace (deploys Worker on first run) |
-| `gpt-worker url` | Print the shared MCP URL to register once in ChatGPT |
+| `gpt-worker url [--oauth [-w <dir>]]` | Print the shared MCP URL to register once in ChatGPT. `--oauth` instead prints the secret-free OAuth Server URL and its resource-owner token (shared, or `-w <dir>`'s own workspace) |
 | `gpt-worker workspaces` | List provisioned workspaces and bridge status |
 | `gpt-worker start -w <dir> [--always-allow]` | Start local bridge daemon |
 | `gpt-worker stop -w <dir>` | Stop local bridge daemon |
@@ -304,7 +304,8 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker allow-read <file> -w <dir>` | Allow direct MCP reads of one exact Git-ignored file |
 | `gpt-worker deny-read <file> -w <dir>` | Remove a direct-read exception |
 | `gpt-worker allow-list -w <dir>` | List direct-read exceptions |
-| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate authentication tokens |
+| `gpt-worker rotate --gpt\|--link\|--cli -w <dir>` | Rotate one workspace's authentication tokens |
+| `gpt-worker rotate --hub` | Rotate the shared connector's machine-wide token |
 | `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge local/remote state |
 
 ---
