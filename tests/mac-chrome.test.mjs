@@ -91,6 +91,14 @@ describe("workspace tab AppleScript", () => {
     assert.match(script, /set savedTabID to ""/);
     assert.doesNotMatch(script, /Finder/);
   });
+
+  test("returns a 3-part tabId|submitOutcome|reuseFlag string so the caller can tell reuse (background) apart from a new window (comes to the front)", () => {
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
+    assert.match(script, /set didReuseTab to false/);
+    assert.match(script, /set didReuseTab to true/);
+    assert.match(script, /if didReuseTab then\s*\n\s*set reuseFlag to "REUSED"\s*\n\s*else\s*\n\s*set reuseFlag to "NEW"\s*\n\s*end if/);
+    assert.match(script, /return selectedTabID & "\|" & submitOutcome & "\|" & reuseFlag/);
+  });
 });
 
 describe("autoEnter submit step", () => {

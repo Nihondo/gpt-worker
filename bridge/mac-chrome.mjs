@@ -227,6 +227,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
       end repeat
       end if
       if selectedTab is missing value then
+        set didReuseTab to false
         set selectedWindow to make new window
         tell selectedWindow
           set selectedTab to tab 1
@@ -234,6 +235,7 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
           set active tab index to 1
         end tell
       else
+        set didReuseTab to true
         set URL of selectedTab to targetURL
         tell selectedWindow
           set active tab index to selectedTabIndex
@@ -243,17 +245,29 @@ export function buildChromeTabScript(url, scope, { autoEnter = false, enterDelay
       set submitOutcome to "SKIPPED"
       ${submitStep}
     end tell
-    return selectedTabID & "|" & submitOutcome
+    if didReuseTab then
+      set reuseFlag to "REUSED"
+    else
+      set reuseFlag to "NEW"
+    end if
+    return selectedTabID & "|" & submitOutcome & "|" & reuseFlag
   `;
 }
 
 /** Reuse only the tab previously assigned to this workspace when it is still
  *  in the saved ChatGPT Project. If it is absent or stale, create a new tab
  *  and return its ID so the caller can associate it with the workspace.
+ *
  *  `submitted` is only ever true when the send button was actually clicked
  *  in the background — false means nothing was submitted (autoEnter was
  *  off, or the JS route never became available/clickable), so the caller
- *  can tell the user what to do instead of assuming it went through. */
+ *  can tell the user what to do instead of assuming it went through.
+ *
+ *  `reused` says whether this reused the workspace's existing tab (true —
+ *  no window focus change of any kind) or had to open a new Chrome window
+ *  (false — that window comes to the front like any new window would,
+ *  regardless of `submitted`). Callers should not describe a `submitted:
+ *  true` result as "in the background" without also checking `reused`. */
 export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
@@ -264,11 +278,9 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
 
   try {
     const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" }).trim();
-    const separatorIndex = output.indexOf("|");
-    const tabIdPart = separatorIndex === -1 ? output : output.slice(0, separatorIndex);
-    const submitOutcome = separatorIndex === -1 ? "" : output.slice(separatorIndex + 1);
+    const [tabIdPart, submitOutcome, reuseFlag] = output.split("|");
     const selectedTabId = normalizeChromeTabId(tabIdPart);
-    return selectedTabId ? { tabId: selectedTabId, submitted: submitOutcome === "CLICKED" } : false;
+    return selectedTabId ? { tabId: selectedTabId, submitted: submitOutcome === "CLICKED", reused: reuseFlag === "REUSED" } : false;
   } catch {
     return false;
   }

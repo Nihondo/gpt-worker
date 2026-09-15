@@ -17,7 +17,7 @@ ChatGPT Project ── MCP over HTTPS ──> Shared Hub (CF Workers) ──> Se
 - **Safe & Sandboxed Execution**: ChatGPT never modifies local files directly. It only inspects workspace files through read-only tools to generate a plan (PLAN). The local agent inspects and validates the plan before executing edits or commands.
 - **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, and `.aws` are automatically blocked from ChatGPT's inspection tools.
 - **Git-Ignore Aware File Access**: Git-ignored files are hidden from MCP browsing and search, and require an owner-controlled exact-file exception for direct reads.
-- **Seamless macOS & Chrome Integration**: Automatically opens the ChatGPT Project in Google Chrome when a task is queued, and can even automatically press Enter to submit (`--auto-enter`).
+- **Seamless macOS & Chrome Integration**: Automatically opens the ChatGPT Project in Google Chrome when a task is queued, and can even auto-submit it in the background — no window focus change — when reusing that workspace's tab (`--auto-enter`).
 - **Zero Runtime Dependencies**: Built entirely using Node.js built-in modules without bloated external npm packages or heavy daemon requirements.
 
 ---

@@ -310,15 +310,24 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
       if (!current || effectiveChatUrl(current, workspaceId) !== chatUrl) return current;
       return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
     });
+    // A reused tab never changes window focus; a first-run/replacement tab
+    // opens a new Chrome window, which comes to the front like any new
+    // window would — regardless of whether auto-submit also succeeded. Say
+    // which one happened rather than always claiming "in the background".
+    const where = chromeResult.reused ? "this workspace's Chrome tab" : "a new Chrome window for this workspace (it came to the front)";
     if (chromeResult.submitted) {
-      console.log("Sent to ChatGPT automatically in the background (workspace tab reused, no window focus change) — check that it went through.");
+      console.log(
+        chromeResult.reused
+          ? "Sent to ChatGPT automatically in the background (workspace tab reused, no window focus change) — check that it went through."
+          : `Sent to ChatGPT automatically in ${where} — check that it went through.`
+      );
     } else if (settings.autoEnter) {
       console.log(
-        "Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready, but could not auto-submit in the background — press Enter/Send there.\n" +
-          'For background auto-submit, enable Chrome\'s View > Developer > "Allow JavaScript from Apple Events" and relaunch Chrome.'
+        `Opened ChatGPT in ${where} with the connector mention (and this task's id) ready, but could not auto-submit — press Enter/Send there.\n` +
+          'For background auto-submit next time this tab is reused, enable Chrome\'s View > Developer > "Allow JavaScript from Apple Events" and relaunch Chrome.'
       );
     } else {
-      console.log("Opened ChatGPT in this workspace's Chrome tab with the connector mention (and this task's id) ready — press Enter/Send there.");
+      console.log(`Opened ChatGPT in ${where} with the connector mention (and this task's id) ready — press Enter/Send there.`);
     }
     return;
   }
