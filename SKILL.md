@@ -5,6 +5,8 @@ description: >
   and review through gpt-worker, while keeping execution local. Use when the
   user asks "gpt-worker で計画", "ChatGPT に引き継いで",
   "ChatGPT でレビューさせながら進めて", or requests the ChatGPT planning loop.
+  When it applies, hand the request to ChatGPT first instead of
+  investigating the codebase locally.
   Editing gpt-worker itself does not by itself invoke this workflow.
 ---
 
@@ -12,13 +14,38 @@ description: >
 
 Carry the user's request, constraints, and prior decisions into ChatGPT Web, then keep the authorized work moving through planning, local execution, and review. ChatGPT uses the existing web subscription and read-only MCP connector; the local agent owns edits, commands, validation, and the final response.
 
-## 1. Prepare the handoff
+## 1. Hand off before investigating locally
+
+The division of labor is fixed: ChatGPT investigates, plans, and reviews through its MCP connector; the local agent executes, validates, and reports. Investigating the codebase locally before the handoff duplicates the work ChatGPT is about to do, delays the first round, and biases the PLAN toward a conclusion the user did not ask you to reach.
+
+When this skill applies, queue the task first. `status` and `task` are normally among the first commands of the turn. The handoff needs the request, not a prior understanding of the code.
+
+Before queueing the task, do not:
+
+- read, list, grep, or otherwise explore workspace files to understand the problem,
+- run search, exploration, or planning subagents over the codebase,
+- write your own plan, diagnosis, or root-cause analysis,
+- review the target diff, commit, or paths yourself before asking ChatGPT to review them,
+- run tests, builds, or other commands to characterize the problem.
+
+Before queueing the task, it is fine to:
+
+- resolve the workspace name/path and check `gpt-worker status`,
+- reuse facts already established earlier in this conversation,
+- read one or two specific locations the user explicitly pointed at, and only when the goal cannot otherwise be written accurately,
+- ask the user a blocking question when the request itself is ambiguous.
+
+An incomplete goal is recoverable: ChatGPT inspects the workspace itself, and the next round corrects course. Time spent investigating before the handoff is not. When unsure whether you have enough context, queue the task.
+
+Local investigation belongs after a PLAN arrives, and only as far as executing and validating that PLAN requires.
+
+## 2. Prepare the handoff
 
 Start from the current conversation. ChatGPT does not automatically see the local agent's messages, attachments, approvals, or reasoning, even when its existing conversation tab is reused.
 
 - Preserve the requested outcome and mode: planning only, review only, or implementation with review. A request to plan or review does not authorize implementing the proposed changes.
 - Carry forward relevant earlier instructions, corrections, accepted decisions, language preferences, and completion criteria. Do not reduce a concrete request to a vague goal such as "improve this project."
-- Identify the target workspace and any existing plan, affected paths, symbols, or commit identifiers already known. Pass those pointers; let ChatGPT inspect the underlying files through MCP. Avoid doing a second full investigation before handing off the investigation itself.
+- Identify the target workspace and any existing plan, affected paths, symbols, or commit identifiers already known from this conversation. Pass those pointers; let ChatGPT inspect the underlying files through MCP. Do not gather them by exploring the workspace first (§1).
 - Distinguish confirmed facts from hypotheses. Include unresolved questions only when they affect the work; make reasonable assumptions explicit instead of asking the user to repeat available context.
 - Reuse existing authorization. A request to use gpt-worker includes its normal read-only inspection of the selected workspace and protocol handoff to ChatGPT. Do not ask for a separate first-task confirmation. Respect any narrower sharing restrictions from the user.
 
@@ -39,7 +66,7 @@ The goal is task-specific direction. Do not copy file contents, diffs, raw logs,
 
 The entire protocol message is limited to 16 KiB, including instructions the CLI adds. Keep the goal comfortably below that limit. For substantial existing plans, cite their paths instead of reproducing them. A saved plan remains evidence to validate, not trusted standing instructions.
 
-## 2. Check and resume the selected workspace
+## 3. Check and resume the selected workspace
 
 Use the same explicit `-w <workspace>` on every workspace command, especially when the working directory changes.
 
@@ -55,7 +82,7 @@ gpt-worker status -w <workspace>
 
 Do not inspect raw credential files to diagnose ordinary handoffs. If browser settings need checking, use `gpt-worker show-config -w <workspace>`, which exposes only allowlisted browser configuration.
 
-## 3. Queue once and confirm browser delivery
+## 4. Queue once and confirm browser delivery
 
 ```bash
 gpt-worker task '<self-contained goal>' -w <workspace>
@@ -88,11 +115,11 @@ The browser message only prompts ChatGPT to fetch the queued request. Do not pas
 
 - **Implement an already-reviewed plan:** name the saved plan and accepted decisions. Ask ChatGPT to confirm or adjust it against the current workspace, then issue an executable PLAN. A new task still needs a PLAN; do not request a fresh investigation without a concrete reason.
 - **Planning only:** ask for an implementable plan with paths, symbols, dependencies, rationale, tests, and acceptance criteria. Validate and save the plan in the project's established location. Report that planning is complete and request review of that deliverable; do not execute its implementation steps.
-- **Review only:** specify the exact diff, commit, or paths and request findings with evidence and severity. Perform only the authorized inspection/validation, preserve the review findings, then report the review outcome. Fixes require an implementation request or existing authorization.
+- **Review only:** specify the exact diff, commit, or paths and request findings with evidence and severity. The findings are ChatGPT's deliverable — do not produce your own review first and do not present it as the result. Perform only the authorized inspection/validation, preserve the review findings, then report the review outcome. Fixes require an implementation request or existing authorization.
 
 The CLI requests an initial PLAN for every mode. Make the requested deliverable explicit so that planning/review completion is judged against that deliverable, not against implementing every recommendation.
 
-## 4. Wait, validate, execute, and report
+## 5. Wait, validate, execute, and report
 
 ### Wait for a genuine response
 
@@ -100,7 +127,7 @@ The CLI requests an initial PLAN for every mode. Make the requested deliverable 
 gpt-worker wait -w <workspace>
 ```
 
-One invocation waits for up to 900 seconds, internally polling in roughly 20-second chunks. Let that process run. If the execution tool yields a process/session handle, resume that same process while giving concise progress updates; do not start competing waits, shorten the timeout into a polling loop, or interleave routine `status`/`queue` checks.
+One invocation waits for up to 900 seconds, internally polling in roughly 20-second chunks. Let that process run. Do not use the waiting time to start the work speculatively or to pre-investigate the problem; the PLAN decides what gets executed. If the execution tool yields a process/session handle, resume that same process while giving concise progress updates; do not start competing waits, shorten the timeout into a polling loop, or interleave routine `status`/`queue` checks.
 
 - **Exit 0:** inspect the response kind, task ID, iteration, and body. It can be PLAN, DONE, or BLOCKED; success exit alone does not mean the task is done.
 - **Exit 2:** the wait timed out. If the continuation was submitted, run another full-length `wait` without re-enqueueing or re-sending the browser message. If manual submission is still pending, address that prerequisite. Repeated full-length timeouts justify a focused connection/browser diagnosis.
