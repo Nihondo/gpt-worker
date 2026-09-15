@@ -112,6 +112,7 @@ describe("existing-conversation composer preparation", () => {
     assert.match(script, /range\.selectNodeContents\(composer\)/);
     assert.match(script, /document\.execCommand\('insertText', false, message\)/);
     assert.match(script, /new InputEvent\('input', \{ bubbles: true, inputType: 'insertText', data: message \}\)/);
+    assert.match(script, /HTMLTextAreaElement\.prototype/);
     assert.match(script, /return 'READY'/);
   });
 
