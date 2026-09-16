@@ -18,7 +18,7 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 - **Zero API Costs**: Powered by your existing ChatGPT web subscription (Plus, Team, Pro) with no per-token API charges.
 - **One-Time Setup Hub**: Deploy the relay Cloudflare Worker and configure ChatGPT once. Every subsequent project is added instantly with a single local command.
 - **Safe Read-Only Design**: ChatGPT only inspects files and generates plans. File modifications and command executions are always reviewed and run locally.
-- **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT.
+- **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT, and every tool result is additionally scanned by an external secret scanner (betterleaks/gitleaks) before it reaches ChatGPT, with any finding masked in place.
 - **Chrome Automation**: Automatically opens the ChatGPT Project in Chrome when a task is queued, and can submit messages in the background without stealing window focus.
 - **Zero Extra Dependencies**: Built purely with standard Node.js built-ins. No bulky npm packages or heavy daemons to install.
 
@@ -31,6 +31,10 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 - **Google Chrome**: Browser used to run ChatGPT
 - **ChatGPT Subscription**: Plus, Team, or Pro (with Developer mode and Projects enabled)
 - **Cloudflare Account**: Free tier is sufficient (used to deploy the relay Worker)
+- **A secret scanner**: [betterleaks](https://github.com/betterleaks/betterleaks) (recommended) or [gitleaks](https://github.com/gitleaks/gitleaks) as a compatible fallback — required so the local bridge can mask secrets before they reach ChatGPT; `gpt-worker start` refuses to run without one.
+  ```bash
+  brew install betterleaks   # or: brew install gitleaks
+  ```
 
 ---
 

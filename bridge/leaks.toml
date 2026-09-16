@@ -1,0 +1,37 @@
+# Egress secret-detection config for bridge/scanner.mjs. Loaded via
+# `betterleaks stdin --config bridge/leaks.toml` (or `gitleaks stdin` as a
+# compatible fallback — both accept this same file; verified in dev).
+#
+# `useDefault = true` pulls in the engine's full built-in rule set (417 rules
+# as of betterleaks 1.8.1). The two rules below only exist to cover gaps
+# confirmed by measurement against that built-in set — see the plan doc this
+# was implemented from for the corpus and results. Do not add a rule here
+# that duplicates a built-in one (e.g. an OpenAI/Anthropic/GitHub key
+# pattern); that only produces duplicate findings and a second place for the
+# pattern to go stale. `bridge/cli.mjs`'s startup check enforces that the
+# resolved rule count does not regress below what useDefault alone provides.
+
+title = "gpt-worker egress rules"
+
+[extend]
+useDefault = true
+
+# The built-in "aws-secret-access-key" rule exists only as a component of the
+# composite "aws-access-token" rule and never fires on its own, so an AWS
+# secret key printed without its access-key-id neighbor is never masked by
+# useDefault alone. This is a standalone version of the same pattern.
+[[rules]]
+id = "gw-aws-secret-access-key"
+description = "AWS secret access key (standalone, not paired with an access key id)"
+regex = '''(?i:aws[_.-]?(?:secret[_.-]?)?access[_.-]?key(?:[_.-]?id)?)[ \t]*[:=][ \t'"]*([A-Za-z0-9/+=]{40})'''
+secretGroup = 1
+keywords = ["aws_secret", "aws-secret", "awssecret", "aws_access", "aws-access"]
+
+# No built-in rule covers a credential embedded in a URL
+# (scheme://user:pass@host) — the closest built-ins are curl-flag-specific.
+[[rules]]
+id = "gw-url-password"
+description = "Credential embedded in a URL (scheme://user:pass@host)"
+regex = '''[a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:([^/\s:@]{3,})@'''
+secretGroup = 1
+keywords = ["://"]

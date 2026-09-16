@@ -31,6 +31,7 @@ import {
 import { BridgeLink } from "./link.mjs";
 import { WorkspaceTools } from "./tools.mjs";
 import { isChromeAutomationAvailable, openInChromeAndSubmit } from "./mac-chrome.mjs";
+import { verifyScanner } from "./scanner.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_DIR = path.join(HERE, "..", "worker");
@@ -663,6 +664,18 @@ async function cmdStart(args) {
     removePidFile(root);
   }
 
+  // Every tool result this bridge sends is sanitized through a required
+  // external scanner (bridge/scanner.mjs) before it reaches ChatGPT — see
+  // link.mjs's reply(). There is no fallback path, so a broken or missing
+  // scanner must block startup rather than surface later as silent
+  // sanitize_failed errors on every tool call.
+  try {
+    verifyScanner();
+  } catch (err) {
+    console.error(String(err.message || err));
+    process.exit(1);
+  }
+
   if (args.__daemon) {
     // Internal: this is the detached process itself.
     writePidFile(root, { workspace: root });
@@ -720,6 +733,12 @@ async function cmdStatus(args) {
   const pidCheck = checkPid(root);
   console.log(`workspace   : ${root}`);
   console.log(`local process: ${pidCheck.status}${pidCheck.info ? ` (pid ${pidCheck.info.pid})` : ""}`);
+  try {
+    const scanner = verifyScanner();
+    console.log(`secret scan : ${scanner.bin} ${scanner.version}${scanner.ruleCount ? ` (${scanner.ruleCount} rules)` : ""}`);
+  } catch (err) {
+    console.log(`secret scan : NOT WORKING — ${String(err.message || err).split("\n")[0]}`);
+  }
   try {
     await migrateLegacyStateIfNeeded(root, cfg);
     const remote = await localCall(cfg, "status");

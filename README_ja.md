@@ -18,7 +18,7 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
 - **API 課金ゼロ**：日常使っている ChatGPT の月額サブスクリプション（Web版）を利用するため、トークン従量課金が発生しません。
 - **1回設定するだけの共通ハブ**：中継用の Cloudflare Worker と ChatGPT 側の設定は最初の1度だけです。2つ目以降のプロジェクトはローカルコマンド1つで瞬時に追加できます。
 - **安全な読み取り専用設計**：ChatGPT はリポジトリの調査と計画の立案のみを行います。ファイルの変更やコマンド実行は必ずローカル側で検証してから行います。
-- **機密情報の自動保護**：`.env`、秘密鍵、`.ssh`、`.aws` などの機密ファイルや、Git で無視されているファイルは自動的に ChatGPT から隠されます。
+- **機密情報の自動保護**：`.env`、秘密鍵、`.ssh`、`.aws` などの機密ファイルや、Git で無視されているファイルは自動的に ChatGPT から隠されます。さらに、すべてのツール結果は外部の秘密スキャナ（betterleaks/gitleaks）で検査され、検出された秘密情報はその場でマスクされてから ChatGPT に届きます。
 - **Chrome による自動入力と送信**：タスク発行時に Chrome で該当プロジェクトを開き、バックグラウンド（画面フォーカスを奪わずに）でメッセージの入力や送信まで行えます。
 - **追加パッケージ不要**：Node.js の標準機能だけで作られており、余計なライブラリのインストールは不要です。
 
@@ -31,6 +31,10 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
 - **Google Chrome**：ChatGPT を操作するブラウザ
 - **ChatGPT サブスクリプション**：Plus、Team、Pro のいずれか（Developer mode と Projects 機能が使えること）
 - **Cloudflare アカウント**：無料プランで十分です（中継 Worker の設置に使用）
+- **秘密スキャナ**：[betterleaks](https://github.com/betterleaks/betterleaks)（推奨）または互換フォールバックの [gitleaks](https://github.com/gitleaks/gitleaks) — ローカルブリッジが ChatGPT に届ける前に秘密情報をマスクするために必須です。導入されていないと `gpt-worker start` は起動を拒否します。
+  ```bash
+  brew install betterleaks   # または: brew install gitleaks
+  ```
 
 ---
 

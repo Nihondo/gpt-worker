@@ -158,7 +158,7 @@ gpt-worker report -w <workspace> --changed <n> --tests '<summary>' \
   --command '<command actually run>' --output-file <log-path> --exit-code <actual-code>
 ```
 
-This records evidence; it does not run the command. Check that recorded output contains no secrets. ChatGPT reads it through `execution_output` with this task's ID. Report once per execution round, inspect its browser result exactly as for `task`, then run `wait` again.
+This records evidence; it does not run the command. ChatGPT reads it through `execution_output` with this task's ID, after the local bridge automatically masks any secret it detects (see [reference/protocol.md](reference/protocol.md#egress-content-sanitization)) — that automated scan is the first line of defense, not a substitute for your own judgment: avoid deliberately capturing output you know contains credentials, and treat a heavily-masked result as a signal to check what was captured. Report once per execution round, inspect its browser result exactly as for `task`, then run `wait` again.
 
 ### Finish or continue
 
