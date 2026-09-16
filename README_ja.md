@@ -173,7 +173,7 @@ Submit the result via gpt-worker using the received task_id and iteration, plus 
 
 ### 新しいチャットの開始と会話の復旧
 
-各ワークスペースは、継続先として ChatGPT の会話 URL を保存できます。Chrome の tab ID は短命な高速化情報に過ぎません。会話が長くなった場合や、ブラウザ自動化が別プロファイルを開いた場合は、次を使用します。
+各ワークスペースは、継続先として ChatGPT の会話 URL を保存できます。Chrome の tab ID は短命な高速化情報に過ぎません。tab ID が無効なら、まず保存済み会話 URL のタブを探し、見つからない場合はその URL を置換 tab で開きます。会話が長くなった場合や、ブラウザ自動化が別プロファイルを開いた場合は、次を使用します。
 
 ```bash
 # 同じ Project 内で、次の task/report を新しい ChatGPT 会話として開始します。

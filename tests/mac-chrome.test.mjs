@@ -101,6 +101,8 @@ describe("workspace tab AppleScript", () => {
     assert.match(script, /set savedConversationURL to "https:\/\/chatgpt\.com\/g\/g-p-example-gpt-worker\/c\/conversation-123"/);
     assert.match(script, /if selectedTab is missing value and savedConversationURL is not "" then/);
     assert.match(script, /candidateComparableURL is savedConversationURL/);
+    assert.match(script, /set targetIsSavedConversation to savedConversationURL is not ""/);
+    assert.match(script, /if didReuseTab is false then\s*if targetIsSavedConversation then\s*set prepareOutcome to "PENDING"/);
   });
 
   test("returns tab, URL, submission, reuse, and preparation outcomes so the caller can distinguish an injected continuation from a new-tab URL prompt", () => {

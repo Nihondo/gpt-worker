@@ -173,7 +173,7 @@ Submit the result via gpt-worker using the received task_id and iteration, plus 
 
 ### Start a New Chat or Recover a Conversation
 
-Each workspace can retain a ChatGPT conversation URL as its durable handoff target; a Chrome tab ID is only a short-lived optimization. Use these commands when a conversation becomes too long or browser automation opened the wrong profile:
+Each workspace can retain a ChatGPT conversation URL as its durable handoff target; a Chrome tab ID is only a short-lived optimization. If that tab ID is unavailable, gpt-worker first looks for the saved conversation URL, then opens that URL in a replacement tab when necessary. Use these commands when a conversation becomes too long or browser automation opened the wrong profile:
 
 ```bash
 # Make the next task/report start a fresh ChatGPT conversation in the same Project.

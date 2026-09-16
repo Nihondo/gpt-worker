@@ -341,8 +341,8 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
     console.log('Ask the user to tell ChatGPT "continue" in the gpt-worker project (set a one-click link with: gpt-worker chat-url <url>).');
     return;
   }
-  const url = buildChatOpenUrl(chatUrl, taskId);
   const conversationUrl = workspaceConversationUrl(settings, workspaceId, chatUrl);
+  const url = buildChatOpenUrl(conversationUrl || chatUrl, taskId);
 
   const chromeResult = isChromeAutomationAvailable()
     ? openInChromeAndSubmit(url, chatUrl, {

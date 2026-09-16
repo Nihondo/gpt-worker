@@ -260,6 +260,7 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId, c
     set conversationPrefix to "${safeConversationPrefix}"
     set savedTabID to "${safeSavedTabId}"
     set savedConversationURL to "${safeSavedConversationUrl}"
+    set targetIsSavedConversation to savedConversationURL is not ""
     set stableGizmoPrefix to "${safeStableGizmoPrefix}"
     tell application "Google Chrome"
       set selectedTab to missing value
@@ -346,7 +347,13 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId, c
       end if
       set selectedTabID to (id of selectedTab) as text
       set submitOutcome to "SKIPPED"
-      if didReuseTab is false then set prepareOutcome to "URL"
+      if didReuseTab is false then
+        if targetIsSavedConversation then
+          ${prepareContinuationStep}
+        else
+          set prepareOutcome to "URL"
+        end if
+      end if
       if prepareOutcome is "READY" or prepareOutcome is "URL" then
         ${submitStep}
       end if
