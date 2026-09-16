@@ -716,14 +716,16 @@ async function cmdStart(args) {
 
   // Every tool result this bridge sends is sanitized through a required
   // external scanner (bridge/scanner.mjs) before it reaches ChatGPT — see
-  // link.mjs's reply(). There is no fallback path, so a broken or missing
-  // scanner must block startup rather than surface later as silent
-  // sanitize_failed errors on every tool call.
+  // link.mjs's reply(). Startup itself only warns on a missing/broken
+  // scanner: link.mjs's reply() independently fails closed on every call
+  // (sanitize_failed), so no unscanned payload can reach ChatGPT even while
+  // the daemon runs without one — it just means every tool call will error
+  // until a scanner is installed.
   try {
     verifyScanner();
   } catch (err) {
-    console.error(String(err.message || err));
-    process.exit(1);
+    console.error(`Warning: ${String(err.message || err)}`);
+    console.error("Warning: starting without a working secret scanner — every tool call will fail (sanitize_failed) until one is installed.");
   }
 
   if (args.__daemon) {
