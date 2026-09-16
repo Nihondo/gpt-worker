@@ -231,6 +231,56 @@ describe("Worker-owned task state", () => {
   });
 });
 
+describe("next_task: operating instructions", () => {
+  test("the empty branch carries no instructions payload", async () => {
+    const doo = makeDO();
+    const result = await doo.invokeTool("next_task", {});
+    assert.deepEqual(result.structuredContent, { empty: true });
+  });
+
+  test("dedicated connector: non-empty result includes the dedicated variant", async () => {
+    const doo = makeDO();
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal" });
+    const result = await doo.invokeTool("next_task", {});
+    const { operating_instructions, task_id, iteration, kind, body } = result.structuredContent;
+    assert.match(operating_instructions, /planning and review partner for gpt-worker/);
+    assert.doesNotMatch(operating_instructions, /call list_workspaces first/);
+    assert.equal(task_id, "t1");
+    assert.equal(iteration, 0);
+    assert.equal(kind, "INIT");
+    assert.equal(body, "goal");
+  });
+
+  test("shared connector: non-empty result includes the shared variant", async () => {
+    const doo = makeDO();
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal" });
+    const result = await doo.invokeTool("next_task", {}, { connector: "shared" });
+    assert.match(result.structuredContent.operating_instructions, /call list_workspaces first/);
+  });
+
+  test("handleHubRelay (the shared connector's only path to invokeTool) always renders the shared variant", async () => {
+    const doo = makeDO();
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal" });
+    const response = await doo.handleHubRelay(
+      new Request("https://gpt-worker.internal/hub", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "next_task", arguments: {} }),
+      })
+    );
+    const body = await response.json();
+    assert.match(body.structuredContent.operating_instructions, /call list_workspaces first/);
+  });
+
+  test("the operating_instructions tool itself returns the connector-appropriate variant", async () => {
+    const doo = makeDO();
+    const dedicated = await doo.invokeTool("operating_instructions", {});
+    assert.doesNotMatch(dedicated.structuredContent.instructions, /call list_workspaces first/);
+    const shared = await doo.invokeTool("operating_instructions", {}, { connector: "shared" });
+    assert.match(shared.structuredContent.instructions, /call list_workspaces first/);
+  });
+});
+
 describe("localList: lease display and task_id filter", () => {
   test("shows an expired lease as pending, not leased", () => {
     const doo = makeDO();

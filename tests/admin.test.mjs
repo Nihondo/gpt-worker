@@ -69,6 +69,35 @@ describe("shared connector hub", () => {
     assert.ok(overview.inputSchema.required.includes("workspace_id"));
     assert.equal(overview.annotations.readOnlyHint, true);
   });
+
+  test("operating_instructions is exposed without a workspace_id requirement", async () => {
+    const doo = makeDO();
+    const response = await doo.handleHubMcpRequest({ id: 1, method: "tools/list", params: {} });
+    const body = await response.json();
+    const tool = body.result.tools.find((t) => t.name === "operating_instructions");
+    assert.ok(tool);
+    assert.equal(tool.inputSchema.properties.workspace_id, undefined);
+    assert.ok(!(tool.inputSchema.required || []).includes("workspace_id"));
+  });
+
+  test("operating_instructions answers locally, without a registered workspace_id", async () => {
+    const doo = makeDO();
+    const response = await doo.handleHubToolCall(1, { name: "operating_instructions", arguments: {} });
+    const body = await response.json();
+    assert.notEqual(body.result.structuredContent.error, "UNKNOWN_WORKSPACE");
+    assert.match(body.result.structuredContent.instructions, /call list_workspaces first/);
+  });
+
+  test("initialize carries the connector-appropriate operating instructions", async () => {
+    const doo = makeDO();
+    const hub = await doo.handleHubMcpRequest({ id: 1, method: "initialize", params: {} });
+    const hubBody = await hub.json();
+    assert.match(hubBody.result.instructions, /call list_workspaces first/);
+
+    const dedicated = await doo.handleMcpRequest({ id: 1, method: "initialize", params: {} });
+    const dedicatedBody = await dedicated.json();
+    assert.doesNotMatch(dedicatedBody.result.instructions, /call list_workspaces first/);
+  });
 });
 
 describe("migrateDefault", () => {

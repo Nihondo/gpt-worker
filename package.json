@@ -11,12 +11,12 @@
   "author": "Nihondo",
   "scripts": {
     "check": "node scripts/check.mjs",
-    "test": "node --test tests/",
+    "test": "node --test --import ./tests/helpers/text-modules.mjs tests/",
     "verify": "npm run check && npm test",
     "deploy": "cd worker && npx wrangler deploy",
     "dry-run": "cd worker && npx wrangler deploy --dry-run"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.15"
   }
 }

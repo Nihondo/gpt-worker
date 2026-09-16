@@ -22,5 +22,14 @@
   // paid plan's classic (non-SQLite) storage backend.
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["BridgeDO"] }
+  ],
+
+  // src/instructions.js imports src/instructions.md as a plain string. Node's
+  // test run resolves the same import through tests/helpers/text-modules.mjs.
+  // The glob matches the import specifier as written in source (e.g.
+  // "./instructions.md"), not a path relative to this config file — a
+  // literal path here would never match.
+  "rules": [
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true }
   ]
 }

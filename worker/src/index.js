@@ -33,6 +33,12 @@
 // ~/.agents/skills/gpt-worker/reference/protocol.md for message formats.
 
 import TOOLS from "./tools.json" with { type: "json" };
+import { operatingInstructions } from "./instructions.js";
+
+// Tools answered locally by the hub (no workspace_id involved) instead of
+// being relayed to a workspace's Durable Object. Excluded from the
+// workspace_id injection below for that reason.
+const HUB_LOCAL_TOOLS = new Set(["operating_instructions"]);
 
 const HUB_TOOLS = [
   {
@@ -42,18 +48,22 @@ const HUB_TOOLS = [
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
-  ...TOOLS.tools.map((tool) => ({
-    ...tool,
-    description: `${tool.description} In the shared connector, pass workspace_id from list_workspaces for this call.`,
-    inputSchema: {
-      ...tool.inputSchema,
-      properties: {
-        ...tool.inputSchema.properties,
-        workspace_id: { type: "string", description: "Workspace ID returned by list_workspaces." },
-      },
-      required: [...new Set([...(tool.inputSchema.required || []), "workspace_id"])],
-    },
-  })),
+  ...TOOLS.tools.map((tool) =>
+    HUB_LOCAL_TOOLS.has(tool.name)
+      ? { ...tool }
+      : {
+          ...tool,
+          description: `${tool.description} In the shared connector, pass workspace_id from list_workspaces for this call.`,
+          inputSchema: {
+            ...tool.inputSchema,
+            properties: {
+              ...tool.inputSchema.properties,
+              workspace_id: { type: "string", description: "Workspace ID returned by list_workspaces." },
+            },
+            required: [...new Set([...(tool.inputSchema.required || []), "workspace_id"])],
+          },
+        }
+  ),
 ];
 
 const PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
@@ -1642,7 +1652,16 @@ export class BridgeDO {
       case "initialize": {
         const clientVersion = params && params.protocolVersion;
         const version = PROTOCOL_VERSIONS.has(clientVersion) ? clientVersion : "2025-06-18";
-        return json({ jsonrpc: "2.0", id, result: { protocolVersion: version, capabilities: { tools: {} }, serverInfo: { name: "gpt-worker", version: "1.1.0" } } });
+        return json({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            protocolVersion: version,
+            capabilities: { tools: {} },
+            serverInfo: { name: "gpt-worker", version: "1.2.0" },
+            instructions: operatingInstructions("shared"),
+          },
+        });
       }
       case "tools/list":
         return json({ jsonrpc: "2.0", id, result: { tools: HUB_TOOLS.map(({ name, title, description, inputSchema, annotations }) => ({ name, title, description, inputSchema, annotations })) } });
@@ -1661,6 +1680,9 @@ export class BridgeDO {
     if (!params || typeof params.name !== "string") return rpcError(id, -32602, "Invalid params: missing tool name");
     const { name, arguments: args = {} } = params;
     if (name === "list_workspaces") return json({ jsonrpc: "2.0", id, result: toolOk({ workspaces: this.registeredWorkspaces() }) });
+    if (name === "operating_instructions") {
+      return json({ jsonrpc: "2.0", id, result: toolOk({ instructions: operatingInstructions("shared") }) });
+    }
     if (!HUB_TOOLS.some((tool) => tool.name === name)) {
       return json({ jsonrpc: "2.0", id, result: toolError("UNKNOWN_TOOL", `No such tool: ${name}`) });
     }
@@ -1685,14 +1707,16 @@ export class BridgeDO {
   }
 
   /** Internal, binding-only entry point used by the hub to preserve the
-   * existing workspace task queues and read gating. */
+   * existing workspace task queues and read gating. Reachable only from
+   * handleHubToolCall (this file), so reaching here always means the
+   * shared connector. */
   async handleHubRelay(request) {
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
     const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
     if (parsed.tooLarge) return json(toolError("PAYLOAD_TOO_LARGE", "request exceeds size limit"), 413);
     const body = parsed.value || {};
     if (parsed.parseError || typeof body.name !== "string") return json(toolError("INVALID_ARGS", "tool name is required"), 400);
-    return json(await this.invokeTool(body.name, body.arguments || {}));
+    return json(await this.invokeTool(body.name, body.arguments || {}, { connector: "shared" }));
   }
 
   async handleMcpRequest({ id, method, params }) {
@@ -1709,7 +1733,8 @@ export class BridgeDO {
           result: {
             protocolVersion: version,
             capabilities: { tools: {} },
-            serverInfo: { name: "gpt-worker", version: "1.0.0" },
+            serverInfo: { name: "gpt-worker", version: "1.1.0" },
+            instructions: operatingInstructions("dedicated"),
           },
         });
       }
@@ -1741,11 +1766,19 @@ export class BridgeDO {
     return json({ jsonrpc: "2.0", id, result: await this.invokeTool(name, args) });
   }
 
-  async invokeTool(name, args = {}) {
+  async invokeTool(name, args = {}, { connector = "dedicated" } = {}) {
     const tool = TOOLS.tools.find((t) => t.name === name);
     if (!tool) return toolError("UNKNOWN_TOOL", `No such tool: ${name}`);
     try {
-      if (tool.location === "queue_next") return toolOk(this.queueNext(args && args.task_id));
+      if (tool.location === "instructions") return toolOk({ instructions: operatingInstructions(connector) });
+      if (tool.location === "queue_next") {
+        const next = this.queueNext(args && args.task_id);
+        // Worker-owned static protocol text, not queue data (see
+        // instructions.js). next_task is the one call guaranteed to happen
+        // at the start of a round, so it is the reliable delivery point if
+        // the connector drops InitializeResult.instructions.
+        return toolOk(next.empty ? next : { operating_instructions: operatingInstructions(connector), ...next });
+      }
       if (tool.location === "queue_submit") return this.queueSubmit(args);
       if (tool.location === "queue_history") return toolOk(this.taskHistory(args));
       if (tool.location === "workspace_guidance") return toolOk(this.workspaceGuidance());

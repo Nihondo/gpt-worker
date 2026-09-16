@@ -11,6 +11,7 @@ const files = [
     .filter((f) => f.endsWith(".mjs"))
     .map((f) => path.join("bridge", f)),
   "worker/src/index.js",
+  "worker/src/instructions.js",
 ];
 
 let failed = false;
