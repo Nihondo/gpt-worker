@@ -95,7 +95,7 @@ gpt-worker init -w /path/to/your-project
    - ChatGPT 画面左下のユーザー名をクリックし、**設定** → **Developer mode** をオンにします。
 2. **MCP Connector を登録する**：
    - **設定** → **Connectors**（または Developer mode 設定）から新しいコネクタを追加します。
-   - **Name**：`gpt-worker`
+   - **Name**：`gpt-worker`（固定。変更不可）
    - **Server URL**：`gpt-worker url` で表示された URL
    - **Authentication**：`OAuth` を選択します。同意画面が開いたら、`gpt-worker url` で表示されたトークンを入力して承認します。
    - **コネクタ URL を選ぶ**：
@@ -105,14 +105,12 @@ gpt-worker init -w /path/to/your-project
    - ChatGPT の左サイドバーから **New Project** を作成します（例：`Coding Assistant`）。
    - プロジェクト設定で **Project-only memory** を有効にすることをお勧めします。
 4. **指示文（Project Instructions）を設定する**：
-   - 作成したプロジェクトの **Instructions** 欄に、以下の 2 行の英語テキストをそのまま貼り付けて保存します。
+   - 作成したプロジェクトの **Instructions** 欄に、以下の 1 行の英語テキストをそのまま貼り付けて保存します。
      ```text
      Use the gpt-worker connector. It supplies its own operating instructions — follow them for every round.
-     Always display in the chat, verbatim, the full task content you receive from the connector and the exact task_id/iteration/state/body you are about to submit, before submitting it.
      ```
    - 運用プロトコルの本文はコネクタ自身が配信します：`initialize` の応答、`operating_instructions` ツール、そして `next_task` で渡される各タスクに同梱される形で届きます。他に貼り付けるものはなく、gpt-worker を更新しても貼り直す必要はありません。
-   - 2 行目は、コネクタが配信するプロトコル本文にすでに含まれる一項目（受信内容・送信直前の内容をチャットに表示すること）を重複させたものです。Project Instructions はコネクタ経由の指示より常に強くコンテキストに効くため、この透明性の要件だけはあえて重複させ、ChatGPT が実際に何を受信し何を送信しようとしているかをユーザーが会話上で確認できるようにしています。プロトコル全文をここに貼り戻すのではなく、この安定した 1 行だけにとどめてください。プロトコルの残りの部分はコネクタ側が単一の管理元であり続けるべきで、そうしないと内容が古いまま取り残されます。
-   - 欄を空のままにしても動作します。上記の行は、新しい会話の最初のターンでのみ ChatGPT を助けるものです。
+   - 欄を空のままにしても動作します。上記の 1 行は、新しい会話の最初のターンでのみ ChatGPT を助けるものです。
    - プロトコル本文そのものは [worker/src/instructions.md](worker/src/instructions.md) にあります。
 
 ### ステップ 5：ChatGPT Project URL の登録と Chrome の自動送信設定
