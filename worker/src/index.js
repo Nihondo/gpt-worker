@@ -75,6 +75,11 @@ const LEASE_MS = 120_000; // next_task lease before it can be re-claimed
 const MAX_BODY_BYTES = 16 * 1024; // the `body` text field inside a message
 const MAX_REQUEST_BYTES = 32 * 1024; // the whole JSON-RPC/CLI envelope around it
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// Longer than RETENTION_MS on purpose: `tasks` rows back the queue_history
+// tool's cross-conversation memory for ChatGPT, which is only useful if it
+// outlives a single week-long gap between sessions. msgs rows are pure
+// message-delivery transport and don't need that longevity.
+const TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ALARM_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_WINDOW_MS = 60 * 60 * 1000;
 const WORKSPACE_ID_RE = /^[0-9a-f]{16}$/;
@@ -2270,6 +2275,8 @@ export class BridgeDO {
   async alarm() {
     const cutoff = Date.now() - RETENTION_MS;
     this.sql.exec(`DELETE FROM msgs WHERE state = 'acked' AND created_at < ?`, cutoff);
+    const taskCutoff = Date.now() - TASK_RETENTION_MS;
+    this.sql.exec(`DELETE FROM tasks WHERE protocol_state IN ('DONE', 'BLOCKED') AND updated_at < ?`, taskCutoff);
     const now = Date.now();
     this.sql.exec(`DELETE FROM oauth_authorization_codes WHERE expires_at < ?`, now);
     this.sql.exec(`DELETE FROM oauth_access_tokens WHERE expires_at < ? OR revoked_at IS NOT NULL`, now);

@@ -325,6 +325,12 @@ To allow background script execution in an existing tab:
 - **Secret Blocking**: `.env`, private keys, `.ssh`, and `.aws` are always blocked from ChatGPT read requests.
 - **Time-Bounded Access**: ChatGPT can only inspect workspace files while an active task is running.
 
+### Data Retention
+Your Cloudflare Worker (deployed to your own account in Step 3) durably stores task traffic, which is more retention than a pure chat/local setup:
+- **Task message bodies** (goal text, plans, execution reports) are automatically deleted from the Worker 7 days after being delivered and acknowledged.
+- **Task history** (goal text and outcome summary, used to give ChatGPT context on past tasks) is automatically deleted from the Worker 30 days after the task reaches a final outcome (done or blocked). An in-progress task is never deleted while it's active.
+- To permanently wipe all task/queue records for a workspace from your Cloudflare account, run `gpt-worker remove -w <dir> --yes` (see [Deregistering a Workspace](#deregistering-a-workspace)). There is no way to delete a single past task's history short of removing the whole workspace.
+
 ---
 
 ## Command Reference

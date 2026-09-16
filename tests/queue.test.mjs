@@ -291,3 +291,51 @@ describe("localList: lease display and task_id filter", () => {
     assert.equal(msg.state, "pending");
   });
 });
+
+describe("alarm(): retention sweeps for msgs and tasks", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function insertTask(doo, { taskId, protocolState, updatedAt }) {
+    doo.sql.exec(
+      `INSERT INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary)
+       VALUES (?, 'goal', 1, ?, 'none', ?, ?, 'summary')`,
+      taskId,
+      protocolState,
+      updatedAt,
+      updatedAt
+    );
+  }
+
+  test("purges acked msgs older than 7 days, keeps newer/unacked ones", async () => {
+    const doo = makeDO();
+    const old = doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "old" });
+    const recent = doo.localEnqueue({ kind: "INIT", task_id: "t2", iteration: 0, body: "recent" });
+    const unacked = doo.localEnqueue({ kind: "INIT", task_id: "t3", iteration: 0, body: "unacked" });
+    doo.sql.exec(`UPDATE msgs SET state = 'acked', created_at = ? WHERE message_id = ?`, Date.now() - 8 * DAY_MS, old.message_id);
+    doo.sql.exec(`UPDATE msgs SET state = 'acked', created_at = ? WHERE message_id = ?`, Date.now() - 1 * DAY_MS, recent.message_id);
+    doo.sql.exec(`UPDATE msgs SET created_at = ? WHERE message_id = ?`, Date.now() - 8 * DAY_MS, unacked.message_id);
+
+    await doo.alarm();
+
+    const ids = doo.sql.exec(`SELECT message_id FROM msgs`).toArray().map((r) => r.message_id);
+    assert.ok(!ids.includes(old.message_id), "acked message older than 7 days should be purged");
+    assert.ok(ids.includes(recent.message_id), "acked message within 7 days should survive");
+    assert.ok(ids.includes(unacked.message_id), "unacked message should survive regardless of age");
+  });
+
+  test("purges terminal tasks older than 30 days, keeps newer/active ones", async () => {
+    const doo = makeDO();
+    insertTask(doo, { taskId: "old-done", protocolState: "DONE", updatedAt: Date.now() - 31 * DAY_MS });
+    insertTask(doo, { taskId: "old-blocked", protocolState: "BLOCKED", updatedAt: Date.now() - 31 * DAY_MS });
+    insertTask(doo, { taskId: "recent-done", protocolState: "DONE", updatedAt: Date.now() - 1 * DAY_MS });
+    insertTask(doo, { taskId: "old-active", protocolState: "AWAITING_PLAN", updatedAt: Date.now() - 31 * DAY_MS });
+
+    await doo.alarm();
+
+    const ids = doo.sql.exec(`SELECT task_id FROM tasks`).toArray().map((r) => r.task_id);
+    assert.ok(!ids.includes("old-done"), "terminal task older than 30 days should be purged");
+    assert.ok(!ids.includes("old-blocked"), "terminal task older than 30 days should be purged");
+    assert.ok(ids.includes("recent-done"), "terminal task within 30 days should survive");
+    assert.ok(ids.includes("old-active"), "active task should survive regardless of age");
+  });
+});
