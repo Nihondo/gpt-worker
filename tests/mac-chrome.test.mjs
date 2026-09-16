@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
+  chatGptConversationUrl,
   chatGptProjectScope,
   buildChatGptComposerScript,
   buildChromeTabScript,
@@ -93,14 +94,24 @@ describe("workspace tab AppleScript", () => {
     assert.doesNotMatch(script, /Finder/);
   });
 
-  test("returns tab, submission, reuse, and preparation outcomes so the caller can distinguish an injected continuation from a new-tab URL prompt", () => {
+  test("falls back to an exact saved conversation URL when its tab ID is unavailable", () => {
+    const conversationURL = "https://chatgpt.com/g/g-p-example-gpt-worker/c/conversation-123";
+    const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { conversationUrl: `${conversationURL}?query=ignored` });
+
+    assert.match(script, /set savedConversationURL to "https:\/\/chatgpt\.com\/g\/g-p-example-gpt-worker\/c\/conversation-123"/);
+    assert.match(script, /if selectedTab is missing value and savedConversationURL is not "" then/);
+    assert.match(script, /candidateComparableURL is savedConversationURL/);
+  });
+
+  test("returns tab, URL, submission, reuse, and preparation outcomes so the caller can distinguish an injected continuation from a new-tab URL prompt", () => {
     const script = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
     assert.match(script, /set didReuseTab to false/);
     assert.match(script, /set didReuseTab to true/);
     assert.match(script, /if selectedTabIsConversation then\s*[\s\S]*set prepareOutcome to "PENDING"[\s\S]*else\s*set URL of selectedTab to targetURL\s*set prepareOutcome to "URL"/);
     assert.match(script, /set selectedTabIsConversation to isConversationTab/);
+    assert.match(script, /set selectedTabURL to URL of selectedTab/);
     assert.match(script, /if didReuseTab then\s*\n\s*set reuseFlag to "REUSED"\s*\n\s*else\s*\n\s*set reuseFlag to "NEW"\s*\n\s*end if/);
-    assert.match(script, /return selectedTabID & "\|" & submitOutcome & "\|" & reuseFlag & "\|" & prepareOutcome/);
+    assert.match(script, /return selectedTabID & "\|" & submitOutcome & "\|" & reuseFlag & "\|" & prepareOutcome & "\|" & selectedTabURL/);
   });
 });
 
@@ -211,6 +222,15 @@ describe("ChatGPT Project tab scope", () => {
     ]) {
       assert.equal(matchesChatGptProjectScope(value, scope), false, value);
     }
+  });
+
+  test("normalizes only same-Project conversation URLs for durable recovery", () => {
+    assert.equal(
+      chatGptConversationUrl("https://chatgpt.com/g/g-p-example-gpt-worker/c/conversation?prompt=x#fragment", projectURL),
+      "https://chatgpt.com/g/g-p-example-gpt-worker/c/conversation"
+    );
+    assert.equal(chatGptConversationUrl(projectURL, projectURL), null);
+    assert.equal(chatGptConversationUrl("https://chatgpt.com/g/g-p-other/c/conversation", projectURL), null);
   });
 });
 

@@ -6,6 +6,7 @@
 //   ~/.config/gpt-worker/worker.json                 {workerUrl, adminToken,
 //                                                       hubGptToken, chatUrl,
 //                                                       chatUrlsByWorkspace,
+//                                                       conversationUrlsByWorkspace,
 //                                                       chromeTabsByWorkspace, ...} (mode 600)
 //
 // Per workspace (one Durable Object, its own gpt/link/cli tokens):
@@ -92,7 +93,7 @@ export function fixPermissions() {
 // ---------------------------------------------------------------------------
 // Worker config (machine/account-wide: one Worker URL + the admin token used
 // to provision new workspaces — never a per-workspace secret). chatUrl and
-// chatUrlsByWorkspace and chromeTabsByWorkspace are local browser UI
+// chatUrlsByWorkspace, conversationUrlsByWorkspace and chromeTabsByWorkspace are local browser UI
 // preferences, not protocol state.
 // ---------------------------------------------------------------------------
 

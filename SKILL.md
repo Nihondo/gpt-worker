@@ -194,6 +194,8 @@ The CLI uses a workspace Project URL override or the shared default and reuses t
 
 On macOS Chrome, composer preparation and automatic submission require View > Developer > **Allow JavaScript from Apple Events**, followed by relaunching Chrome. There is no keystroke fallback. Automatic submission is attempted by default. Reused tabs stay in the background; new windows may take focus. Always rely on the actual command result, not assumptions about the browser state.
 
+When a user intentionally wants a fresh ChatGPT context, use `gpt-worker chat new -w <workspace>` before the next task/report. It clears only that workspace's browser conversation and tab association; it never cancels Worker queue/task state or changes the Project URL. If browser automation targeted the wrong profile, have the user open the correct same-Project conversation manually, then bind it with `gpt-worker chat attach '<conversation-url>' -w <workspace>` before continuing. `gpt-worker chat status -w <workspace>` exposes the Project and attached conversation but never a tab ID or token.
+
 Use setup instructions only when a prerequisite is missing:
 
 1. Register the workspace with `gpt-worker init -w <workspace>`. Additional workspaces reuse the existing hub and connector. First-machine setup can require interactive Cloudflare login and deploys a Worker; obtain any missing deployment authorization before running it.

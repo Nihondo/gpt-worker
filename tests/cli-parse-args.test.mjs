@@ -14,10 +14,13 @@ import {
   selectWaitMessages,
   withChatUrl,
   withWorkspaceChatUrl,
+  withWorkspaceConversationUrl,
   withWorkspaceChromeTab,
+  withoutWorkspaceChatConversation,
   withoutWorkspaceChatSettings,
   withoutWorkspaceChatUrl,
   workspaceChatUrl,
+  workspaceConversationUrl,
   withoutWorkspaceChromeTab,
   workspaceChromeTabId,
 } from "../bridge/cli.mjs";
@@ -109,15 +112,55 @@ describe("workspace Chrome tab mapping", () => {
     assert.equal(Object.hasOwn(result, "chromeTabsByWorkspace"), false);
   });
 
+  test("stores a same-Project conversation separately and clears only its workspace tab", () => {
+    const project = "https://chatgpt.com/g/g-p-example/project";
+    const base = {
+      chatUrl: project,
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      conversationUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-example/c/other" },
+    };
+    const attached = withWorkspaceConversationUrl(base, workspaceA, "https://chatgpt.com/g/g-p-example/c/current?query=ignored");
+    assert.equal(workspaceConversationUrl(attached, workspaceA), "https://chatgpt.com/g/g-p-example/c/current");
+    assert.equal(workspaceChromeTabId(attached, workspaceA), null);
+    assert.equal(workspaceConversationUrl(attached, workspaceB), "https://chatgpt.com/g/g-p-example/c/other");
+    assert.equal(workspaceChromeTabId(attached, workspaceB), "202");
+    assert.equal(
+      withWorkspaceConversationUrl(base, workspaceA, "https://chatgpt.com/g/g-p-other/c/wrong"),
+      base,
+      "a conversation from another Project must not be attachable"
+    );
+  });
+
+  test("starting a new chat clears only the workspace conversation and tab", () => {
+    const base = {
+      chatUrl: "https://chatgpt.com/g/g-p-example/project",
+      chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      conversationUrlsByWorkspace: {
+        [workspaceA]: "https://chatgpt.com/g/g-p-example/c/current",
+        [workspaceB]: "https://chatgpt.com/g/g-p-example/c/other",
+      },
+    };
+    const fresh = withoutWorkspaceChatConversation(base, workspaceA);
+    assert.equal(workspaceChromeTabId(fresh, workspaceA), null);
+    assert.equal(workspaceConversationUrl(fresh, workspaceA), null);
+    assert.equal(workspaceChromeTabId(fresh, workspaceB), "202");
+    assert.equal(workspaceConversationUrl(fresh, workspaceB), "https://chatgpt.com/g/g-p-example/c/other");
+  });
+
   test("clears all tab IDs when the shared Project URL changes", () => {
     const settings = {
       chatUrl: "https://chatgpt.com/g/g-p-old/project",
       chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      conversationUrlsByWorkspace: {
+        [workspaceA]: "https://chatgpt.com/g/g-p-old/c/a",
+        [workspaceB]: "https://chatgpt.com/g/g-p-old/c/b",
+      },
     };
     const changed = withChatUrl(settings, "https://chatgpt.com/g/g-p-new/project");
     const unchanged = withChatUrl(settings, settings.chatUrl);
 
     assert.equal(Object.hasOwn(changed, "chromeTabsByWorkspace"), false);
+    assert.equal(Object.hasOwn(changed, "conversationUrlsByWorkspace"), false);
     assert.deepEqual(unchanged.chromeTabsByWorkspace, settings.chromeTabsByWorkspace);
   });
 
@@ -158,11 +201,17 @@ describe("workspace Chrome tab mapping", () => {
     const base = {
       chatUrl: "https://chatgpt.com/g/g-p-old-default/project",
       chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
+      conversationUrlsByWorkspace: {
+        [workspaceA]: "https://chatgpt.com/g/g-p-old-default/c/a",
+        [workspaceB]: "https://chatgpt.com/g/g-p-b/c/b",
+      },
       chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
     };
     const changed = withChatUrl(base, "https://chatgpt.com/g/g-p-new-default/project");
     assert.equal(workspaceChromeTabId(changed, workspaceA), null);
     assert.equal(workspaceChromeTabId(changed, workspaceB), "202");
+    assert.equal(workspaceConversationUrl(changed, workspaceA), null);
+    assert.equal(workspaceConversationUrl(changed, workspaceB), "https://chatgpt.com/g/g-p-b/c/b");
     assert.equal(effectiveChatUrl(changed, workspaceA), "https://chatgpt.com/g/g-p-new-default/project");
     assert.equal(effectiveChatUrl(changed, workspaceB), base.chatUrlsByWorkspace[workspaceB]);
   });
@@ -191,6 +240,7 @@ describe("workspace Chrome tab mapping", () => {
       chatUrl: "https://chatgpt.com/g/g-p-default/project",
       enterDelayMs: 1500,
       chatUrlsByWorkspace: { [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
+      conversationUrlsByWorkspace: { [workspaceA]: "https://chatgpt.com/g/g-p-default/c/conversation-a" },
       chromeTabsByWorkspace: { [workspaceA]: "101", [workspaceB]: "202" },
     };
     const workspaces = [
@@ -204,6 +254,7 @@ describe("workspace Chrome tab mapping", () => {
     assert.equal(view.autoEnter, undefined);
     assert.equal(view.workspaces[0].chatUrlOverride, null);
     assert.equal(view.workspaces[0].effectiveChatUrl, settings.chatUrl);
+    assert.equal(view.workspaces[0].conversationUrl, settings.conversationUrlsByWorkspace[workspaceA]);
     assert.equal(view.workspaces[1].chatUrlOverride, settings.chatUrlsByWorkspace[workspaceB]);
     assert.equal(view.workspaces[1].effectiveChatUrl, settings.chatUrlsByWorkspace[workspaceB]);
     for (const secret of ["worker.example", "admin-secret", "hub-secret", "gpt-secret", "cli-secret", "101", "202"]) {

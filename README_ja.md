@@ -163,13 +163,29 @@ Submit the result via gpt-worker using the received task_id and iteration, plus 
    ```bash
    gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project"
    ```
-   登録すると、タスク発行時に Chrome でタブを開き、メッセージの送信（ENTER投入）まで自動で行われます。
+   登録すると、タスク発行時に Chrome がプロンプトを準備し、Apple Events が有効なら自動送信します。
 
 2. **Chrome の自動送信を許可する（初回のみ）**：
    画面フォーカスを奪わずにバックグラウンドでメッセージを入力・送信させるために、Chrome 側で以下の設定を有効にします。
    - Chrome のメニューバーから **表示** → **開発** → **Apple EventsからのJavaScriptを許可** にチェックを入れる。
    - 設定後、**Chrome を完全に再起動** する（`Cmd + Q` で終了してから開き直す）。
    > **注意**：この設定が無効のままだと、プロンプトが入力欄にセットされた状態で停止し、手動で Enter キーを押して送信する必要があります。
+
+### 新しいチャットの開始と会話の復旧
+
+各ワークスペースは、継続先として ChatGPT の会話 URL を保存できます。Chrome の tab ID は短命な高速化情報に過ぎません。会話が長くなった場合や、ブラウザ自動化が別プロファイルを開いた場合は、次を使用します。
+
+```bash
+# 同じ Project 内で、次の task/report を新しい ChatGPT 会話として開始します。
+# Worker のタスクを取り消したり、登録済み Project URL を変更したりはしません。
+gpt-worker chat new -w .
+
+# 登録済み Project 内で手動で開いた会話を、このワークスペースに紐付けます。
+gpt-worker chat attach "https://chatgpt.com/g/g-p-.../c/..." -w .
+
+# Project と紐付け済み会話を確認します。
+gpt-worker chat status -w .
+```
 
 ---
 
@@ -368,6 +384,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker report -w <dir>` | 実装結果やテスト内容を ChatGPT に報告 |
 | `gpt-worker guidance "<text>" -w <dir>` | プロジェクト固有の開発ルールを設定 |
 | `gpt-worker chat-url "<url>" -w <dir>` | ChatGPT Project の URL を登録・変更 |
+| `gpt-worker chat <new\|attach\|status> ... -w <dir>` | 新しいチャットの開始、手動で開いた会話の紐付け、または復旧状態の確認 |
 | `gpt-worker show-config [-w <dir>]` | ブラウザ連携の設定内容を確認 |
 | `gpt-worker allow-read <file> -w <dir>` | Git 無視ファイルの個別読み取りを許可 |
 | `gpt-worker allow-list -w <dir>` | 個別許可されたファイル一覧を表示 |

@@ -2,7 +2,7 @@
 // gpt-worker CLI. See ~/.agents/skills/gpt-worker/SKILL.md for the operating
 // loop and ~/.agents/skills/gpt-worker/reference/protocol.md for message formats.
 //
-// Subcommands: init, url, chat-url, show-config, start, stop, status, queue,
+// Subcommands: init, url, chat-url, chat, show-config, start, stop, status, queue,
 // task, wait, report, state, rotate, workspaces, allow-read, deny-read, allow-list.
 // There is deliberately no `doctor`: the Worker URL never expires, so the
 // only thing that can go wrong locally is "the WS link isn't connected",
@@ -30,7 +30,7 @@ import {
 } from "./state.mjs";
 import { BridgeLink } from "./link.mjs";
 import { WorkspaceTools } from "./tools.mjs";
-import { isChromeAutomationAvailable, openInChromeAndSubmit } from "./mac-chrome.mjs";
+import { chatGptConversationUrl, isChromeAutomationAvailable, openInChromeAndSubmit } from "./mac-chrome.mjs";
 import { verifyScanner } from "./scanner.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -199,6 +199,12 @@ export function effectiveChatUrl(settings, workspaceId) {
   return workspaceChatUrl(settings, workspaceId) || settings?.chatUrl || null;
 }
 
+export function workspaceConversationUrl(settings, workspaceId, chatUrl = effectiveChatUrl(settings, workspaceId)) {
+  const urls = settings?.conversationUrlsByWorkspace;
+  if (!workspaceId || !urls || typeof urls !== "object" || Array.isArray(urls)) return null;
+  return chatGptConversationUrl(urls[workspaceId], chatUrl);
+}
+
 /** A deliberately allowlisted view of local browser-facing preferences. Do
  *  not return worker URLs, tokens, or raw config objects from this helper. */
 export function safeBrowserConfig(settings, workspaces, workspaceId = null) {
@@ -209,6 +215,7 @@ export function safeBrowserConfig(settings, workspaces, workspaceId = null) {
       workspacePath: workspace.workspacePath || null,
       chatUrlOverride: workspaceChatUrl(settings, workspace.workspaceId),
       effectiveChatUrl: effectiveChatUrl(settings, workspace.workspaceId),
+      conversationUrl: workspaceConversationUrl(settings, workspace.workspaceId),
     }));
   return {
     sharedChatUrl: settings?.chatUrl || null,
@@ -242,6 +249,37 @@ export function withoutWorkspaceChromeTab(settings, workspaceId) {
   return next;
 }
 
+export function withWorkspaceConversationUrl(settings, workspaceId, conversationUrl, { clearTab = true } = {}) {
+  const canonicalUrl = settings && workspaceId ? chatGptConversationUrl(conversationUrl, effectiveChatUrl(settings, workspaceId)) : null;
+  if (!canonicalUrl) return settings;
+  if (settings.conversationUrlsByWorkspace?.[workspaceId] === canonicalUrl) return settings;
+  const next = {
+    ...settings,
+    conversationUrlsByWorkspace: {
+      ...(settings.conversationUrlsByWorkspace && typeof settings.conversationUrlsByWorkspace === "object" && !Array.isArray(settings.conversationUrlsByWorkspace)
+        ? settings.conversationUrlsByWorkspace
+        : {}),
+      [workspaceId]: canonicalUrl,
+    },
+  };
+  return clearTab ? withoutWorkspaceChromeTab(next, workspaceId) : next;
+}
+
+export function withoutWorkspaceConversationUrl(settings, workspaceId) {
+  const urls = settings?.conversationUrlsByWorkspace;
+  if (!settings || !workspaceId || !urls || typeof urls !== "object" || Array.isArray(urls) || !Object.hasOwn(urls, workspaceId)) return settings;
+  const nextUrls = { ...urls };
+  delete nextUrls[workspaceId];
+  const next = { ...settings };
+  if (Object.keys(nextUrls).length === 0) delete next.conversationUrlsByWorkspace;
+  else next.conversationUrlsByWorkspace = nextUrls;
+  return next;
+}
+
+export function withoutWorkspaceChatConversation(settings, workspaceId) {
+  return withoutWorkspaceChromeTab(withoutWorkspaceConversationUrl(settings, workspaceId), workspaceId);
+}
+
 /** Set a workspace-only Project URL. A tab can be kept only when the actual
  *  effective URL did not change. */
 export function withWorkspaceChatUrl(settings, workspaceId, chatUrl) {
@@ -258,7 +296,7 @@ export function withWorkspaceChatUrl(settings, workspaceId, chatUrl) {
       [workspaceId]: chatUrl,
     },
   };
-  return previousEffectiveUrl === chatUrl ? next : withoutWorkspaceChromeTab(next, workspaceId);
+  return previousEffectiveUrl === chatUrl ? next : withoutWorkspaceChatConversation(next, workspaceId);
 }
 
 /** Remove a workspace-only Project URL and return the workspace to the
@@ -272,21 +310,28 @@ export function withoutWorkspaceChatUrl(settings, workspaceId) {
   const next = { ...settings };
   if (Object.keys(nextUrls).length === 0) delete next.chatUrlsByWorkspace;
   else next.chatUrlsByWorkspace = nextUrls;
-  return previousEffectiveUrl === effectiveChatUrl(next, workspaceId) ? next : withoutWorkspaceChromeTab(next, workspaceId);
+  return previousEffectiveUrl === effectiveChatUrl(next, workspaceId) ? next : withoutWorkspaceChatConversation(next, workspaceId);
 }
 
 export function withoutWorkspaceChatSettings(settings, workspaceId) {
-  return withoutWorkspaceChromeTab(withoutWorkspaceChatUrl(settings, workspaceId), workspaceId);
+  return withoutWorkspaceChatConversation(withoutWorkspaceChatUrl(settings, workspaceId), workspaceId);
 }
 
 export function withChatUrl(settings, chatUrl) {
   const next = { ...settings, chatUrl };
   if (settings?.chatUrl === chatUrl) return next;
   const tabs = settings?.chromeTabsByWorkspace;
-  if (!tabs || typeof tabs !== "object" || Array.isArray(tabs)) return next;
-  const overrideTabs = Object.fromEntries(Object.entries(tabs).filter(([workspaceId]) => workspaceChatUrl(settings, workspaceId)));
-  if (Object.keys(overrideTabs).length === 0) delete next.chromeTabsByWorkspace;
-  else next.chromeTabsByWorkspace = overrideTabs;
+  if (tabs && typeof tabs === "object" && !Array.isArray(tabs)) {
+    const overrideTabs = Object.fromEntries(Object.entries(tabs).filter(([workspaceId]) => workspaceChatUrl(settings, workspaceId)));
+    if (Object.keys(overrideTabs).length === 0) delete next.chromeTabsByWorkspace;
+    else next.chromeTabsByWorkspace = overrideTabs;
+  }
+  const conversations = settings?.conversationUrlsByWorkspace;
+  if (conversations && typeof conversations === "object" && !Array.isArray(conversations)) {
+    const overrideConversations = Object.fromEntries(Object.entries(conversations).filter(([workspaceId]) => workspaceChatUrl(settings, workspaceId)));
+    if (Object.keys(overrideConversations).length === 0) delete next.conversationUrlsByWorkspace;
+    else next.conversationUrlsByWorkspace = overrideConversations;
+  }
   return next;
 }
 
@@ -297,17 +342,21 @@ function nudgeChatGpt(settings, taskId, workspaceId) {
     return;
   }
   const url = buildChatOpenUrl(chatUrl, taskId);
+  const conversationUrl = workspaceConversationUrl(settings, workspaceId, chatUrl);
 
   const chromeResult = isChromeAutomationAvailable()
     ? openInChromeAndSubmit(url, chatUrl, {
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
+        conversationUrl,
       })
     : false;
   if (chromeResult) {
     updateWorkerConfigAtomic((current) => {
       if (!current || effectiveChatUrl(current, workspaceId) !== chatUrl) return current;
-      return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
+      let next = withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
+      if (chromeResult.conversationUrl) next = withWorkspaceConversationUrl(next, workspaceId, chromeResult.conversationUrl, { clearTab: false });
+      return next;
     });
     // A reused tab never changes window focus; a first-run/replacement tab
     // opens a new Chrome window, which comes to the front like any new
@@ -561,6 +610,7 @@ function printBrowserConfig(config) {
     console.log(`    workspace_id : ${workspace.workspaceId}`);
     console.log(`    override     : ${formatConfigUrl(workspace.chatUrlOverride)}`);
     console.log(`    effective    : ${formatConfigUrl(workspace.effectiveChatUrl)}`);
+    console.log(`    conversation : ${formatConfigUrl(workspace.conversationUrl)}`);
   }
 }
 
@@ -822,6 +872,47 @@ async function cmdChatUrl(args) {
   const saved = updateWorkerConfigAtomic((config) => ({ ...withChatUrl(config || worker, url), ...next }));
   console.log(`Saved the shared default. Workspaces without an override will use this ChatGPT Project automatically.`);
   if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
+}
+
+function cmdChat(args) {
+  const root = workspaceRoot(args);
+  const cfg = requireWorkspaceConfig(root);
+  const worker = readWorkerConfig();
+  const action = args._[0];
+  if (!worker) {
+    console.error("Not initialized. Run: gpt-worker init -w <workspace>");
+    process.exit(1);
+  }
+  if (!action || !["new", "attach", "status"].includes(action)) {
+    console.error("Usage: gpt-worker chat <new|attach|status> [conversation-url] -w <workspace>");
+    process.exit(1);
+  }
+  const projectUrl = effectiveChatUrl(worker, cfg.workspaceId);
+  if (!projectUrl) {
+    console.error("No ChatGPT Project URL is configured. Set one with: gpt-worker chat-url <project-url>");
+    process.exit(1);
+  }
+  if (action === "status") {
+    console.log(`project      : ${projectUrl}`);
+    console.log(`conversation : ${workspaceConversationUrl(worker, cfg.workspaceId, projectUrl) || "(none; the next handoff starts a new chat)"}`);
+    return;
+  }
+  if (action === "new") {
+    if (args._[1]) {
+      console.error("Usage: gpt-worker chat new -w <workspace>");
+      process.exit(1);
+    }
+    updateWorkerConfigAtomic((current) => withoutWorkspaceChatConversation(current || worker, cfg.workspaceId));
+    console.log("Started a fresh ChatGPT conversation for this workspace. The next task or report will not reuse the previous conversation.");
+    return;
+  }
+  const conversationUrl = chatGptConversationUrl(args._[1], projectUrl);
+  if (!conversationUrl) {
+    console.error("Expected a same-Project ChatGPT conversation URL (https://chatgpt.com/g/.../c/...).");
+    process.exit(1);
+  }
+  updateWorkerConfigAtomic((current) => withWorkspaceConversationUrl(current || worker, cfg.workspaceId, conversationUrl));
+  console.log("Attached this workspace to the ChatGPT conversation. Its tab will be rediscovered by URL when possible.");
 }
 
 /** Standing planning/review guidance is owner-authenticated and stored with
@@ -1180,6 +1271,8 @@ async function main() {
       return cmdRemove(args);
     case "chat-url":
       return cmdChatUrl(args);
+    case "chat":
+      return cmdChat(args);
     case "show-config":
       return cmdShowConfig(args);
     case "guidance":
@@ -1209,7 +1302,7 @@ async function main() {
     case "rotate":
       return cmdRotate(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
+      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
       process.exit(cmd ? 1 : 0);
   }
 }

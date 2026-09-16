@@ -163,13 +163,29 @@ Submit the result via gpt-worker using the received task_id and iteration, plus 
    ```bash
    gpt-worker chat-url "https://chatgpt.com/g/g-p-.../project"
    ```
-   When configured, Chrome will automatically prepare and submit the prompt (press Enter) when tasks are queued.
+   When configured, Chrome will prepare and, when Apple Events is enabled, submit task prompts automatically.
 
 2. **Allow Chrome Background Submission (One-Time Setup)**:
    To enable background prompt typing and submission without stealing window focus, enable Apple Events scripting in Chrome:
    - In Chrome's menu bar, click **View** → **Developer** → check **Allow JavaScript from Apple Events**.
    - **Relaunch Chrome completely** (`Cmd + Q` to quit, then reopen).
    > **Note**: If this setting is not enabled, the prompt will be placed into the composer, but you will need to press Enter manually.
+
+### Start a New Chat or Recover a Conversation
+
+Each workspace can retain a ChatGPT conversation URL as its durable handoff target; a Chrome tab ID is only a short-lived optimization. Use these commands when a conversation becomes too long or browser automation opened the wrong profile:
+
+```bash
+# Make the next task/report start a fresh ChatGPT conversation in the same Project.
+# This does not cancel Worker tasks or change the configured Project URL.
+gpt-worker chat new -w .
+
+# Attach the workspace to a conversation you opened manually in the configured Project.
+gpt-worker chat attach "https://chatgpt.com/g/g-p-.../c/..." -w .
+
+# Show the configured Project and attached conversation.
+gpt-worker chat status -w .
+```
 
 ---
 
@@ -368,6 +384,7 @@ To allow background script execution in an existing tab:
 | `gpt-worker report -w <dir>` | Submit execution metrics and test results to ChatGPT |
 | `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
 | `gpt-worker chat-url "<url>" -w <dir>` | Save or inspect ChatGPT Project URL |
+| `gpt-worker chat <new\|attach\|status> ... -w <dir>` | Start a fresh chat, attach a manually opened conversation, or inspect chat recovery state |
 | `gpt-worker show-config [-w <dir>]` | Display browser settings without credentials |
 | `gpt-worker allow-read <file> -w <dir>` | Allow reading a specific Git-ignored file |
 | `gpt-worker allow-list -w <dir>` | List allowed Git-ignored files |

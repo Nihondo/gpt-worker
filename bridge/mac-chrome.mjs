@@ -109,6 +109,21 @@ export function matchesChatGptProjectScope(candidateUrl, scope) {
   }
 }
 
+/** Return a query/hash-free same-Project conversation URL, or null. This is
+ * a durable browser preference; unlike a Chrome tab ID it can be used to
+ * rediscover a conversation after the local browser process changes. */
+export function chatGptConversationUrl(candidateUrl, chatUrl) {
+  const scope = chatGptProjectScope(chatUrl);
+  if (!scope || !matchesChatGptProjectScope(candidateUrl, scope)) return null;
+  try {
+    const parsed = new URL(candidateUrl);
+    if (!/^\/g\/[^/]+\/c\/[^/]+$/.test(parsed.pathname)) return null;
+    return parsed.origin + parsed.pathname;
+  } catch {
+    return null;
+  }
+}
+
 /** Chrome tab IDs are numeric. Treat any persisted malformed value as absent
  *  rather than interpolating it into AppleScript. */
 export function normalizeChromeTabId(tabId) {
@@ -172,12 +187,14 @@ export function buildChatGptComposerScript(prompt) {
 
 /** Build the AppleScript separately so its generated syntax can be compiled
  *  in a macOS test without opening or changing a Chrome window. */
-export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId } = {}) {
+export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId, conversationUrl } = {}) {
   const savedTabId = normalizeChromeTabId(tabId) || "";
+  const savedConversationUrl = chatGptConversationUrl(conversationUrl, scope.projectURL) || "";
   const safeUrl = escapeForAppleScript(url);
   const safeProjectURL = escapeForAppleScript(scope.projectURL);
   const safeConversationPrefix = escapeForAppleScript(scope.conversationPrefix);
   const safeSavedTabId = escapeForAppleScript(savedTabId);
+  const safeSavedConversationUrl = escapeForAppleScript(savedConversationUrl);
   // Slug-independent fast path (see stableGizmoId) — empty when the saved
   // URL doesn't have the standard "g-p-<hash>[-slug]" shape, in which case
   // the exact-segment check below is the only match path, same as before.
@@ -242,6 +259,7 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId } 
     set projectURL to "${safeProjectURL}"
     set conversationPrefix to "${safeConversationPrefix}"
     set savedTabID to "${safeSavedTabId}"
+    set savedConversationURL to "${safeSavedConversationUrl}"
     set stableGizmoPrefix to "${safeStableGizmoPrefix}"
     tell application "Google Chrome"
       set selectedTab to missing value
@@ -284,6 +302,28 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId } 
         if selectedTab is not missing value then exit repeat
       end repeat
       end if
+      if selectedTab is missing value and savedConversationURL is not "" then
+        repeat with w in windows
+          set tabIndex to 1
+          repeat with t in tabs of w
+            set candidateURL to URL of t
+            set candidateComparableURL to candidateURL
+            set queryPosition to offset of "?" in candidateComparableURL
+            if queryPosition > 0 then set candidateComparableURL to text 1 thru (queryPosition - 1) of candidateComparableURL
+            set hashPosition to offset of "#" in candidateComparableURL
+            if hashPosition > 0 then set candidateComparableURL to text 1 thru (hashPosition - 1) of candidateComparableURL
+            if candidateComparableURL is savedConversationURL then
+              set selectedTab to t
+              set selectedWindow to w
+              set selectedTabIndex to tabIndex
+              set selectedTabIsConversation to true
+              exit repeat
+            end if
+            set tabIndex to tabIndex + 1
+          end repeat
+          if selectedTab is not missing value then exit repeat
+        end repeat
+      end if
       if selectedTab is missing value then
         set didReuseTab to false
         set selectedWindow to make new window
@@ -310,13 +350,14 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId } 
       if prepareOutcome is "READY" or prepareOutcome is "URL" then
         ${submitStep}
       end if
+      set selectedTabURL to URL of selectedTab
     end tell
     if didReuseTab then
       set reuseFlag to "REUSED"
     else
       set reuseFlag to "NEW"
     end if
-    return selectedTabID & "|" & submitOutcome & "|" & reuseFlag & "|" & prepareOutcome
+    return selectedTabID & "|" & submitOutcome & "|" & reuseFlag & "|" & prepareOutcome & "|" & selectedTabURL
   `;
 }
 
@@ -349,7 +390,7 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
 
   try {
     const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" }).trim();
-    const [tabIdPart, submitOutcome, reuseFlag, prepareOutcome] = output.split("|");
+    const [tabIdPart, submitOutcome, reuseFlag, prepareOutcome, selectedTabUrl] = output.split("|");
     const selectedTabId = normalizeChromeTabId(tabIdPart);
     return selectedTabId
       ? {
@@ -358,6 +399,7 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
           reused: reuseFlag === "REUSED",
           prepared: ["READY", "URL"].includes(prepareOutcome),
           preparationOutcome: prepareOutcome || "UNKNOWN",
+          conversationUrl: chatGptConversationUrl(selectedTabUrl, chatUrl),
         }
       : false;
   } catch {

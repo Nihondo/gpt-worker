@@ -13,7 +13,7 @@ after(() => fs.rmSync(configDir, { recursive: true, force: true }));
 test("serialized config updates preserve URL and tab mappings added from stale snapshots", () => {
   const workspaceA = "a1b2c3d4e5f60708";
   const workspaceB = "b1b2c3d4e5f60708";
-  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-example/project", chromeTabsByWorkspace: {}, chatUrlsByWorkspace: {} });
+  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-example/project", chromeTabsByWorkspace: {}, chatUrlsByWorkspace: {}, conversationUrlsByWorkspace: {} });
 
   // Two CLIs may both have seen this old state before either writes.
   const staleA = readWorkerConfig();
@@ -24,17 +24,23 @@ test("serialized config updates preserve URL and tab mappings added from stale s
     ...current,
     chromeTabsByWorkspace: { ...current.chromeTabsByWorkspace, [workspaceA]: "101" },
     chatUrlsByWorkspace: { ...current.chatUrlsByWorkspace, [workspaceA]: "https://chatgpt.com/g/g-p-a/project" },
+    conversationUrlsByWorkspace: { ...current.conversationUrlsByWorkspace, [workspaceA]: "https://chatgpt.com/g/g-p-a/c/a" },
   }));
   updateWorkerConfigAtomic((current) => ({
     ...current,
     chromeTabsByWorkspace: { ...current.chromeTabsByWorkspace, [workspaceB]: "202" },
     chatUrlsByWorkspace: { ...current.chatUrlsByWorkspace, [workspaceB]: "https://chatgpt.com/g/g-p-b/project" },
+    conversationUrlsByWorkspace: { ...current.conversationUrlsByWorkspace, [workspaceB]: "https://chatgpt.com/g/g-p-b/c/b" },
   }));
 
   assert.deepEqual(readWorkerConfig().chromeTabsByWorkspace, { [workspaceA]: "101", [workspaceB]: "202" });
   assert.deepEqual(readWorkerConfig().chatUrlsByWorkspace, {
     [workspaceA]: "https://chatgpt.com/g/g-p-a/project",
     [workspaceB]: "https://chatgpt.com/g/g-p-b/project",
+  });
+  assert.deepEqual(readWorkerConfig().conversationUrlsByWorkspace, {
+    [workspaceA]: "https://chatgpt.com/g/g-p-a/c/a",
+    [workspaceB]: "https://chatgpt.com/g/g-p-b/c/b",
   });
 });
 
