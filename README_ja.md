@@ -103,7 +103,7 @@ gpt-worker init -w /path/to/your-project
    - ChatGPT の左サイドバーから **New Project** を作成します（例：`Coding Assistant`）。
    - プロジェクト設定で **Project-only memory** を有効にすることをお勧めします。
 4. **指示文（Project Instructions）を設定する**：
-   - 作成したプロジェクトの **Instructions** 欄に、以下の 1 行の英語テキストをそのまま貼り付けて保存します。すでに gpt-worker を使用している場合は、以前の指示文ブロックをこの 1 行に置き換えてください。
+   - 作成したプロジェクトの **Instructions** 欄に、以下の 1 行の英語テキストをそのまま貼り付けて保存します。
      ```text
      Use the gpt-worker connector. It supplies its own operating instructions — follow them for every round.
      ```

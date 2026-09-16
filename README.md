@@ -103,7 +103,7 @@ gpt-worker init -w /path/to/your-project
    - In ChatGPT's left sidebar, create a **New Project** (e.g., `Coding Assistant`).
    - We recommend enabling **Project-only memory** in the project settings.
 4. **Set Project Instructions**:
-   - Paste this single line into the project's **Instructions** field, replacing any previous gpt-worker instruction block:
+   - Paste this single line into the project's **Instructions** field.
      ```text
      Use the gpt-worker connector. It supplies its own operating instructions — follow them for every round.
      ```
