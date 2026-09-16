@@ -105,12 +105,14 @@ gpt-worker init -w /path/to/your-project
    - In ChatGPT's left sidebar, create a **New Project** (e.g., `Coding Assistant`).
    - We recommend enabling **Project-only memory** in the project settings.
 4. **Set Project Instructions**:
-   - Paste this single line into the project's **Instructions** field.
+   - Paste these two lines into the project's **Instructions** field.
      ```text
      Use the gpt-worker connector. It supplies its own operating instructions — follow them for every round.
+     Always display in the chat, verbatim, the full task content you receive from the connector and the exact task_id/iteration/state/body you are about to submit, before submitting it.
      ```
    - The full operating protocol is delivered by the connector itself: in its `initialize` response, through the `operating_instructions` tool, and again with each task it hands you via `next_task`. There is nothing else to paste, and nothing to re-paste when gpt-worker is updated.
-   - Leaving the field empty also works — the line above only helps ChatGPT on the very first turn of a brand-new conversation.
+   - The second line duplicates one clause already present in the connector-delivered protocol. Project Instructions carry stronger, always-in-context weight than a tool-delivered instruction, and this transparency requirement is worth that duplication so you can audit what ChatGPT received and is about to send without relying solely on the connector text being followed. Keep it to this single stable line rather than pasting the full protocol back in — the rest of the protocol should stay owned by the connector so it never goes stale.
+   - Leaving the field empty also works — the lines above only help ChatGPT on the very first turn of a brand-new conversation.
    - The protocol text itself lives in [worker/src/instructions.md](worker/src/instructions.md) if you want to read it.
 
 ### Step 5: Register the Project URL & Enable Chrome Auto-Submit
