@@ -412,3 +412,9 @@ npm run deploy   # Cloudflare Worker のデプロイ
 ## 謝辞
 
 本プロジェクトは、ChatGPT Web版をコーディングの思考エンジンとして活用する手法を開拓した **[XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt)** に強い着想を得て作成されました。先駆的なアイデアと実装に感謝いたします。
+
+---
+
+## ライセンス
+
+[MIT](LICENSE) © 2026 Nihondo

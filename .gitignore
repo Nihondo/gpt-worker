@@ -1,4 +1,19 @@
+# OS
 .DS_Store
+
+# Hidden directories (except .github)
 .*/
+!.github/
+!.github/**
+
+# Local environments & dependencies
+node_modules/
+**/.wrangler/
+.env
+.env.*
+*.local
+*.log
+
+# Project-specific private docs & handoff logs
 docs/
 handoff.md

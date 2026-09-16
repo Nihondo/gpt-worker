@@ -3,6 +3,12 @@
   "private": true,
   "type": "module",
   "description": "ChatGPT (planning/review) + a local agent (execution), relayed through a fixed Cloudflare Workers URL. No runtime dependencies.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nihondo/gpt-worker.git"
+  },
+  "author": "Nihondo",
   "scripts": {
     "check": "node scripts/check.mjs",
     "test": "node --test tests/",

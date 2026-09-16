@@ -117,16 +117,16 @@ describe("applyFindings: masking algorithm", () => {
 });
 
 describe("redactLocalPaths: known real values, not a guessed pattern", () => {
-  const ctx = { root: "/Users/nihondo/Projects/gpt-worker", home: "/Users/nihondo", tmpdir: "/private/tmp", username: "nihondo" };
+  const ctx = { root: "/Users/alice/Projects/gpt-worker", home: "/Users/alice", tmpdir: "/private/tmp", username: "alice" };
 
   test("replaces the workspace root before the enclosing home directory swallows it", () => {
-    const out = redactLocalPaths("Error at /Users/nihondo/Projects/gpt-worker/secret.txt", ctx);
+    const out = redactLocalPaths("Error at /Users/alice/Projects/gpt-worker/secret.txt", ctx);
     assert.equal(out, "Error at [workspace]/secret.txt");
-    assert.ok(!out.includes("nihondo"));
+    assert.ok(!out.includes("alice"));
   });
 
   test("replaces the home directory when the path is outside the workspace", () => {
-    const out = redactLocalPaths("Home: /Users/nihondo/.ssh/config", ctx);
+    const out = redactLocalPaths("Home: /Users/alice/.ssh/config", ctx);
     assert.equal(out, "Home: [home]/.ssh/config");
   });
 
@@ -136,11 +136,11 @@ describe("redactLocalPaths: known real values, not a guessed pattern", () => {
   });
 
   test("replaces a bare username only as a whole path segment", () => {
-    const out = redactLocalPaths("owner: /Users/nihondo, unrelated: nihondo-utils", ctx);
+    const out = redactLocalPaths("owner: /Users/alice, unrelated: alice-utils", ctx);
     // The path form is already caught by the home-dir replacement above; the
-    // point of this test is that "nihondo-utils" (not a path segment) is
+    // point of this test is that "alice-utils" (not a path segment) is
     // left untouched by the narrower username-segment rule.
-    assert.ok(out.includes("nihondo-utils"));
+    assert.ok(out.includes("alice-utils"));
   });
 
   test("does not touch text containing none of the configured real values", () => {

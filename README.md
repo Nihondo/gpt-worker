@@ -412,3 +412,9 @@ npm run deploy   # Deploy Cloudflare Worker updates
 ## Acknowledgments
 
 This project was heavily inspired by **[XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt)**, which pioneered the approach of using ChatGPT's web subscription as the reasoning brain for coding agents. Special thanks to XiaoDuoYa for this innovative concept and open-source contribution.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Nihondo

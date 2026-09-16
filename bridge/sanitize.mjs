@@ -96,8 +96,8 @@ function countMaskedChars(text) {
 /** Replaces this machine's real local paths with stable placeholders.
  *  Deliberately uses known real values (this.root, os.homedir(), etc.)
  *  rather than guessing a pattern like `/Users/[^/]+` — that guess both
- *  misses paths under less common home locations (this repo itself lives
- *  under `~/Library/CloudStorage/Dropbox/...`) and can't distinguish the
+ *  misses paths under less common home locations (e.g. cloud-synced folders
+ *  or custom mounts) and can't distinguish the
  *  workspace root from the wider home directory. Longest-value-first so a
  *  root nested under home is replaced with `[workspace]` before the
  *  enclosing `[home]` swallows it. */

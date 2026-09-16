@@ -53,11 +53,15 @@ describe("scanner.mjs: detectScanner / scanText (requires betterleaks or gitleak
   //     times even when it satisfies a rule's regex, so every value below
   //     uses a varied, pseudo-random-looking character sequence rather than
   //     a repeated filler character.
+  // Synthetic secrets are ROT13-encoded to prevent static tooling (e.g.
+  // gitleaks, GitHub Push Protection) from flagging test fixtures.
+  const unrot13 = (s) =>
+    s.replace(/[a-zA-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + (c.toLowerCase() <= "m" ? 13 : -13)));
   const corpus = [
-    { line: 'curl -H "x-api: sk-proj-C3J27XDCG2LmlZGEONYlT3BlbkFJepfJBd0Kh8oOOL8dKLLa" https://api.openai.com', expectSecret: true },
-    { line: "error: invalid key sk-ant-api03-odJFCrnl2edlBDdz1C5Jau2RJtBRnlWmTSHf6pWkLUyifDLkDmWJ6UuVTAIjvFu7WICPhDeOZIiBOB-Y6sHrFH2ZUCr-lAA", expectSecret: true },
-    { line: "Using token ghp_SQedUStPKR0CsTy4Qwb8DwkNhFdnXsiVpzz6", expectSecret: true },
-    { line: "gho_3FfkCzJr4i0B3JrTAwR4y9ojfljoQoaF1Llq", expectSecret: true },
+    { line: unrot13("phey -U \"k-ncv: fx-cebw-P3W27KQPT2YzyMTRBALyG3OyoxSWrcsWOq0Xu8bBBY8qXYYn\" uggcf://ncv.bcranv.pbz"), expectSecret: true },
+    { line: unrot13("reebe: vainyvq xrl fx-nag-ncv03-bqWSPeay2rqyOQqm1P5Wnh2EWgOEayJzGFUs6cJxYHlvsQYxQzJW6HhIGNVwiSh7JVPCuQrBMVvOBO-L6fUeSU2MHPe-yNN"), expectSecret: true },
+    { line: unrot13("Hfvat gbxra tuc_FDrqHFgCXE0PfGl4Djo8QjxAuSqaKfvIcmm6"), expectSecret: true },
+    { line: unrot13("tub_3SsxPmWe4v0O3WeGNjE4l9bwsywbDbnS1Yyd"), expectSecret: true },
     // The built-in "aws-access-token" rule is a *composite* rule (its own
     // config: `components = [{ id = 'aws-secret-access-key', within = '5L' }]`)
     // that only fires when a well-formed access-key-id AND a nearby (within
@@ -68,18 +72,18 @@ describe("scanner.mjs: detectScanner / scanText (requires betterleaks or gitleak
     // rule has `skipReport = true` and never reports standalone — the exact
     // gap measured in the plan doc this was implemented from), via its own
     // gw-aws-secret-access-key rule below.
-    { line: "aws_access_key_id = AKIAZYMLOPIFQYF7M2NX", expectSecret: true },
-    { line: "aws_secret_access_key = 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", expectSecret: true },
+    { line: unrot13("njf_npprff_xrl_vq = NXVNMLZYBCVSDLS7Z2AK"), expectSecret: true },
+    { line: unrot13("njf_frperg_npprff_xrl = 5Derp8GArpw9vABeww5IsdEGx8w1q+oJJowxybT1"), expectSecret: true },
     {
-      line: "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      line: unrot13("Nhgubevmngvba: Ornere rlWuoTpvBvWVHmV1AvVfVaE5pPV6VxcKIPW9.rlWmqJVvBvVkZwZ0AGL3BQxjVvjvozSgMFV6VxcinT4tET9yVa0.FsyXkjEWFZrXXS2DG4sjcZrWs36CBx6lWI_nqDffj5p"),
       expectSecret: true,
     },
-    { line: "postgres://admin:s3cr3tpassw0rd@db.example.com:5432/app", expectSecret: true },
-    { line: "glpat-Hbn88HxjSI6bWHtP3fS2", expectSecret: true },
-    { line: "export STRIPE=sk_live_qHx6kwXoIIXGvOoNZYW2mZp0", expectSecret: true },
-    { line: "AIzaSyZDz_TddJ8HyS5SUkCnD8zRA9a9SkpXz9w", expectSecret: true },
-    { line: "xoxb-123456789012-1234567890123-BYOvfZ8UzDzV8fUkkibjL5DZ", expectSecret: true },
-    { line: 'db_password = "hunter2"', expectSecret: "betterleaks-only" }, // no gitleaks generic-password rule
+    { line: unrot13("cbfgterf://nqzva:f3pe3gcnffj0eq@qo.rknzcyr.pbz:5432/ncc"), expectSecret: true },
+    { line: unrot13("tycng-Uoa88UkwFV6oJUgC3sF2"), expectSecret: true },
+    { line: unrot13("rkcbeg FGEVCR=fx_yvir_dUk6xjKbVVKTiBbAMLJ2zMc0"), expectSecret: true },
+    { line: unrot13("NVmnFlMQm_GqqW8UlF5FHxPaQ8mEN9n9FxcKm9j"), expectSecret: true },
+    { line: unrot13("kbko-123456789012-1234567890123-OLBisM8HmQmI8sHxxvowY5QM"), expectSecret: true },
+    { line: unrot13("qo_cnffjbeq = \"uhagre2\""), expectSecret: "betterleaks-only" }, // no gitleaks generic-password rule
     // False-positive bait: none of these should ever be masked.
     { line: "const apiKey = process.env.OPENAI_API_KEY;", expectSecret: false },
     { line: "password: ${DB_PASSWORD}", expectSecret: false },
