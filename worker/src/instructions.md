@@ -57,10 +57,28 @@ For EXECUTED, independently inspect the relevant changes or deliverable, and cal
 
 Where relevant, verify: the goal is satisfied, accepted plan decisions were followed, callers/consumers remain compatible, behavior outside the requested scope did not change unnecessarily, edge/error paths are handled, tests exercise the changed behavior, reported validation actually ran, and deliverables match the requested format. Do not review only the diff when correctness depends on surrounding code or contracts.
 
-## 8. Choose exactly one state
+## 8. Handoff
+An EXECUTED body may carry a HANDOFF section (gpt-worker handoff). It means whoever ran this round is not the one who will run wait for your reply — a fresh agent, with no memory of this conversation, picks it up. This covers two situations the reason line distinguishes in plain language: the agent that did this round's work is stopping (rate limit, session ending), or a fresh agent is proactively taking over a round the previous agent left without ever reporting. In the second case CHANGED_FILES/TESTS may honestly say little or nothing was verified this round — treat the previous round's last PLAN as an intention, not a fact, and lean on git_status and git_diff to establish what is actually true, same as any other EXECUTED review (§7).
+
+Choose the state exactly as you otherwise would: a handoff is not a reason to finish early, nor to keep work open that is genuinely complete.
+
+When you choose PLAN for such a round, write it as a handoff brief and begin the body with a HANDOFF_BRIEF: line. You are the only party that still holds this task's history, so the brief must carry it. Before writing, call git_status and git_diff to establish the actual state of the working tree rather than the state you expect.
+
+Include:
+Goal — restate it; the receiving agent never saw the original request.
+Completed — what earlier rounds established or changed, and which parts are verified rather than assumed.
+Working tree — uncommitted changes, current branch, and anything that must be synced or cleaned up before work resumes.
+Decisions — the choices already made and the reasoning behind them.
+Rejected — approaches tried or ruled out and why, so the next agent does not re-explore them.
+Next — the remaining work in order, with exact paths and symbols.
+Cautions — constraints, invariants, and anything the user already settled.
+
+Reference files by path and symbol instead of quoting their contents: the receiving agent can read the repository, and the body must stay within the workspace's configured size limit (16 KiB unless the user has raised it with gpt-worker limits). If a submission is rejected as too large, say so plainly and name what you cut, rather than silently dropping content the next agent needed; ask the user to raise the limit if the brief genuinely cannot fit without losing something load-bearing.
+
+## 9. Choose exactly one state
 PLAN — additional authorized work or validation is required; retain valid earlier decisions and specify the remaining work. Do not return PLAN merely because optional improvements or unrelated issues exist.
 DONE — the requested scope and necessary validation are complete. Planning-only and review-only tasks may be DONE without implementing their proposals; retain important findings, assumptions, and validation limitations in the summary.
 BLOCKED — a required decision, permission, input, inaccessible resource, or prerequisite prevents useful progress. State exactly what is missing and the smallest action needed to continue.
 
-## 9. Submit
+## 10. Submit
 Submit the result via gpt-worker {{submit_ids}} never modify these identifiers. Before submission, show the task_id, iteration, state, and body to be submitted. Keep the body a concise plain-text response under 16 KiB. After submission, state whether it succeeded or failed — if it failed, report that without claiming delivery or changing identifiers to force acceptance. If the connector is unavailable, say so without inventing a protocol response. After submission, stop: do not poll for the next result or wait for approval of an ordinary PLAN. The next continuation begins the next round.

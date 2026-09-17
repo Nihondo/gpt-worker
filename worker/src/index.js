@@ -72,8 +72,30 @@ const ALLOWED_ORIGINS = new Set(["https://chatgpt.com", "https://chat.openai.com
 const RPC_TIMEOUT_MS = 20_000; // local WS round-trip budget
 const POLL_MAX_MS = 20_000; // CLI long-poll budget
 const LEASE_MS = 120_000; // next_task lease before it can be re-claimed
-const MAX_BODY_BYTES = 16 * 1024; // the `body` text field inside a message
+// `body`'s default cap. It exists so every message stays a summary — file
+// contents, diffs, and command output are never put in it (GPT re-reads the
+// workspace itself instead) — not because of any Cloudflare/SQLite ceiling;
+// a SQLite-backed DO row can hold up to 2 MiB. A workspace can raise its own
+// cap (`gpt-worker limits <bytes>`, stored in `settings.max_body_bytes`) up
+// to MAX_BODY_BYTES_CEILING for cases that outgrow it, like a HANDOFF_BRIEF —
+// see BridgeDO#maxBodyBytes(). Every ChatGPT round the shared connector's
+// conversation carries still grows by roughly this many tokens, so raising it
+// trades a longer per-round body for reaching that conversation's context
+// ceiling sooner; it is a deliberate per-workspace choice, not a free lunch.
+const MAX_BODY_BYTES = 16 * 1024;
+const MIN_BODY_BYTES = 4 * 1024; // floor for a configured override — small enough is useless, not unsafe
+const MAX_BODY_BYTES_CEILING = 256 * 1024; // well under SQLite's 2 MiB row ceiling, with margin to spare
+// Covers the JSON-RPC/CLI fields that wrap `body` (task_id, iteration, kind,
+// jsonrpc envelope, ...) — small and fixed regardless of the configured body
+// cap, so the request-size ceiling can simply track the body ceiling plus
+// this constant rather than needing its own separate override.
+const REQUEST_ENVELOPE_OVERHEAD_BYTES = 2 * 1024;
 const MAX_REQUEST_BYTES = 32 * 1024; // the whole JSON-RPC/CLI envelope around it
+// Used only where the target workspace isn't known yet (the shared
+// connector's hub-level envelope parse, before it has read which workspace
+// the call is for) — see handleOAuthMcpDispatch. The real, per-workspace
+// limit is enforced once the call reaches that workspace's own DO.
+const MAX_REQUEST_BYTES_CEILING = MAX_BODY_BYTES_CEILING + REQUEST_ENVELOPE_OVERHEAD_BYTES;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // Longer than RETENTION_MS on purpose: `tasks` rows back the queue_history
 // tool's cross-conversation memory for ChatGPT, which is only useful if it
@@ -1636,7 +1658,16 @@ export class BridgeDO {
       return new Response("unsupported MCP-Protocol-Version", { status: 400 });
     }
 
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    // The hub-level dispatch (useHubHandler) runs on the shared hub DO, which
+    // doesn't own any workspace's `max_body_bytes` setting and can't yet know
+    // which workspace this call names — that isn't resolved until
+    // handleHubToolCall parses `arguments.workspace_id` below. So this first
+    // gate is generously fixed at the global ceiling; the real, per-workspace
+    // limit is enforced once the call reaches that workspace's own DO (see
+    // handleHubRelay). The dedicated per-workspace dispatch runs on that
+    // workspace's own DO already, so it can size-check precisely up front.
+    const requestLimit = useHubHandler ? MAX_REQUEST_BYTES_CEILING : this.maxRequestBytes();
+    const parsed = await readJsonWithLimit(request, requestLimit);
     if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
     if (parsed.parseError) return rpcError(null, -32700, "Parse error");
     const payload = parsed.value;
@@ -1717,7 +1748,10 @@ export class BridgeDO {
    * shared connector. */
   async handleHubRelay(request) {
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    // Reached only after handleHubToolCall has already resolved which
+    // workspace this call is for and forwarded it to that workspace's own
+    // DO — `this` here is that DO, so its configured limit applies.
+    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
     if (parsed.tooLarge) return json(toolError("PAYLOAD_TOO_LARGE", "request exceeds size limit"), 413);
     const body = parsed.value || {};
     if (parsed.parseError || typeof body.name !== "string") return json(toolError("INVALID_ARGS", "tool name is required"), 400);
@@ -1849,8 +1883,9 @@ export class BridgeDO {
     ) {
       return toolError("INVALID_ARGS", "task_id, iteration, state and body are required");
     }
-    if (byteLength(body) > MAX_BODY_BYTES) {
-      return toolError("BODY_TOO_LARGE", `body exceeds ${MAX_BODY_BYTES} bytes`);
+    const bodyLimit = this.maxBodyBytes();
+    if (byteLength(body) > bodyLimit) {
+      return toolError("BODY_TOO_LARGE", `body exceeds ${bodyLimit} bytes (raise it with: gpt-worker limits <bytes>)`);
     }
 
     const matches = this.sql
@@ -1987,7 +2022,7 @@ export class BridgeDO {
     if (!this.rateLimit("local", 120)) {
       return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
     }
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
     if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
     if (parsed.parseError) return json({ error: "PARSE_ERROR" }, 400);
     const body = parsed.value;
@@ -2006,6 +2041,10 @@ export class BridgeDO {
         return json(this.localSettingsGet());
       case "settings_set":
         return json(this.localSettingsSet(body));
+      case "max_body_bytes_get":
+        return json(this.localMaxBodyBytesGet());
+      case "max_body_bytes_set":
+        return json(this.localMaxBodyBytesSet(body));
       case "guidance_set":
         return json(this.localGuidanceSet(body));
       case "guidance_get":
@@ -2145,6 +2184,41 @@ export class BridgeDO {
     this.sql.exec(`INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)`, key, value);
   }
 
+  /** This workspace's configured `body` size cap, or MAX_BODY_BYTES if unset
+   *  or the stored value is no longer a valid integer in range (covers a
+   *  never-configured workspace and a stale value from a lowered ceiling). */
+  maxBodyBytes() {
+    const rows = this.sql.exec(`SELECT v FROM settings WHERE k = 'max_body_bytes'`).toArray();
+    const raw = rows.length ? rows[0].v : "";
+    const n = raw ? Number(raw) : NaN;
+    return Number.isInteger(n) && n >= MIN_BODY_BYTES && n <= MAX_BODY_BYTES_CEILING ? n : MAX_BODY_BYTES;
+  }
+
+  /** The envelope around `maxBodyBytes()` — used wherever a request carrying
+   *  a message body is size-checked before that body is parsed out and
+   *  checked on its own. */
+  maxRequestBytes() {
+    return this.maxBodyBytes() + REQUEST_ENVELOPE_OVERHEAD_BYTES;
+  }
+
+  localMaxBodyBytesGet() {
+    return { maxBodyBytes: this.maxBodyBytes(), default: MAX_BODY_BYTES, floor: MIN_BODY_BYTES, ceiling: MAX_BODY_BYTES_CEILING };
+  }
+
+  localMaxBodyBytesSet(body) {
+    const { maxBodyBytes } = body || {};
+    if (maxBodyBytes === null || maxBodyBytes === undefined) {
+      this.setSetting("max_body_bytes", "");
+      return this.localMaxBodyBytesGet();
+    }
+    const n = Number(maxBodyBytes);
+    if (!Number.isInteger(n) || n < MIN_BODY_BYTES || n > MAX_BODY_BYTES_CEILING) {
+      return { error: "INVALID_ARGS", message: `maxBodyBytes must be an integer between ${MIN_BODY_BYTES} and ${MAX_BODY_BYTES_CEILING}` };
+    }
+    this.setSetting("max_body_bytes", String(n));
+    return this.localMaxBodyBytesGet();
+  }
+
   /** Debug/inspection: every not-yet-acked message in both directions, oldest
    *  first, with the body truncated for display. Not used by the normal
    *  task/wait/report loop — this is what `gpt-worker queue` calls. */
@@ -2193,7 +2267,7 @@ export class BridgeDO {
     if (kind === "EXECUTED" && iteration < 1) {
       return { error: "INVALID_ITERATION", message: "EXECUTED must be iteration >= 1" };
     }
-    if (byteLength(text) > MAX_BODY_BYTES) return { error: "BODY_TOO_LARGE" };
+    if (byteLength(text) > this.maxBodyBytes()) return { error: "BODY_TOO_LARGE" };
 
     // Kept for the narrow legacy/debug enqueue endpoint. The normal CLI path
     // uses localStartTask(), but direct INIT callers still receive a durable

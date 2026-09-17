@@ -168,6 +168,39 @@ This records evidence; it does not run the command. ChatGPT reads it through `ex
 
 If successive rounds repeat the same issue without progress, diagnose the cause and surface a concrete blocker. Do not add an arbitrary round-count approval gate while useful, authorized progress continues. If the user explicitly stops or changes the workflow, honor that and state which review remains incomplete.
 
+### Hand the task to another agent
+
+When you must stop mid-task — a rate limit is close, the session is ending — end the round with `handoff` instead of `report`:
+
+```bash
+gpt-worker handoff -w <workspace> --changed <n> --tests '<what you validated>' --reason 'rate limit'
+```
+
+Then **stop. Do not run `wait`.** ChatGPT queues a handoff brief carrying this task's history, and it waits in the queue for 7 days. A different agent — a different model, a different session, later — picks it up with an ordinary `gpt-worker wait -w <workspace>` and continues. Nothing from your local state is needed: the Worker owns the task state.
+
+Report honestly in `--tests` what is actually verified versus assumed; the brief is built on it, and the receiving agent cannot tell the difference on its own.
+
+If you *receive* a PLAN whose body begins with `HANDOFF_BRIEF:`, you are that receiving agent. Treat the brief as your only context: read it in full, then re-read the files it names instead of assuming the repository matches your expectations. Continue the normal loop from there.
+
+**If the previous agent never got to run `handoff`** — it was cut off mid-round rather than stopping cleanly — there is nothing queued to `wait` for yet. Run `handoff` yourself to claim the task instead; the command works either direction, since it just re-enqueues an EXECUTED like `report` does and ChatGPT/the Worker have no notion of which agent is calling it:
+
+```bash
+gpt-worker handoff -w <workspace> --reason 'previous agent stopped without reporting; taking over'
+```
+
+Skip `--changed`/`--tests` (or say plainly that nothing is verified) rather than guessing at work you did not do — ChatGPT re-checks `git_status`/`git_diff` before trusting any EXECUTED anyway. This only works while the task is still `EXECUTING` (report_task's normal precondition, which is exactly the state a round left mid-execution is in); if it fails with `INVALID_STATE`, a reply is already queued — run `wait` instead. Then run `wait` yourself to receive the brief.
+
+If a handoff brief cannot fit in the workspace's message-body limit (16 KiB by default), raise it:
+
+```bash
+gpt-worker limits <bytes>       # e.g. 65536; run without an argument to see the current value and allowed range
+gpt-worker limits --reset       # back to the default
+```
+
+Raise this deliberately, not reflexively: every round's body — from either side — lands in the same long-lived ChatGPT conversation this workspace reuses across tasks, so a larger cap means faster growth toward that conversation's context ceiling, not a free allowance.
+
+This is not the same as the `handoff` skill, which writes a Markdown file for human and session continuity. Use that when you want a durable record in the repository; use this when you want the planning brain to carry the context across a change of hands.
+
 ## Recovery and new instructions
 
 The Worker is the sole authority for task/protocol state. Local notes may preserve decisions and evidence pointers, but must not become a second task-state store.

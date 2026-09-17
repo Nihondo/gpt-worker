@@ -95,6 +95,64 @@ feedback field. If a PLAN could not be executed or the task is planning/review
 only, state what was actually done and what remains. The fixed RESULT heading
 does not mean that every proposed implementation step was performed.
 
+### HANDOFF (an optional EXECUTED section)
+
+`gpt-worker handoff` sends an ordinary EXECUTED round with one extra section:
+
+```
+HANDOFF:
+reason: <why, or "(not given)">
+```
+
+It signals that whoever ran this round is not the one who will run `wait` for
+the reply — a *different* agent, with no memory of the conversation, picks it
+up. `report_task` has no notion of who is calling it; only `task_id` /
+`iteration` / the task's protocol state matter (see CLAUDE.md). That is what
+lets the same command cover both directions of the same situation, which
+`reason` distinguishes in plain language rather than a separate field:
+
+- the agent that did this round's work is going away — rate limit, session
+  ending. CHANGED_FILES/TESTS above are a real report.
+- a fresh agent is proactively taking over a round the previous agent left
+  without ever reporting (a crash, a session cut off before it could run
+  `handoff` itself). CHANGED_FILES/TESTS above may honestly say little or
+  nothing is verified — `report_task`'s ordinary `EXECUTING`-only precondition
+  is exactly the state such a round is already in, and exactly what makes
+  `handoff` valid here and invalid otherwise (`INVALID_STATE` if a reply is
+  already queued — that's what `wait` is for, not another `handoff`).
+
+Like every other body, HANDOFF states only what happened; what GPT should do
+about it is part of the operating protocol delivered by the connector, never
+restated here. GPT chooses its state exactly as it otherwise would either way.
+When it chooses PLAN for such a round, it writes the body as a handoff brief
+beginning with a `HANDOFF_BRIEF:` line, carrying the task history that only
+GPT still holds — grounded in `git_status`/`git_diff`, same as any other
+EXECUTED review, more so when CHANGED_FILES said nothing was verified. The
+local CLI keys off the `HANDOFF_BRIEF:` marker to tell the receiving agent it
+is starting cold.
+
+This works without any per-agent state because the Durable Object is the sole
+owner of task state: the queued PLAN waits as `pending` for `RETENTION_MS`
+(7 days) and `wait` selects it by `task_id` alone, never by who asked.
+
+### Message size limit
+
+`body` defaults to `MAX_BODY_BYTES` (16 KiB), configurable per workspace via
+`gpt-worker limits` (stored as `settings.max_body_bytes`, floor 4 KiB, ceiling
+256 KiB). It applies identically in both directions — `queueSubmit` (GPT →
+local) and `localEnqueue` (local → GPT) both call the same
+`BridgeDO#maxBodyBytes()`. Raising it is a deliberate per-workspace trade, not
+a free allowance: whichever side wrote a larger body, it still lands in the
+same long-lived ChatGPT conversation this workspace reuses across tasks (its
+`conversationUrlsByWorkspace` durable handoff target — see CLAUDE.md), so a
+higher cap means reaching that conversation's context ceiling sooner. The
+request envelope around `body`
+scales with it (`maxRequestBytes() = maxBodyBytes() + 2 KiB`); the shared
+connector's hub-level dispatch can't yet know which workspace a call is for at
+its own envelope-size gate, so that one stays fixed at the global ceiling and
+the per-workspace limit is enforced once the call reaches that workspace's own
+Durable Object.
+
 ### DONE / BLOCKED (GPT → local)
 
 `submit_plan(state="DONE", body="<summary>")` ends the task; the Worker

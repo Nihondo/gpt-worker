@@ -942,6 +942,44 @@ async function cmdGuidance(args) {
   console.log("Saved. ChatGPT will see this via the workspace_guidance tool from now on.");
 }
 
+/** This workspace's `body` size cap — DO-owned (settings.max_body_bytes), not
+ * a local file, per CLAUDE.md's "DO is the single source of truth" invariant.
+ * Raising it mainly matters for a HANDOFF_BRIEF that outgrows the 16 KiB
+ * default; every round's body still lands in the shared ChatGPT conversation
+ * regardless of which side wrote it, so a larger cap is a deliberate
+ * trade — a bigger body every round it's used, in exchange for reaching that
+ * conversation's context ceiling sooner. */
+async function cmdLimits(args) {
+  const root = workspaceRoot(args);
+  const cfg = requireWorkspaceConfig(root);
+  await migrateLegacyStateIfNeeded(root, cfg);
+
+  if (args.reset) {
+    const result = await localCall(cfg, "max_body_bytes_set", { maxBodyBytes: null });
+    if (result.error) throw new Error(result.message || result.error);
+    console.log(`Reset. Message body limit is ${result.maxBodyBytes} bytes (default).`);
+    return;
+  }
+
+  const input = args._[0];
+  if (input === undefined) {
+    const result = await localCall(cfg, "max_body_bytes_get");
+    if (result.error) throw new Error(result.message || result.error);
+    console.log(`Message body limit: ${result.maxBodyBytes} bytes${result.maxBodyBytes === result.default ? " (default)" : ""}`);
+    console.log(`Allowed range: ${result.floor}–${result.ceiling} bytes`);
+    return;
+  }
+
+  const bytes = Number(input);
+  if (!Number.isInteger(bytes)) {
+    console.error("Usage: gpt-worker limits [<bytes>|--reset] [-w <dir>]");
+    process.exit(1);
+  }
+  const result = await localCall(cfg, "max_body_bytes_set", { maxBodyBytes: bytes });
+  if (result.error) throw new Error(result.message || result.error);
+  console.log(`Saved. Message body limit is now ${result.maxBodyBytes} bytes.`);
+}
+
 function allowedReadFile(root, input, { mustExist = true } = {}) {
   if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-file> [-w <dir>]");
   const tools = new WorkspaceTools(root);
@@ -1016,8 +1054,23 @@ function buildInitBody(goal) {
   return `GOAL:\n${goal}`;
 }
 
-function buildExecutedBody({ changed, tests }) {
-  return `RESULT:\nExecution finished.\n\nCHANGED_FILES:\n${changed}\n\nTESTS:\n${tests || "(not run)"}`;
+/** `handoff` marks the round as a hand-off request: whoever is running this
+ * round is not the one who will run `wait` for its reply. This covers both
+ * directions of the same situation — the agent that did this round's work is
+ * stopping (rate limit, session ending), or a fresh agent is proactively
+ * taking over a round the previous agent left without ever reporting — since
+ * `report_task` doesn't know or care which local agent is calling it (see
+ * CLAUDE.md); only `task_id`/`iteration`/state matter. The section carries
+ * only the signal and the operator's reason — what ChatGPT should do with it
+ * lives in worker/src/instructions.md, never restated here. When the caller
+ * is claiming an abandoned round rather than reporting real work, `reason`
+ * should say so plainly and `--changed`/`--tests` should stay honest (the
+ * "?"/"(not run)" defaults below already say "unspecified" on their own). */
+export function buildExecutedBody({ changed, tests, handoff }) {
+  const base = `RESULT:\nExecution finished.\n\nCHANGED_FILES:\n${changed}\n\nTESTS:\n${tests || "(not run)"}`;
+  if (!handoff) return base;
+  const reason = String(handoff.reason || "").trim();
+  return `${base}\n\nHANDOFF:\nreason: ${reason || "(not given)"}`;
 }
 
 async function cmdTask(args) {
@@ -1099,6 +1152,17 @@ function handleIncoming(message) {
   console.log(message.body);
   console.log("");
 
+  if (message.kind === "PLAN" && /^HANDOFF_BRIEF:/m.test(message.body || "")) {
+    console.log(
+      "--- This is a handoff brief ---\n" +
+        "A different agent worked on this task before you and has stopped.\n" +
+        "You are not expected to remember any of it: the brief above is your only\n" +
+        "context, and it is deliberately written for an agent starting cold.\n" +
+        "Read it in full before touching anything, and re-read the files it names\n" +
+        "rather than assuming the repository matches your expectations.\n"
+    );
+  }
+
   if (message.kind === "PLAN") {
     console.log(
       "--- Before executing this PLAN ---\n" +
@@ -1115,6 +1179,32 @@ function handleIncoming(message) {
 }
 
 async function cmdReport(args) {
+  return reportRound(args, null);
+}
+
+/** Hand this task to a different local agent — in either direction. Same
+ * round-trip as `report`, except the body carries a HANDOFF signal:
+ *  - the agent that did this round's work is stopping (rate limit, session
+ *    ending) and wants a fresh agent to pick up from a brief. Pass real
+ *    --changed/--tests as usual.
+ *  - a fresh agent is proactively taking over a round the previous agent
+ *    left without ever reporting (crash, cut off before it could run this
+ *    command itself). Only valid while the task is still EXECUTING — the
+ *    same precondition report_task already enforces for an ordinary report,
+ *    which is exactly the state a round left mid-execution is in. Omit
+ *    --changed/--tests (or say plainly that nothing here is verified) rather
+ *    than guessing at work this agent did not do; ChatGPT independently
+ *    re-checks git_status/git_diff before trusting any EXECUTED regardless
+ *    (see worker/src/instructions.md §7), so an honest "?" is not a problem.
+ * Either way the DO stays the single source of task state, so the next agent
+ * needs nothing from this one's local state — see CLAUDE.md. */
+async function cmdHandoff(args) {
+  // A bare "--reason" with no value parses to `true`; treat it as unset rather
+  // than sending the literal string "true" to ChatGPT as the reason.
+  return reportRound(args, { reason: typeof args.reason === "string" ? args.reason : "" });
+}
+
+async function reportRound(args, handoff) {
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
   await migrateLegacyStateIfNeeded(root, cfg);
@@ -1163,8 +1253,22 @@ async function cmdReport(args) {
     });
   }
 
-  const body = buildExecutedBody({ changed, tests });
+  const body = buildExecutedBody({ changed, tests, handoff });
   const result = await localCall(cfg, "report_task", { task_id: task.taskId, changed, tests, text: body });
+  if (result.error === "BODY_TOO_LARGE") {
+    console.error(
+      `Failed to enqueue report: body exceeds this workspace's configured limit.\n` +
+        "Raise it with: gpt-worker limits <bytes>"
+    );
+    process.exit(1);
+  }
+  if (result.error === "INVALID_STATE" && handoff) {
+    console.error(
+      `Nothing to hand off: this task is ${result.state}, not EXECUTING.\n` +
+        "If a reply is already queued, run 'gpt-worker wait' instead — a hand-off only applies to a round left mid-execution."
+    );
+    process.exit(1);
+  }
   if (result.error) {
     console.error(`Failed to enqueue report: ${result.error}`);
     process.exit(1);
@@ -1172,7 +1276,20 @@ async function cmdReport(args) {
 
   console.log(`Reported iteration ${newIteration}.`);
   nudgeChatGpt(await sharedChatSettings(cfg), task.taskId, cfg.workspaceId);
-  console.log("Then run: gpt-worker wait");
+  if (handoff) {
+    // This CLI has no way to know whether the caller is the one stopping or
+    // the one claiming an abandoned round — `report_task` doesn't ask, and
+    // neither does this command (see buildExecutedBody's doc comment). State
+    // both next steps rather than assuming.
+    console.log(
+      "\nHanded off. ChatGPT will queue a handoff brief carrying this task's history.\n" +
+        "If you are stopping: do NOT run 'gpt-worker wait' for this task — a different agent picks up the brief later.\n" +
+        `If you are the one continuing: run 'gpt-worker wait -w ${root}' now to receive it.\n` +
+        "The brief waits in the queue for 7 days either way."
+    );
+  } else {
+    console.log("Then run: gpt-worker wait");
+  }
 }
 
 function writeRecord(root, record) {
@@ -1301,12 +1418,16 @@ async function main() {
       return cmdWait(args);
     case "report":
       return cmdReport(args);
+    case "handoff":
+      return cmdHandoff(args);
+    case "limits":
+      return cmdLimits(args);
     case "state":
       return cmdState(args);
     case "rotate":
       return cmdRotate(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|state|rotate> [options]`);
+      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|handoff|limits|state|rotate> [options]`);
       process.exit(cmd ? 1 : 0);
   }
 }

@@ -142,6 +142,7 @@ gpt-worker chat attach "https://chatgpt.com/g/g-p-.../c/..." -w .
 # Show the configured Project and attached conversation.
 gpt-worker chat status -w .
 ```
+> 💬 **In chat:** "Start a fresh ChatGPT conversation for this project" — or "Attach this project to the ChatGPT conversation at &lt;url&gt;" — or "Which ChatGPT conversation is this project attached to?"
 
 ---
 
@@ -175,6 +176,7 @@ Before starting work, ensure the local bridge process is running for your worksp
 gpt-worker start -w .
 gpt-worker status -w .
 ```
+> 💬 *You normally don't need to say this — your agent checks and starts the bridge on its own the moment you ask it to do anything with gpt-worker.*
 
 ### 2. Queue a Task (`task`)
 Describe your goal in natural language:
@@ -182,6 +184,8 @@ Describe your goal in natural language:
 ```bash
 gpt-worker task "Fix the validation error styling on the login page" -w .
 ```
+> 💬 **In chat:** "Plan this with gpt-worker: fix the validation error styling on the login page"
+
 Chrome opens your ChatGPT Project, and the task prompt is automatically entered and submitted (requires the Chrome "Allow JavaScript from Apple Events" setting described above).
 
 ### 3. Wait for the Plan (`wait`)
@@ -190,6 +194,8 @@ ChatGPT inspects workspace files and prepares a plan:
 ```bash
 gpt-worker wait -w .
 ```
+> 💬 *This runs automatically right after the request above — nothing to say separately unless you're resuming a stalled session (see [Resuming After a Timeout](#resuming-after-a-timeout)).*
+
 When received, the plan is printed in the terminal. Review it to ensure it is sound and safe.
 
 ### 4. Execute Changes & Run Tests
@@ -201,6 +207,7 @@ Report modified file counts and test results back to ChatGPT:
 ```bash
 gpt-worker report --changed 2 --tests "All 8 tests passing" -w .
 ```
+> 💬 **In chat:** "Report the changes to ChatGPT for review"
 
 ### 6. Receive Review Results (`wait`)
 Run `wait` again to receive ChatGPT's evaluation:
@@ -208,6 +215,8 @@ Run `wait` again to receive ChatGPT's evaluation:
 ```bash
 gpt-worker wait -w .
 ```
+> 💬 *Automatic, same as step 3.*
+
 If ChatGPT determines the goal is achieved (`DONE`), you are finished! If there are follow-up instructions, repeat from step 4.
 
 ### 7. Stop the Bridge Process
@@ -227,6 +236,7 @@ No need to redeploy the Worker or reconfigure ChatGPT. Simply run `init` in the 
 ```bash
 gpt-worker init -w /path/to/another-project
 ```
+> 💬 **In chat:** "Set up gpt-worker for this project too"
 
 ### Setting Project-Specific Guidelines (`guidance`)
 Set standing rules for ChatGPT (e.g., "Always use Vitest", "Enforce strict TypeScript"):
@@ -241,6 +251,7 @@ gpt-worker guidance -w .
 # Clear guidance
 gpt-worker guidance --clear -w .
 ```
+> 💬 **In chat:** "Set standing guidance for gpt-worker on this project: always write tests in Vitest, prefer functional components" — or "Clear the gpt-worker guidance for this project."
 
 ### Allowing a Specific Git-Ignored File to Be Read
 Files listed in `.gitignore` are hidden from ChatGPT by default. You can explicitly allow direct reads for a specific file:
@@ -263,6 +274,7 @@ Inspect configured Project URLs and auto-submit preferences:
 ```bash
 gpt-worker show-config -w .
 ```
+> 💬 **In chat:** "Check the ChatGPT browser settings gpt-worker has configured for this project"
 
 ### Listing Registered Workspaces
 List all workspaces registered on this machine and their bridge statuses:
@@ -281,6 +293,44 @@ gpt-worker state -w .
 # Resume waiting
 gpt-worker wait -w .
 ```
+> 💬 **In chat:** "Check if ChatGPT has replied yet" — your agent runs `state` then `wait` as needed.
+
+### Handing a Task to Another Agent
+When the agent you are working with has to stop mid-task — a rate limit is close, or the session is ending — it can hand the task to a different agent instead of finishing the round normally:
+
+```bash
+gpt-worker handoff --changed 3 --tests "unit tests pass; integration not run" --reason "rate limit" -w .
+```
+> 💬 **In chat:** "Hand this off to ChatGPT — I'm running low on my rate limit"
+
+The agent then stops, without waiting. ChatGPT writes a handoff brief carrying the task's history — the goal, what is done, the decisions and the approaches already ruled out — and queues it. A different agent picks it up later with the ordinary wait command:
+
+```bash
+gpt-worker wait -w .
+```
+
+The brief stays in the queue for 7 days, so the second agent can start whenever you like — a different model, a different session, or the same machine tomorrow. Nothing is copied between the two agents: the Worker holds the task state, so the one that resumes needs nothing from the one that stopped.
+
+What carries over is the context ChatGPT itself accumulated while planning and reviewing. Because ChatGPT stays on the task while the local agents change, the review after the handoff still accounts for the work done before it.
+
+**If the previous agent never got to run `handoff`** — it was cut off mid-task rather than stopping cleanly, so nothing is queued yet — a new agent can run `handoff` itself to claim the task; the command works either direction, since a hand-off is just an EXECUTED round and neither ChatGPT nor the Worker know or care which agent is calling it:
+
+```bash
+gpt-worker handoff --reason "previous agent stopped without reporting; taking over" -w .
+```
+> 💬 **In chat:** "Take over this task from the previous agent — it stopped without reporting"
+
+Skip `--changed`/`--tests` (or say plainly that nothing is verified) rather than guessing at work you did not do — ChatGPT re-checks the repository itself (`git_status`/`git_diff`) before trusting any report anyway. This only works while the task is still mid-round; if it fails, a reply may already be queued — run `gpt-worker wait` instead. Otherwise, follow it with `gpt-worker wait` to receive the brief.
+
+If a handoff brief doesn't fit in the message size limit (16 KB by default), raise it for that workspace:
+
+```bash
+gpt-worker limits 65536   # bytes; run with no argument to see the current value
+gpt-worker limits --reset # back to the default
+```
+> 💬 **In chat:** "Raise gpt-worker's message size limit for this project to 64 KB" — or "Reset gpt-worker's message size limit to the default."
+
+Every message — from either side — lands in the same long-lived ChatGPT conversation this workspace reuses across tasks, so raise this deliberately: a larger cap means faster growth toward that conversation's context limit, not a free allowance.
 
 ### Updating & Redeploying
 When you update gpt-worker via `git pull`, redeploy the Cloudflare Worker if the update includes changes to the Worker code (`worker/`):
@@ -345,6 +395,8 @@ Your Cloudflare Worker (deployed to your own account in Step 3) durably stores t
 | `gpt-worker task "<goal>" -w <dir>` | Queue a new task for ChatGPT |
 | `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
 | `gpt-worker report -w <dir>` | Submit execution metrics and test results to ChatGPT |
+| `gpt-worker handoff -w <dir> [--reason "<why>"]` | End the round and hand the task to a different agent, which resumes with `wait` |
+| `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | View or change this workspace's message body size limit (default 16 KB) |
 | `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
 | `gpt-worker chat-url "<url>" -w <dir>` | Save or inspect ChatGPT Project URL |
 | `gpt-worker chat <new\|attach\|status> ... -w <dir>` | Start a fresh chat, attach a manually opened conversation, or inspect chat recovery state |
