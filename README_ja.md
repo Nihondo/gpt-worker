@@ -77,6 +77,18 @@ mkdir -p ~/.agents/skills/gpt-worker
 ln -s "$(pwd)/SKILL.md" ~/.agents/skills/gpt-worker/SKILL.md
 ```
 
+> **任意・Claude Code または Codex CLI:** 上記のスキルは今の対話ターンの中でそのまま実行されるため、`wait`（最大15分）のたびにそのセッションが塞がり、各ラウンドの出力もコンテキストに積み上がります。どちらのツールも、引き継ぎループ全体をサブエージェントとして走らせられます。セッションを解放しつつ、ループ自体のやり取りをコンテキスト外に追い出したい場合は、以下も併せてリンクしてください。
+> ```bash
+> # Claude Code
+> mkdir -p ~/.claude/agents
+> ln -s "$(pwd)/.claude/agents/gpt-worker.md" ~/.claude/agents/gpt-worker.md
+>
+> # Codex CLI
+> mkdir -p ~/.codex/agents
+> ln -s "$(pwd)/.codex/agents/gpt-worker.toml" ~/.codex/agents/gpt-worker.toml
+> ```
+> あとは「gpt-worker エージェントで実行して」のように名指しで頼むだけです。どちらの経路も同じプロトコルに従うので、タスクの想定所要時間に応じて使い分けてください。（Codex のカスタムエージェント機能はまだ新しく変化中の機能です。お使いの Codex CLI のバージョンで上記 TOML が読み込めない場合は、スキル呼び出しにフォールバックしてください。）
+
 ### ステップ 3：初期化と Worker の準備
 
 最初のプロジェクトのディレクトリを指定して `init` コマンドを実行します。
@@ -149,9 +161,9 @@ gpt-worker chat status -w .
 ## 基本的な使い方（日常の作業サイクル）
 
 > **💡 普段の作業はエージェントへの指示だけで完了します**  
-> スキル（`SKILL.md`）を登録していれば、お使いのエージェント（Claude Code、Codex、Antigravity など）に対して「**gpt-worker で計画して**」「**ChatGPT でレビューさせながら進めて**」と伝えるだけで、エージェントが以下の CLI コマンドを裏側で自律的に実行します。  
+> スキル（`SKILL.md`）を登録していれば、お使いのエージェント（Claude Code、Codex、Antigravity など）に対して「**gpt-worker で計画して**」「**ChatGPT でレビューさせながら進めて**」と伝えるだけで、以下のサイクルを自律的に進め、各ステップの CLI コマンドを実行します。  
 > そのため、**多くの場合ユーザー自身が直接コマンドを叩く必要はありません**。  
-> （手動で直接コマンドを実行したい場合や動作状況を確認したい場合も、以下の手順をそのまま利用できます。）
+> （手動で直接コマンドを実行したい場合や動作状況を確認したい場合も、以下の手順をそのまま利用できます。Claude Code または Codex CLI では「gpt-worker エージェントで実行して」と頼むと、同じループをサブエージェントとして実行できます——[ステップ 2](#ステップ-2エージェントへのスキル登録skillmd) を参照。）
 
 開発作業は、内部的には **「依頼 (task) → 待機 (wait) → 実装・テスト → 報告 (report) → レビュー待機 (wait)」** のサイクルで進みます。
 

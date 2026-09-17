@@ -77,6 +77,18 @@ mkdir -p ~/.agents/skills/gpt-worker
 ln -s "$(pwd)/SKILL.md" ~/.agents/skills/gpt-worker/SKILL.md
 ```
 
+> **Optional, Claude Code or Codex CLI:** the Skill above runs inline in your current turn — each `wait` (up to 15 minutes) blocks that session, and every round's output accumulates in its context. Both tools can instead run the whole hand-off loop as a subagent — freeing your session while it works, and keeping the loop's own back-and-forth out of your context:
+> ```bash
+> # Claude Code
+> mkdir -p ~/.claude/agents
+> ln -s "$(pwd)/.claude/agents/gpt-worker.md" ~/.claude/agents/gpt-worker.md
+>
+> # Codex CLI
+> mkdir -p ~/.codex/agents
+> ln -s "$(pwd)/.codex/agents/gpt-worker.toml" ~/.codex/agents/gpt-worker.toml
+> ```
+> Then ask for it by name, e.g. "run this with the gpt-worker agent." Either path follows the same protocol; use whichever fits how long you expect the task to run. (Codex's custom-agent format is a newer, evolving feature — if the TOML above doesn't load in your Codex CLI version, fall back to the Skill.)
+
 ### Step 3: Initialize & Deploy the Worker
 
 Run `init` targeting your first project directory:
@@ -149,9 +161,9 @@ gpt-worker chat status -w .
 ## Daily Usage (Workflow Cycle)
 
 > **💡 Routine work only requires prompting your agent**  
-> Once `SKILL.md` is installed, simply tell your agent (Claude Code, Codex, Antigravity, etc.) to "**plan this with gpt-worker**" or "**run this with ChatGPT review**". The agent will execute the CLI commands below autonomously in the background.  
+> Once `SKILL.md` is installed, simply tell your agent (Claude Code, Codex, Antigravity, etc.) to "**plan this with gpt-worker**" or "**run this with ChatGPT review**". It follows the loop below on its own, running the CLI commands shown at each step.  
 > In most cases, **you do not need to run commands manually**.  
-> (The manual steps below remain fully available if you wish to run commands directly or inspect what is happening.)
+> (The manual steps below remain fully available if you wish to run commands directly or inspect what is happening. On Claude Code or Codex CLI, "run this with the gpt-worker agent" instead runs the same loop as a subagent — see [Step 2](#step-2-register-the-skill-for-your-agent-skillmd).)
 
 Development follows an iterative cycle: **"Task (`task`) → Wait (`wait`) → Edit & Test → Report (`report`) → Review (`wait`)"**.
 
