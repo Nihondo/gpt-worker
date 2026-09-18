@@ -12,11 +12,8 @@
     <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">↗</span><h1>gpt-worker <span>shared hub</span></h1></div>
     <button type="button" class="secondary" id="logout-btn">Log out</button>
   </div>
-</header>
-
-<section class="hub-shared-settings wide">
-  <details class="settings-disclosure hub-settings-disclosure" open>
-    <summary class="hub-settings-summary">Shared Hub settings</summary>
+  <details class="settings-disclosure" id="hub-shared-settings">
+    <summary>Shared Hub settings</summary>
     <div class="hub-settings-body">
       <label for="hub-shared-project-url">Shared ChatGPT Project URL (default for all workspaces)</label>
       <input type="url" id="hub-shared-project-url" placeholder="https://chatgpt.com/g/g-p-.../project (leave empty for default)">
@@ -27,7 +24,7 @@
       <p class="error" id="hub-shared-project-error" hidden></p>
     </div>
   </details>
-</section>
+</header>
 
 <div class="dashboard-layout wide">
   <aside class="workspace-sidebar" aria-label="Workspaces">
