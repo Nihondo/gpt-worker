@@ -38,6 +38,14 @@
     try { return new Date(ms).toLocaleString(); } catch (e) { return String(ms); }
   }
 
+  function formatTimelineTime(ms) {
+    if (!ms) return "";
+    var d = new Date(ms);
+    if (isNaN(d.getTime())) return String(ms);
+    function pad(n) { return String(n).padStart(2, "0"); }
+    return d.getFullYear() + "/" + (d.getMonth() + 1) + "/" + d.getDate() + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+
   // Truncates on Unicode code points (via Array.from), not UTF-16 code
   // units, so a surrogate pair (e.g. an emoji) is never split in half.
   function truncateText(value, maxChars) {
@@ -147,6 +155,8 @@
     selectedTaskId: null, selectedMessageId: null,
     selectedTask: null, selectedMessage: null,
     selectedTaskRowEl: null, selectedMessageRowEl: null,
+    taskHistoryTaskId: null, taskHistoryItems: [], taskHistoryLoading: false,
+    taskHistoryError: null, taskHistoryRequestGen: 0,
     activitySubview: "tasks",
   };
 
@@ -229,6 +239,11 @@
     state.selectedMessage = null;
     state.selectedTaskRowEl = null;
     state.selectedMessageRowEl = null;
+    state.taskHistoryTaskId = null;
+    state.taskHistoryItems = [];
+    state.taskHistoryLoading = false;
+    state.taskHistoryError = null;
+    state.taskHistoryRequestGen += 1;
     detailEl.hidden = false;
     detailTitleEl.textContent = name + " (" + id + ")";
     clearEl(document.getElementById("messages-list"));
@@ -385,6 +400,92 @@
     return wrap;
   }
 
+  function taskHistoryKindClass(kind) {
+    if (kind === "INIT") return "init";
+    if (kind === "PLAN") return "plan";
+    if (kind === "EXECUTED") return "executed";
+    if (kind === "DONE") return "done";
+    if (kind === "BLOCKED") return "blocked";
+    return "other";
+  }
+
+  function renderTaskHistory(t) {
+    var wrap = el("section", { className: "task-history" });
+    wrap.appendChild(el("h3", { text: "Exchange history" }));
+    if (state.taskHistoryTaskId !== t.taskId || state.taskHistoryLoading) {
+      wrap.appendChild(el("p", { className: "note", text: "Loading retained exchange history…" }));
+      return wrap;
+    }
+    if (state.taskHistoryError) {
+      wrap.appendChild(el("p", { className: "error", text: "Could not load exchange history." }));
+      return wrap;
+    }
+    if (!state.taskHistoryItems.length) {
+      wrap.appendChild(el("p", { className: "note", text: "No retained exchange history. Older acknowledged events may have expired." }));
+      return wrap;
+    }
+    var list = el("ol", { className: "task-history-list" });
+    list.setAttribute("role", "list");
+    state.taskHistoryItems.forEach(function (m) {
+      var row = el("li", { className: "task-history-row task-history-kind-" + taskHistoryKindClass(m.kind) });
+      row.appendChild(el("span", { className: "task-history-time", text: formatTimelineTime(m.createdAt) }));
+      row.appendChild(el("strong", { className: "task-history-kind", text: m.kind || "UNKNOWN" }));
+      row.appendChild(el("span", { className: "task-history-iteration", text: "Iteration " + m.iteration }));
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    wrap.appendChild(el("p", { className: "note", text: "Acknowledged events are retained for a limited time." }));
+    return wrap;
+  }
+
+  function isCurrentTaskHistory(taskId, id, gen, requestGen) {
+    return state.workspaceId === id && state.selectionGen === gen && state.selectedTaskId === taskId && state.taskHistoryTaskId === taskId && state.taskHistoryRequestGen === requestGen;
+  }
+
+  function renderSelectedTaskHistory(id, gen) {
+    if (state.workspaceId === id && state.selectionGen === gen && state.selectedTask && state.selectedTaskId === state.selectedTask.taskId) {
+      renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
+    }
+  }
+
+  function loadTaskHistory(taskId, id, gen) {
+    var requestGen = state.taskHistoryRequestGen + 1;
+    state.taskHistoryRequestGen = requestGen;
+    state.taskHistoryTaskId = taskId;
+    state.taskHistoryItems = [];
+    state.taskHistoryLoading = true;
+    state.taskHistoryError = null;
+    var byId = {};
+    function loadPage(cursor) {
+      var q = "?task_id=" + encodeURIComponent(taskId) + "&limit=100&include_body=0" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+      wsApiFor(id, "/messages" + q).then(function (res) {
+        if (!isCurrentTaskHistory(taskId, id, gen, requestGen)) return;
+        if (!res.ok) {
+          state.taskHistoryLoading = false;
+          state.taskHistoryError = true;
+          renderSelectedTaskHistory(id, gen);
+          return;
+        }
+        (res.body.messages || []).forEach(function (m) { byId[m.messageId] = m; });
+        if (res.body.nextCursor) {
+          loadPage(res.body.nextCursor);
+          return;
+        }
+        state.taskHistoryItems = Object.keys(byId).map(function (messageId) { return byId[messageId]; }).sort(function (a, b) {
+          return a.createdAt - b.createdAt || String(a.messageId).localeCompare(String(b.messageId));
+        });
+        state.taskHistoryLoading = false;
+        renderSelectedTaskHistory(id, gen);
+      }).catch(function () {
+        if (!isCurrentTaskHistory(taskId, id, gen, requestGen)) return;
+        state.taskHistoryLoading = false;
+        state.taskHistoryError = true;
+        renderSelectedTaskHistory(id, gen);
+      });
+    }
+    loadPage(null);
+  }
+
   // ---- tasks ----
   function renderTaskRow(t, id, gen) {
     var row = el("button", { className: "list-row" });
@@ -414,6 +515,7 @@
     if (t.terminalSummary) {
       wrap.appendChild(renderTextSection("task-detail-summary", "Terminal summary", t.terminalSummary));
     }
+    wrap.appendChild(renderTaskHistory(t));
     if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
       var discardBtn = el("button", { className: "danger", text: "Discard task" });
       discardBtn.addEventListener("click", function () {
@@ -432,9 +534,11 @@
   // the id+object pair is set together so the detail pane can survive a
   // later poll dropping this row off the first page.
   function selectTask(t, id, gen, rowEl) {
+    var taskChanged = state.selectedTaskId !== t.taskId;
     state.selectedTaskId = t.taskId;
     state.selectedTask = t;
     state.selectedTaskRowEl = rowEl || null;
+    if (taskChanged) loadTaskHistory(t.taskId, id, gen);
     renderTasksList(id, gen);
     renderDetailPane("tasks", renderTaskDetail(t, id, gen));
     openDetail();
@@ -458,7 +562,9 @@
         if (state.selectedTaskId) {
           var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
           if (fresh) {
+            var historyChanged = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt;
             state.selectedTask = fresh;
+            if (historyChanged) loadTaskHistory(fresh.taskId, id, gen);
             renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
           }
         }

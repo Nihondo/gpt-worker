@@ -14,6 +14,7 @@ import worker, { BridgeDO } from "../worker/src/index.js";
 import { makeFakeCtx } from "./helpers/fake-do-ctx.mjs";
 import WORKSPACE_DASHBOARD_APP_JS from "../worker/src/dashboard/workspace-app.js";
 import HUB_DASHBOARD_APP_JS from "../worker/src/dashboard/hub-app.js";
+import DASHBOARD_CSS from "../worker/src/dashboard/dashboard.css";
 
 const ORIGIN = "https://example.com";
 
@@ -119,6 +120,15 @@ describe("dashboard: top-level routing", () => {
     const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type"), /javascript/);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+  });
+
+  test("app.css is served same-origin with a stylesheet content-type and no-store", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.css`), env);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/css/);
     assert.equal(res.headers.get("cache-control"), "no-store");
   });
 });
@@ -360,6 +370,25 @@ describe("dashboard: message/task history pagination and retention framing", () 
     assert.equal(body.messages[0].state, "acked");
   });
 
+  test("task-filtered metadata history omits bodies while the default response remains compatible", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.sql.exec(
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at) VALUES ('retained', 'to_gpt', 'task-a', 2, 'EXECUTED', 'private body', 'acked', NULL, ?), ('other-task', 'to_local', 'task-b', 0, 'PLAN', 'other body', 'pending', NULL, ?)`,
+      Date.now(),
+      Date.now(),
+    );
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const metadataRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/messages?task_id=task-a&include_body=0`, { headers: { cookie } }), env);
+    const metadata = await metadataRes.json();
+    assert.deepEqual(metadata.messages.map((m) => m.messageId), ["retained"]);
+    assert.equal(Object.hasOwn(metadata.messages[0], "body"), false);
+    assert.equal(metadata.messages[0].state, "acked");
+
+    const defaultRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/messages?task_id=task-a`, { headers: { cookie } }), env);
+    assert.equal((await defaultRes.json()).messages[0].body, "private body");
+  });
+
   test("tasks endpoint uses updatedAt (not taskHistory()'s misnamed created_at) and includes non-terminal tasks", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
@@ -574,7 +603,7 @@ describe("dashboard: rate-limit bucket isolation", () => {
 });
 
 describe("dashboard: response headers", () => {
-  test("the HTML shell carries a script-src 'self' CSP, no-store, and no-referrer", async () => {
+  test("the HTML shell permits only same-origin scripts and styles, with no-store and no-referrer", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`), env);
@@ -582,7 +611,8 @@ describe("dashboard: response headers", () => {
     assert.equal(res.headers.get("referrer-policy"), "no-referrer");
     const csp = res.headers.get("content-security-policy");
     assert.match(csp, /script-src 'self'/);
-    assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/, "script-src itself must not allow unsafe-inline (style-src separately does, harmlessly)");
+    assert.match(csp, /style-src 'self'/);
+    assert.doesNotMatch(csp, /(?:script|style)-src[^;]*unsafe-inline/);
   });
 
   test("api responses are no-store", async () => {
@@ -629,6 +659,13 @@ describe("hub dashboard: routing", () => {
     const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type"), /javascript/);
+  });
+
+  test("/dashboard/hub/app.css is served same-origin with a stylesheet content-type", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.css`), env);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type"), /text\/css/);
   });
 
   test("the internal hub-dashboard-relay route is never reachable from a public URL", async () => {
@@ -941,12 +978,13 @@ describe("hub dashboard: relayed operations reach only the selected target works
       );
     }
     const cookie = await loginHubAndGetCookie(env, hubGptToken);
-    const page1 = await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/messages?limit=2`, { headers: { cookie } }), env);
+    const page1 = await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/messages?task_id=t1&include_body=0&limit=2`, { headers: { cookie } }), env);
     const body1 = await page1.json();
     assert.equal(body1.messages.length, 2);
+    assert.equal(Object.hasOwn(body1.messages[0], "body"), false);
     assert.ok(body1.nextCursor);
     const page2 = await worker.fetch(
-      req(`/dashboard/hub/api/workspaces/${workspaceId}/messages?limit=2&cursor=${encodeURIComponent(body1.nextCursor)}`, { headers: { cookie } }),
+      req(`/dashboard/hub/api/workspaces/${workspaceId}/messages?task_id=t1&include_body=0&limit=2&cursor=${encodeURIComponent(body1.nextCursor)}`, { headers: { cookie } }),
       env,
     );
     const body2 = await page2.json();
@@ -1082,6 +1120,27 @@ describe("dashboard: app.js ack callback regression (loadMessages(more) argument
   });
 });
 
+describe("dashboard: task exchange-history detail", () => {
+  test("workspace and hub apps load all body-free task messages, render them chronologically, and guard stale responses", () => {
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      assert.match(js, /function renderTaskHistory\(t\)/);
+      assert.match(js, /Exchange history/);
+      assert.match(js, /task-history-list/);
+      assert.match(js, /function formatTimelineTime\(ms\)/);
+      assert.match(js, /encodeURIComponent\(taskId\).*include_body=0/);
+      assert.match(js, /function loadTaskHistory\(/);
+      assert.match(js, /res\.body\.nextCursor/);
+      assert.match(js, /a\.createdAt - b\.createdAt/);
+      assert.match(js, /m\.kind \|\| "UNKNOWN"/);
+      assert.doesNotMatch(js.slice(js.indexOf("function renderTaskHistory"), js.indexOf("function isCurrentTaskHistory")), /m\.body/);
+    });
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /taskHistoryRequestGen/);
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /state\.selectedTaskId === taskId/);
+    assert.match(HUB_DASHBOARD_APP_JS, /state\.workspaceId === id && state\.selectionGen === gen/);
+    assert.match(HUB_DASHBOARD_APP_JS, /wsApiFor\(id, "\/messages" \+ q\)/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Dashboard assets are Wrangler Text-module imports (worker/src/dashboard/*),
 // not inline template-literal constants — see worker/wrangler.jsonc's `rules`
@@ -1109,41 +1168,54 @@ describe("dashboard: Text-module asset extraction", () => {
     assert.equal(body, HUB_DASHBOARD_APP_JS);
   });
 
-  test("unauthenticated workspace login HTML resolves every {{marker}}: correct workspaceId, correct app.js URL, no leftover braces", async () => {
+  test("workspace and hub app.css routes both serve the one imported stylesheet Text module", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const workspaceCss = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.css`), env)).text();
+    const hubCss = await (await worker.fetch(req(`/dashboard/hub/app.css`), env)).text();
+    assert.equal(workspaceCss, DASHBOARD_CSS);
+    assert.equal(hubCss, DASHBOARD_CSS);
+  });
+
+  test("unauthenticated workspace login HTML resolves every {{marker}}: correct workspaceId and asset URLs, no leftover braces", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`), env);
     const html = await res.text();
     assert.match(html, new RegExp(`Workspace: <strong>${workspaceId}</strong>`));
+    assert.match(html, new RegExp(`<link rel="stylesheet" href="/dashboard/${workspaceId}/app\\.css">`));
     assert.match(html, new RegExp(`<script src="/dashboard/${workspaceId}/app\\.js"></script>`));
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
-  test("authenticated workspace shell HTML resolves every {{marker}}: correct workspaceId, correct app.js URL, no leftover braces", async () => {
+  test("authenticated workspace shell HTML resolves every {{marker}}: correct workspaceId and asset URLs, no leftover braces", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
     const html = await res.text();
     assert.match(html, new RegExp(`<h2>${workspaceId}</h2>`));
+    assert.match(html, new RegExp(`<link rel="stylesheet" href="/dashboard/${workspaceId}/app\\.css">`));
     assert.match(html, new RegExp(`<script src="/dashboard/${workspaceId}/app\\.js"></script>`));
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
-  test("hub login HTML resolves {{DASHBOARD_STYLE}}, references /dashboard/hub/app.js, no leftover braces", async () => {
+  test("hub login HTML references /dashboard/hub fixed CSS and JS assets, with no leftover braces", async () => {
     const { env } = makeRealBridgeDoEnv();
     const res = await worker.fetch(req(`/dashboard/hub`), env);
     const html = await res.text();
+    assert.match(html, /<link rel="stylesheet" href="\/dashboard\/hub\/app\.css">/);
     assert.match(html, /<script src="\/dashboard\/hub\/app\.js"><\/script>/);
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
-  test("hub shell HTML resolves {{DASHBOARD_STYLE}}, references /dashboard/hub/app.js, no leftover braces", async () => {
+  test("hub shell HTML references /dashboard/hub fixed CSS and JS assets, with no leftover braces", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { hubGptToken } = makeHub(env, instanceFor);
     const cookie = await loginHubAndGetCookie(env, hubGptToken);
     const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
     const html = await res.text();
+    assert.match(html, /<link rel="stylesheet" href="\/dashboard\/hub\/app\.css">/);
     assert.match(html, /<script src="\/dashboard\/hub\/app\.js"><\/script>/);
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });

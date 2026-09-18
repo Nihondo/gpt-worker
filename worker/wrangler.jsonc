@@ -26,7 +26,7 @@
 
   // src/instructions.js imports src/instructions.md as a plain string, and
   // src/index.js imports its dashboard browser assets (src/dashboard/*.html,
-  // src/dashboard/*.js) the same way. Node's test run resolves the same
+  // src/dashboard/*.js, src/dashboard/*.css) the same way. Node's test run resolves the same
   // imports through tests/helpers/text-modules.mjs. Each glob matches the
   // import specifier as written in source (e.g. "./instructions.md",
   // "./dashboard/workspace-app.js"), not a path relative to this config
@@ -34,6 +34,6 @@
   // scoped to that one directory (not "**/*.js") so no other Worker source
   // file is ever treated as a Text module instead of executable JS.
   "rules": [
-    { "type": "Text", "globs": ["**/*.md", "**/dashboard/*.html", "**/dashboard/*.js"], "fallthrough": true }
+    { "type": "Text", "globs": ["**/*.md", "**/dashboard/*.html", "**/dashboard/*.js", "**/dashboard/*.css"], "fallthrough": true }
   ]
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gpt-worker dashboard</title>
-<style>{{DASHBOARD_STYLE}}</style>
+<link rel="stylesheet" href="{{APP_CSS_URL}}">
 </head>
 <body>
 <header class="dashboard-header wide">
@@ -32,7 +32,7 @@
             <h3>Start a new task</h3>
             <label for="new-task-goal">Goal</label>
             <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
-            <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
+            <label><input type="checkbox" class="force-checkbox" id="new-task-force">Force-replace the active task (BLOCKs it)</label>
             <div><button type="button" id="new-task-submit">Start task</button></div>
             <p class="note" id="new-task-status"></p>
           </section>

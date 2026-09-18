@@ -36,13 +36,14 @@ import TOOLS from "./tools.json" with { type: "json" };
 import { operatingInstructions } from "./instructions.js";
 // Dashboard browser assets: same Wrangler Text-module mechanism as
 // instructions.md above (see wrangler.jsonc's `rules`), not bundled/built —
-// these are the literal bytes served at .../app.js and the literal HTML
+// these are the literal bytes served at .../app.js and .../app.css, and the literal HTML
 // markup rendered by renderDashboard*Html/renderHubDashboard*Html below.
 // The .js assets embed no server-side interpolation (workspaceId is read
 // from location.pathname client-side); the .html assets carry `{{MARKER}}`
 // placeholders filled by fillDashboardTemplate().
 import WORKSPACE_DASHBOARD_APP_JS from "./dashboard/workspace-app.js";
 import HUB_DASHBOARD_APP_JS from "./dashboard/hub-app.js";
+import DASHBOARD_CSS from "./dashboard/dashboard.css";
 import WORKSPACE_DASHBOARD_LOGIN_HTML from "./dashboard/workspace-login.html";
 import WORKSPACE_DASHBOARD_SHELL_HTML from "./dashboard/workspace-shell.html";
 import HUB_DASHBOARD_LOGIN_HTML from "./dashboard/hub-login.html";
@@ -634,13 +635,17 @@ function dashboardHtmlHeaders() {
     "referrer-policy": "no-referrer",
     // script-src 'self' (not the OAuth consent page's script-less CSP,
     // which can't run the dashboard's polling/kanban JS) — see
-    // handleDashboardAppJs, served same-origin at .../app.js.
-    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    // Dashboard scripts and styles are fixed same-origin Text modules.
+    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   };
 }
 
 function dashboardJsHeaders() {
   return { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
+}
+
+function dashboardCssHeaders() {
+  return { "content-type": "text/css; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
 }
 
 function dashboardApiHeaders() {
@@ -799,134 +804,11 @@ ${hiddenFields}
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard HTML shell + same-origin script (docs/plans/queue-dashboard.md).
+// Dashboard HTML shell + same-origin browser assets (docs/plans/queue-dashboard.md).
 // Shares renderOAuthConsentHtml's plain, dependency-free look; unlike that
-// page this one needs real JS (polling, mutations), so its CSP allows
-// `script-src 'self'` and the script itself lives at a same-origin
-// .../app.js response (handleDashboardAppJs) rather than inline.
+// page this one needs browser assets (polling plus styles), so its CSP allows
+// same-origin script/style modules, served separately rather than inlined.
 // ---------------------------------------------------------------------------
-
-const DASHBOARD_STYLE = `
-  :root {
-    color-scheme: light dark;
-    --canvas: #f4f6ff; --surface: #ffffff; --surface-muted: #f7f7fc;
-    --ink: #20233a; --muted: #666b85; --line: #dfe2f0;
-    --primary: #5b5ce2; --primary-strong: #4647c4; --accent: #d150a6;
-    --teal: #087f7a; --danger: #c23a57; --focus: #f39c3d;
-  }
-  * { box-sizing: border-box; }
-  [hidden] { display: none !important; }
-  body {
-    margin: 0; min-height: 100dvh; padding: clamp(16px, 3vw, 32px);
-    background: radial-gradient(circle at 8% 0%, #dbe9ff 0, transparent 28rem), radial-gradient(circle at 94% 10%, #f8d7ef 0, transparent 27rem), var(--canvas);
-    color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }
-  .wide { max-width: 1360px; margin-inline: auto; }
-  .dashboard-header, .workspace-context, .card { background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line); box-shadow: 0 16px 35px rgb(50 57 100 / 8%); }
-  .dashboard-header { border-radius: 22px; padding: 18px 22px; margin-bottom: 18px; }
-  .brand-lockup { display: flex; align-items: center; gap: 12px; }
-  .brand-mark { display: grid; place-items: center; inline-size: 36px; block-size: 36px; border-radius: 12px; color: white; font-weight: 800; background: linear-gradient(135deg, var(--primary), var(--accent)); box-shadow: 0 8px 20px rgb(91 92 226 / 32%); }
-  h1 { font-size: clamp(1.05rem, 2vw, 1.38rem); letter-spacing: -.03em; margin: 0; }
-  h1 span { color: var(--primary); font-weight: 550; }
-  h2 { font-size: 1rem; margin: 0; letter-spacing: -.015em; }
-  h3 { font-size: .85rem; margin: 0 0 8px; }
-  .row { display: flex; justify-content: space-between; align-items: safe center; gap: 12px; flex-wrap: wrap; }
-  .meta { font-size: .78rem; color: var(--muted); line-height: 1.5; margin: 0 0 8px; overflow-wrap: anywhere; }
-  .note { font-size: .75rem; color: var(--muted); margin: 10px 0 0; line-height: 1.45; }
-  .error { color: var(--danger); font-size: .8rem; margin-top: 8px; }
-  label { display: block; font-size: .78rem; font-weight: 650; margin: 12px 0 6px; }
-  input, textarea { inline-size: 100%; padding: 9px 10px; font-size: .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); color: inherit; font-family: inherit; }
-  textarea { min-block-size: 76px; resize: vertical; }
-  button { margin-top: 10px; margin-right: 6px; padding: 8px 13px; font-size: .78rem; font-weight: 700; color: #fff; background: linear-gradient(135deg, var(--primary), var(--primary-strong)); border: 0; border-radius: 9px; cursor: pointer; box-shadow: 0 5px 12px rgb(91 92 226 / 20%); }
-  button.secondary { background: #767a91; box-shadow: none; }
-  button.danger { background: var(--danger); box-shadow: none; }
-  button:hover { filter: brightness(1.06); }
-  :where(button, input, textarea, summary):focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
-  .card { max-width: 420px; margin: 10vh auto 20px; border-radius: 18px; padding: 24px; }
-  .login-card h1 { margin-bottom: 16px; }
-  .dashboard-layout { display: grid; grid-template-columns: minmax(210px, 270px) minmax(0, 1fr); gap: 18px; align-items: start; }
-  .workspace-sidebar { position: sticky; top: 16px; padding: 18px 14px; border-radius: 18px; color: #f5f5ff; background: linear-gradient(160deg, #292a62, #4b347f 63%, #a3447e); box-shadow: 0 16px 35px rgb(50 57 100 / 18%); }
-  .workspace-sidebar .meta { color: #d8d7ed; margin: 8px 4px 14px; }
-  .sidebar-heading { padding: 2px 4px; }
-  .eyebrow { display: block; color: var(--accent); font-size: .64rem; font-weight: 800; letter-spacing: .11em; text-transform: uppercase; margin-bottom: 4px; }
-  .workspace-sidebar .eyebrow { color: #f9c8e4; }
-  .workspace-main { min-inline-size: 0; }
-  .single-workspace { max-width: 1080px; }
-  .workspace-context { border-radius: 18px; padding: 15px 18px; margin-bottom: 14px; }
-  .context-heading { display: flex; align-items: baseline; gap: 10px; min-inline-size: 0; }
-  .context-heading h2 { overflow-wrap: anywhere; }
-  .overview-strip { display: flex; gap: 8px 18px; flex-wrap: wrap; padding-top: 9px; }
-  .overview-strip .row { display: contents; }
-  .overview-strip .row > span { padding: 4px 9px; background: #edf0ff; border-radius: 999px; color: #343779; font-size: .75rem; font-weight: 650; }
-  .overview-strip .meta { margin: 1px 0 0; }
-  .settings-disclosure { margin-top: 10px; border-top: 1px solid var(--line); }
-  .settings-disclosure summary { padding: 10px 2px 0; cursor: pointer; color: var(--primary); font-size: .78rem; font-weight: 750; }
-  .workspace-controls { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(240px, .9fr); gap: 20px; padding: 14px 0 2px; }
-  .control-section + .control-section { border-inline-start: 1px solid var(--line); padding-inline-start: 20px; }
-  .settings-section h3:not(:first-child) { margin-top: 20px; }
-  .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--line); margin: 0 0 7px; }
-  .tab { margin: 0; padding: 9px 14px; color: var(--muted); background: transparent; box-shadow: none; border-bottom: 3px solid transparent; border-radius: 9px 9px 0 0; }
-  .tab[aria-selected="true"] { color: var(--primary); background: #eff0ff; border-bottom-color: var(--primary); }
-  .retention-note { margin: 0 0 12px; }
-  .three-pane { display: grid; grid-template-columns: minmax(260px, .83fr) minmax(0, 1.5fr); grid-template-areas: "list detail"; gap: 16px; align-items: stretch; }
-  .list-col { grid-area: list; display: flex; flex-direction: column; gap: 8px; min-block-size: 0; min-inline-size: 0; }
-  .list-pane { flex: 1 1 auto; max-block-size: 68dvh; min-block-size: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 5px; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface) 85%, transparent); }
-  .list-pane::-webkit-scrollbar { width: 8px; }
-  .list-pane::-webkit-scrollbar-thumb { background: #bfc3df; border-radius: 5px; }
-  .detail-pane { grid-area: detail; min-block-size: 100px; min-inline-size: 0; padding: 18px; border-radius: 14px; background: color-mix(in srgb, var(--surface) 82%, transparent); border: 1px solid var(--line); box-shadow: 0 12px 28px rgb(50 57 100 / 6%); }
-  .detail-empty { color: var(--muted); font-size: .8rem; }
-  .detail-back { display: none; }
-  .detail-section { margin: 14px 0; }
-  .detail-section h3 { font-size: .8rem; }
-  .detail-body, .item pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .76rem; background: var(--surface-muted); padding: 10px; border-radius: 9px; max-block-size: 320px; overflow: auto; }
-  .list-row { display: block; inline-size: 100%; text-align: left; color: inherit; font: inherit; background: transparent; border: 1px solid transparent; border-bottom-color: var(--line); border-radius: 10px; padding: 11px 9px; margin: 0; cursor: pointer; box-shadow: none; }
-  .list-row:hover { background: #f5f3ff; }
-  .list-row[aria-selected="true"] { background: linear-gradient(135deg, #ecebff, #fcecf6); border-color: var(--primary); }
-  .list-row .meta { margin: 4px 0; }
-  .list-row .preview { font-size: .75rem; color: var(--muted); margin-top: 4px; }
-  .list-row .task-title { color: var(--ink); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .task-detail-title { color: var(--ink); font-size: .95rem; font-weight: 750; }
-  .item { border-top: 1px solid var(--line); padding: 10px 0; }
-  .item:first-child { border-top: 0; }
-  .workspace-item { display: flex; align-items: center; gap: 8px; padding: 9px 4px; border-top: 1px solid rgb(255 255 255 / 22%); }
-  .workspace-item:first-child { border-top: 0; }
-  .workspace-choice { flex: 1 1 auto; min-inline-size: 0; margin: 0; padding: 7px 8px; overflow: hidden; text-align: start; text-overflow: ellipsis; white-space: nowrap; background: transparent; box-shadow: none; }
-  .workspace-choice:hover, .workspace-choice.selected { background: rgb(255 255 255 / 18%); }
-  .workspace-status { flex: 0 0 auto; padding: 3px 6px; border: 1px solid rgb(255 255 255 / 28%); border-radius: 999px; color: #e4e4f5; font-size: .6rem; font-weight: 800; letter-spacing: .025em; }
-  .workspace-status.active { color: #182c35; background: #92e6d3; border-color: #92e6d3; }
-  .badge { display: inline-block; font-size: .66rem; font-weight: 800; letter-spacing: .03em; padding: 3px 7px; border-radius: 999px; color: #494c68; background: #e8e9f7; margin-right: 4px; }
-  .stage-indicator { display: flex; align-items: center; gap: 4px; margin: 7px 0; flex-wrap: wrap; }
-  .stage-indicator.small { margin: 4px 0; }
-  .stage-node { display: inline-block; padding: 3px 8px; border-radius: 999px; background: #eef0f7; color: var(--muted); font-size: .66rem; font-weight: 750; }
-  .stage-node.current { color: #fff; background: linear-gradient(135deg, var(--primary), var(--accent)); }
-  .stage-node.complete { color: #075e5a; background: #d6f2eb; }
-  .stage-connector { inline-size: 10px; block-size: 2px; background: #cbd0e6; }
-  .stage-label { font-size: .72rem; color: var(--muted); margin-inline-start: 3px; }
-  .stage-label.blocked { color: var(--danger); font-weight: 700; }
-  @media (max-width: 920px) {
-    .dashboard-layout { grid-template-columns: 1fr; }
-    .workspace-sidebar { position: static; }
-    .workspace-controls, .three-pane { grid-template-columns: 1fr; grid-template-areas: "list" "detail"; }
-    .control-section + .control-section { border-inline-start: 0; border-block-start: 1px solid var(--line); padding-inline-start: 0; padding-block-start: 16px; }
-    .three-pane .detail-pane { display: none; }
-    .three-pane.detail-open .list-col { display: none; }
-    .three-pane.detail-open .detail-pane { display: block; }
-    .detail-back { display: inline-block; }
-  }
-  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
-  @media (prefers-color-scheme: dark) {
-    :root { --canvas: #171827; --surface: #24253a; --surface-muted: #1c1d2e; --ink: #f4f2ff; --muted: #b2b4ca; --line: #41435f; --primary: #9c9dff; --primary-strong: #7778e7; --accent: #f38ac7; --teal: #7de3d5; --danger: #ff91aa; --focus: #ffd274; }
-    body { background: radial-gradient(circle at 8% 0%, #273962 0, transparent 28rem), radial-gradient(circle at 94% 10%, #542a55 0, transparent 27rem), var(--canvas); }
-    .overview-strip .row > span { color: #d9d9ff; background: #35385c; }
-    .tab[aria-selected="true"] { background: #34365b; }
-    .list-row:hover { background: #2e304a; }
-    .list-row[aria-selected="true"] { background: linear-gradient(135deg, #34365b, #4d304c); }
-    .badge { color: #e1e2fa; background: #393b57; }
-    .stage-node { color: #c4c6da; background: #36384f; }
-    .stage-node.complete { color: #b7f6e9; background: #16544f; }
-    .list-pane::-webkit-scrollbar-thumb { background: #5a5d81; }
-  }
-`;
 
 // Fills a dashboard HTML Text-module template's `{{MARKER}}` placeholders.
 // Uses split/join (never String#replace with a pattern string) so a `$`
@@ -946,17 +828,17 @@ function fillDashboardTemplate(template, values) {
 
 function renderDashboardLoginHtml(workspaceId) {
   return fillDashboardTemplate(WORKSPACE_DASHBOARD_LOGIN_HTML, {
-    DASHBOARD_STYLE,
     WORKSPACE_ID: escapeHtml(workspaceId),
     APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
+    APP_CSS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.css`,
   });
 }
 
 function renderDashboardShellHtml(workspaceId) {
   return fillDashboardTemplate(WORKSPACE_DASHBOARD_SHELL_HTML, {
-    DASHBOARD_STYLE,
     WORKSPACE_ID: escapeHtml(workspaceId),
     APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
+    APP_CSS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.css`,
   });
 }
 
@@ -970,11 +852,11 @@ function renderDashboardShellHtml(workspaceId) {
 // ---------------------------------------------------------------------------
 
 function renderHubDashboardLoginHtml() {
-  return fillDashboardTemplate(HUB_DASHBOARD_LOGIN_HTML, { DASHBOARD_STYLE });
+  return fillDashboardTemplate(HUB_DASHBOARD_LOGIN_HTML, { APP_CSS_URL: "/dashboard/hub/app.css" });
 }
 
 function renderHubDashboardShellHtml() {
-  return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, { DASHBOARD_STYLE });
+  return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, { APP_CSS_URL: "/dashboard/hub/app.css" });
 }
 
 /** Handles the secret-free OAuth MCP resource routes ("/mcp" and
@@ -2537,11 +2419,12 @@ export class BridgeDO {
     // routing key, not a secret, so this needs no credential at all —
     // exhaust the same bucket the legitimate owner's authenticated
     // polling/mutations depend on. Each route below owns its own bucket
-    // instead (see handleDashboardShell/handleDashboardAppJs/
+    // instead (see handleDashboardShell/handleDashboardAppJs/handleDashboardAppCss/
     // handleDashboardLogin/handleDashboardLogout/handleDashboardApi), sized
     // for what it actually guards.
     if (subParts.length === 0) return this.handleDashboardShell(request, workspaceId);
     if (subParts.length === 1 && subParts[0] === "app.js") return this.handleDashboardAppJs(request);
+    if (subParts.length === 1 && subParts[0] === "app.css") return this.handleDashboardAppCss(request);
     if (subParts.length === 1 && subParts[0] === "login") return this.handleDashboardLogin(request, workspaceId);
     if (subParts.length === 1 && subParts[0] === "logout") return this.handleDashboardLogout(request, workspaceId);
     if (subParts[0] === "api") return this.handleDashboardApi(request, subParts.slice(1));
@@ -2565,6 +2448,14 @@ export class BridgeDO {
       return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
     }
     return new Response(WORKSPACE_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
+  }
+
+  async handleDashboardAppCss(request) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    return new Response(DASHBOARD_CSS, { status: 200, headers: dashboardCssHeaders() });
   }
 
   async handleDashboardLogin(request, workspaceId) {
@@ -2687,6 +2578,10 @@ export class BridgeDO {
   dashboardMessages(params) {
     const limit = Math.min(Math.max(Number(params.get("limit")) || DASHBOARD_HISTORY_DEFAULT_LIMIT, 1), DASHBOARD_HISTORY_MAX_LIMIT);
     const taskId = params.get("task_id") || null;
+    // The task-detail exchange history needs only transport metadata. Keep
+    // the default dashboard API response backward-compatible, but allow that
+    // view to opt out of selecting/serializing message bodies entirely.
+    const includeBody = params.get("include_body") !== "0";
     const cursor = decodeDashboardCursor(params.get("cursor"));
     const conditions = [];
     const args = [];
@@ -2701,7 +2596,9 @@ export class BridgeDO {
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.sql
       .exec(
-        `SELECT message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
+        includeBody
+          ? `SELECT message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`
+          : `SELECT message_id, dir, task_id, iteration, kind, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
         ...args,
         limit + 1
       )
@@ -2710,17 +2607,20 @@ export class BridgeDO {
     const page = rows.slice(0, limit);
     const now = Date.now();
     return {
-      messages: page.map((r) => ({
-        messageId: r.message_id,
-        dir: r.dir,
-        taskId: r.task_id,
-        iteration: r.iteration,
-        kind: r.kind,
-        body: r.body,
-        // Same leased-but-expired normalization as localList() — see there.
-        state: r.state === "leased" && r.lease_until && r.lease_until < now ? "pending" : r.state,
-        createdAt: r.created_at,
-      })),
+      messages: page.map((r) => {
+        const message = {
+          messageId: r.message_id,
+          dir: r.dir,
+          taskId: r.task_id,
+          iteration: r.iteration,
+          kind: r.kind,
+          // Same leased-but-expired normalization as localList() — see there.
+          state: r.state === "leased" && r.lease_until && r.lease_until < now ? "pending" : r.state,
+          createdAt: r.created_at,
+        };
+        if (includeBody) message.body = r.body;
+        return message;
+      }),
       nextCursor: hasMore ? encodeDashboardCursor(page[page.length - 1].created_at, page[page.length - 1].message_id) : null,
     };
   }
@@ -2941,9 +2841,10 @@ export class BridgeDO {
 
   async handleHubDashboard(request, subParts) {
     // Same reasoning as handleDashboard: no shared pre-auth bucket across
-    // shell/app.js/login/logout/api — see handleHubDashboardShell etc.
+    // shell/app.js/app.css/login/logout/api — see handleHubDashboardShell etc.
     if (subParts.length === 0) return this.handleHubDashboardShell(request);
     if (subParts.length === 1 && subParts[0] === "app.js") return this.handleHubDashboardAppJs(request);
+    if (subParts.length === 1 && subParts[0] === "app.css") return this.handleHubDashboardAppCss(request);
     if (subParts.length === 1 && subParts[0] === "login") return this.handleHubDashboardLogin(request);
     if (subParts.length === 1 && subParts[0] === "logout") return this.handleHubDashboardLogout(request);
     if (subParts[0] === "api") return this.handleHubDashboardApi(request, subParts.slice(1));
@@ -2967,6 +2868,14 @@ export class BridgeDO {
       return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
     }
     return new Response(HUB_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
+  }
+
+  async handleHubDashboardAppCss(request) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("hub-dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    return new Response(DASHBOARD_CSS, { status: 200, headers: dashboardCssHeaders() });
   }
 
   async handleHubDashboardLogin(request) {
