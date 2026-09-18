@@ -2,6 +2,8 @@
 
 **開発中・実験的プロジェクトです。使用にあたっては自己責任でお願いします。**
 
+**ChatGPT Web のテキストをAIエージェントにコピペするのをやめよう**
+
 **gpt-worker** は、エージェントの5h / 週ごとの利用制限を軽減するため、Web ブラウザ版の ChatGPT を「計画・レビュー役」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
 
 利用できる ChatGPT は、Plus、Business、Pro など、Projects・Developer mode・カスタム MCP コネクタが利用可能なプランです。
@@ -299,6 +301,9 @@ gpt-worker workspaces
 ```
 
 ### Web ダッシュボード
+
+![gpt-worker Web Dashboard](images/gptworker_webui.png)
+
 Cloudflare Worker はブラウザダッシュボードも配信します。キュー状態・タスク履歴をカンバン風に可視化し、メッセージの ack/discard、guidance/limits の編集、CLI を使わずブラウザから新規タスクを投入することもできます。ログイン経路は2つあり、それぞれ URL が異なります。
 
 **ワークスペース単位**（そのワークスペース自身の owner token でログイン）:

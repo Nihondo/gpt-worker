@@ -2,6 +2,8 @@
 
 **This is an experimental project. Use at your own risk.**
 
+**Stop Copy-Pasting ChatGPT Web Text into AI Agents**
+
 **gpt-worker** is a developer workflow tool designed to ease your coding agent's 5-hour and weekly usage limits. It uses the web version of ChatGPT as the planning and review "brain", while pairing with local coding agents (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files and run tests.
 
 Supported ChatGPT plans include Plus, Business, Pro, or any plan supporting Projects, Developer mode, and custom MCP connectors.
@@ -300,6 +302,9 @@ gpt-worker workspaces
 ```
 
 ### Web Dashboard
+
+![gpt-worker Web Dashboard](images/gptworker_webui.png)
+
 Your Cloudflare Worker also serves a browser dashboard — a kanban-style view of the queue and task history, plus the ability to ack/discard messages, edit guidance/limits, and queue a new task from the browser instead of the CLI. There are two login paths, at two different URLs:
 
 **One workspace at a time**, with that workspace's own owner token:
