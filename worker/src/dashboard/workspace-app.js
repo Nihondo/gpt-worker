@@ -42,6 +42,10 @@
     return { text: chars.slice(0, maxChars).join("") + "…", truncated: true };
   }
 
+  function taskListLabel(task) {
+    return typeof task.title === "string" && task.title ? task.title : truncateText(task.goal, LIST_PREVIEW_CHARS).text;
+  }
+
   // ---- 3-stage indicator: [Web] — [Hub] — [Local] ----
   // See docs/plans/dashboard-ux-redesign.md "3ステージマッピング". A task's
   // protocolState encodes *responsibility/protocol stage*, not physical
@@ -272,7 +276,7 @@
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
     head.appendChild(el("span", { className: "meta", text: fmtTime(t.updatedAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "preview", text: truncateText(t.goal, LIST_PREVIEW_CHARS).text }));
+    row.appendChild(el("div", { className: "preview" + (t.title ? " task-title" : ""), text: taskListLabel(t) }));
     row.addEventListener("click", function () { selectTask(t, row); });
     return row;
   }
@@ -284,6 +288,7 @@
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
     head.appendChild(el("span", { className: "meta", text: "Task " + t.taskId }));
     wrap.appendChild(head);
+    if (t.title) wrap.appendChild(el("p", { className: "meta task-detail-title", text: t.title }));
     wrap.appendChild(el("p", { className: "meta", text: "Iteration " + t.iteration + " · waiting for " + (t.waitingFor || "none") + " · started " + fmtTime(t.taskStartedAt) + " · updated " + fmtTime(t.updatedAt) }));
     wrap.appendChild(renderStageIndicator(taskStage(t)));
     wrap.appendChild(renderTextSection("task-detail-goal", "Goal", t.goal));

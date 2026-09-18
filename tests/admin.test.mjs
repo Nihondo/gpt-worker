@@ -11,6 +11,21 @@ function makeDO() {
   return new BridgeDO(makeFakeCtx(), makeFakeEnv());
 }
 
+function makeHubAndWorkspaceEnv() {
+  const instances = new Map();
+  const env = {
+    BRIDGE_DO: {
+      idFromName: (name) => name,
+      get: (name) => ({ fetch: (request) => instanceFor(name).fetch(request) }),
+    },
+  };
+  function instanceFor(name) {
+    if (!instances.has(name)) instances.set(name, new BridgeDO(makeFakeCtx(), env));
+    return instances.get(name);
+  }
+  return { hub: instanceFor("gpt-worker-hub"), instanceFor };
+}
+
 describe("provision", () => {
   test("generates 3 distinct tokens and stores them", () => {
     const doo = makeDO();
@@ -77,12 +92,18 @@ describe("shared connector hub", () => {
     const list = body.result.tools.find((tool) => tool.name === "list_workspaces");
     const info = body.result.tools.find((tool) => tool.name === "workspace_info");
     const overview = body.result.tools.find((tool) => tool.name === "workspace_overview");
+    const setTitle = body.result.tools.find((tool) => tool.name === "set_title");
     assert.ok(list);
     assert.equal(info.inputSchema.properties.workspace_id.type, "string");
     assert.ok(info.inputSchema.required.includes("workspace_id"));
     assert.equal(overview.inputSchema.properties.workspace_id.type, "string");
     assert.ok(overview.inputSchema.required.includes("workspace_id"));
     assert.equal(overview.annotations.readOnlyHint, true);
+    assert.ok(setTitle);
+    assert.equal(setTitle.inputSchema.properties.workspace_id.type, "string");
+    assert.ok(setTitle.inputSchema.required.includes("workspace_id"));
+    assert.deepEqual(setTitle.inputSchema.required.filter((name) => name !== "workspace_id"), ["message_id", "task_id", "iteration", "title"]);
+    assert.equal(setTitle.annotations.idempotentHint, true);
   });
 
   test("operating_instructions is exposed without a workspace_id requirement", async () => {
@@ -101,6 +122,32 @@ describe("shared connector hub", () => {
     const body = await response.json();
     assert.notEqual(body.result.structuredContent.error, "UNKNOWN_WORKSPACE");
     assert.match(body.result.structuredContent.instructions, /call list_workspaces first/);
+  });
+
+  test("shared set_title reaches only the registered selected workspace", async () => {
+    const { hub, instanceFor } = makeHubAndWorkspaceEnv();
+    const workspaceA = instanceFor("aaaaaaaaaaaaaaaa");
+    const workspaceB = instanceFor("bbbbbbbbbbbbbbbb");
+    hub.registerWorkspace({ workspace_id: "aaaaaaaaaaaaaaaa", name: "A" });
+
+    workspaceA.localStartTask({ task_id: "a-task", goal: "A goal", text: "GOAL:\nA goal" });
+    const aNext = workspaceA.queueNext("a-task");
+    workspaceB.localStartTask({ task_id: "b-task", goal: "B goal", text: "GOAL:\nB goal" });
+    const bNext = workspaceB.queueNext("b-task");
+
+    const accepted = await hub.handleHubToolCall(1, {
+      name: "set_title",
+      arguments: { workspace_id: "aaaaaaaaaaaaaaaa", message_id: aNext.message_id, task_id: "a-task", iteration: 0, title: "A title" },
+    });
+    assert.equal((await accepted.json()).result.structuredContent.title, "A title");
+    assert.equal(workspaceA.getTask("a-task").title, "A title");
+
+    const rejected = await hub.handleHubToolCall(2, {
+      name: "set_title",
+      arguments: { workspace_id: "bbbbbbbbbbbbbbbb", message_id: bNext.message_id, task_id: "b-task", iteration: 0, title: "B title" },
+    });
+    assert.equal((await rejected.json()).result.structuredContent.error, "UNKNOWN_WORKSPACE");
+    assert.equal(workspaceB.getTask("b-task").title, null);
   });
 
   test("initialize carries the connector-appropriate operating instructions", async () => {

@@ -17,7 +17,7 @@ function makeFakeSql() {
   return {
     exec(query, ...bindings) {
       const stmt = db.prepare(query);
-      if (/^\s*SELECT/i.test(query)) {
+      if (/^\s*(?:SELECT|PRAGMA)/i.test(query)) {
         const rows = stmt.all(...bindings);
         return { toArray: () => rows };
       }

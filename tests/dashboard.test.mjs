@@ -364,12 +364,27 @@ describe("dashboard: message/task history pagination and retention framing", () 
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     doo.localStartTask({ task_id: "t1", goal: "in progress", text: "GOAL:\nin progress" });
+    const next = doo.queueNext("t1");
+    doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "Visible task title" });
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}/api/tasks`, { headers: { cookie } }), env);
     const body = await res.json();
     assert.equal(body.tasks.length, 1);
     assert.equal(body.tasks[0].protocolState, "WAITING_PLAN");
     assert.equal(body.tasks[0].updatedAt, doo.getTask("t1").updated_at);
+    assert.equal(body.tasks[0].title, "Visible task title");
+    const overviewResponse = await worker.fetch(req(`/dashboard/${workspaceId}/api/overview`, { headers: { cookie } }), env);
+    const overview = await overviewResponse.json();
+    assert.equal(overview.activeTask.title, "Visible task title");
+  });
+
+  test("tasks endpoint preserves null title for legacy and not-yet-titled tasks", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localStartTask({ task_id: "untitled", goal: "legacy-compatible goal", text: "GOAL:\nlegacy-compatible goal" });
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/api/tasks`, { headers: { cookie } }), env);
+    assert.equal((await res.json()).tasks[0].title, null);
   });
 });
 
@@ -1341,6 +1356,23 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     assertTruncationContract(await res.text());
   });
 
+  test("task rows prefer the durable title, preserve the goal fallback, and render both as text", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
+    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
+    [workspaceJs, hubJs].forEach((js) => {
+      const start = js.indexOf("function taskListLabel(task)");
+      const labelFn = js.slice(start, js.indexOf("// ---- 3-stage indicator", start));
+      assert.ok(start >= 0, "taskListLabel must exist");
+      assert.match(labelFn, /typeof task\.title === "string"/);
+      assert.match(labelFn, /truncateText\(task\.goal, LIST_PREVIEW_CHARS\)/);
+      assert.match(js, /" task-title"/);
+      assert.match(js, /task-detail-title/);
+      assert.doesNotMatch(js, /innerHTML\s*=/);
+    });
+  });
+
   test("detail panes show the full text without redundant Read more controls", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
@@ -1364,6 +1396,16 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     assert.match(listFn, /status = w\.overview\.activeTask \? "In progress" : "Idle"/);
     assert.doesNotMatch(listFn, /to ChatGPT/);
     assert.doesNotMatch(listFn, /to local/);
+  });
+
+  test("hub workspace navigator updates the selected button before loading its detail", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const js = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
+    const selectStart = js.indexOf("function selectWorkspace(id, name)");
+    const selectFn = js.slice(selectStart, js.indexOf("// ---- overview ----", selectStart));
+    assert.match(js, /function updateWorkspaceSelection\(workspaceId\)/);
+    assert.match(selectFn, /state\.workspaceId = id;\s*\n\s*updateWorkspaceSelection\(id\);/);
+    assert.match(js, /setAttribute\("aria-current", "true"\)/);
   });
 
   // Selection-snapshot contract (docs/plans/dashboard-ux-redesign.md's

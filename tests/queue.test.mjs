@@ -11,6 +11,29 @@ function makeDO() {
   return new BridgeDO(makeFakeCtx(), makeFakeEnv());
 }
 
+describe("tasks title schema migration", () => {
+  test("adds nullable title without rewriting existing task rows", () => {
+    const ctx = makeFakeCtx();
+    ctx.storage.sql.exec(`
+      CREATE TABLE tasks (
+        task_id TEXT PRIMARY KEY, goal TEXT NOT NULL, iteration INTEGER NOT NULL,
+        protocol_state TEXT NOT NULL, waiting_for TEXT NOT NULL,
+        task_started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        terminal_summary TEXT
+      )
+    `);
+    ctx.storage.sql.exec(
+      `INSERT INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+       VALUES ('legacy', 'old goal', 0, 'DONE', 'none', 1, 1)`
+    );
+
+    const doo = new BridgeDO(ctx, makeFakeEnv());
+    assert.equal(doo.getTask("legacy").goal, "old goal");
+    assert.equal(doo.getTask("legacy").title, null);
+    assert.ok(ctx.storage.sql.exec(`PRAGMA table_info('tasks')`).toArray().some((column) => column.name === "title"));
+  });
+});
+
 describe("localEnqueue: iteration invariants", () => {
   test("INIT must be iteration 0", () => {
     const doo = makeDO();
@@ -127,6 +150,108 @@ describe("queueSubmit: task_id + iteration matching", () => {
   });
 });
 
+describe("queueSetTitle: current INIT lease only", () => {
+  function startAndLease(doo, taskId = "t1") {
+    doo.localStartTask({ task_id: taskId, goal: "Build title support", text: "GOAL:\nBuild title support" });
+    return doo.queueNext(taskId);
+  }
+
+  function errorCode(result) {
+    return result.structuredContent.error;
+  }
+
+  test("stores a normalized title without changing protocol fields or updatedAt", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    assert.equal(next.task_title, null);
+    const before = doo.taskView(doo.getTask("t1"));
+    const result = doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "  Build\n  title\t support  " });
+    const after = doo.taskView(doo.getTask("t1"));
+
+    assert.deepEqual(result.structuredContent, { title: "Build title support", idempotent: false });
+    assert.equal(after.title, "Build title support");
+    assert.equal(after.protocolState, before.protocolState);
+    assert.equal(after.iteration, before.iteration);
+    assert.equal(after.updatedAt, before.updatedAt);
+  });
+
+  test("returns an existing title on INIT re-delivery after a lease expires", () => {
+    const doo = makeDO();
+    const first = startAndLease(doo);
+    doo.queueSetTitle({ message_id: first.message_id, task_id: "t1", iteration: 0, title: "Title once" });
+    doo.sql.exec(`UPDATE msgs SET lease_until = ? WHERE message_id = ?`, Date.now() - 1, first.message_id);
+    const replay = doo.queueNext("t1");
+    assert.equal(replay.task_title, "Title once");
+  });
+
+  test("rejects pending, wrong, expired, and stale INIT bindings", () => {
+    const doo = makeDO();
+    const pending = doo.localStartTask({ task_id: "t1", goal: "one", text: "GOAL:\none" });
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: pending.message_id, task_id: "t1", iteration: 0, title: "One" })), "NO_MATCHING_TASK");
+
+    const next = doo.queueNext("t1");
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: "wrong", task_id: "t1", iteration: 0, title: "One" })), "NO_MATCHING_TASK");
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "wrong", iteration: 0, title: "One" })), "NO_MATCHING_TASK");
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 1, title: "One" })), "NO_MATCHING_TASK");
+
+    doo.sql.exec(`UPDATE msgs SET lease_until = ? WHERE message_id = ?`, Date.now() - 1, next.message_id);
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "One" })), "NO_MATCHING_TASK");
+    assert.equal(doo.getTask("t1").title, null);
+  });
+
+  test("rejects title writes after submit_plan has advanced the round", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    doo.queueSubmit({ task_id: "t1", iteration: 0, state: "PLAN", body: "implement it" });
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "Too late" })), "NO_MATCHING_TASK");
+  });
+
+  test("is idempotent for the same current title but never overwrites a different one", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "First title" });
+    assert.deepEqual(
+      doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "First title" }).structuredContent,
+      { title: "First title", idempotent: true }
+    );
+    assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "Replacement" })), "TITLE_ALREADY_SET");
+    assert.equal(doo.getTask("t1").title, "First title");
+  });
+
+  test("is reachable through the dedicated MCP invokeTool dispatch", async () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    const result = await doo.invokeTool("set_title", {
+      message_id: next.message_id,
+      task_id: "t1",
+      iteration: 0,
+      title: "MCP-dispatched title",
+    });
+    assert.deepEqual(result.structuredContent, { title: "MCP-dispatched title", idempotent: false });
+  });
+
+  test("rejects empty, over-limit, and control-character titles", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    for (const title of [" \t\n ", "😀".repeat(81), "bad\u0001title"]) {
+      assert.equal(errorCode(doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title })), "INVALID_TITLE");
+    }
+    assert.equal(
+      doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "😀".repeat(80) }).structuredContent.title,
+      "😀".repeat(80)
+    );
+  });
+
+  test("is exposed by taskView and taskHistory", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "Remembered title" });
+    doo.queueSubmit({ task_id: "t1", iteration: 0, state: "DONE", body: "done" });
+    assert.equal(doo.taskView(doo.getTask("t1")).title, "Remembered title");
+    assert.equal(doo.taskHistory({}).tasks[0].title, "Remembered title");
+  });
+});
+
 describe("localAck / localDiscard / localDiscardTask", () => {
   test("localAck only clears to_local messages, never to_gpt", () => {
     const doo = makeDO();
@@ -206,6 +331,7 @@ describe("Worker-owned task state", () => {
     assert.equal(doo.activeTask(), null);
     assert.deepEqual(doo.taskHistory({}).tasks[0], {
       task_id: "t1",
+      title: null,
       outcome: "DONE",
       summary: "complete",
       created_at: doo.getTask("t1").updated_at,
@@ -306,6 +432,29 @@ describe("next_task: operating instructions", () => {
     doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal" });
     const result = await doo.invokeTool("next_task", {}, { connector: "shared" });
     assert.match(result.structuredContent.operating_instructions, /call list_workspaces first/);
+  });
+
+  test("an untitled INIT exposes task_title:null and the title lifecycle instruction", async () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "goal", text: "GOAL:\ngoal" });
+    const result = await doo.invokeTool("next_task", {});
+    assert.equal(result.structuredContent.task_title, null);
+    assert.match(result.structuredContent.operating_instructions, /task_title[\s\S]*set_title/);
+  });
+
+  test("a re-delivered INIT exposes its persisted task_title", async () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "goal", text: "GOAL:\ngoal" });
+    const first = await doo.invokeTool("next_task", {});
+    doo.queueSetTitle({
+      message_id: first.structuredContent.message_id,
+      task_id: "t1",
+      iteration: 0,
+      title: "Persisted task title",
+    });
+    doo.sql.exec(`UPDATE msgs SET lease_until = ? WHERE message_id = ?`, Date.now() - 1, first.structuredContent.message_id);
+    const replay = await doo.invokeTool("next_task", {});
+    assert.equal(replay.structuredContent.task_title, "Persisted task title");
   });
 
   test("handleHubRelay (the shared connector's only path to invokeTool) always renders the shared variant", async () => {

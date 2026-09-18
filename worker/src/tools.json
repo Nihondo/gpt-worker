@@ -169,6 +169,24 @@
       "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
     },
     {
+      "name": "set_title",
+      "title": "Set task title",
+      "description": "Persist one concise display title for the current INIT task. Call immediately after receiving an INIT with task_title:null, before workspace investigation. It is bound to that exact active message lease and cannot change task state or replace an existing different title.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message_id": { "type": "string", "description": "The exact message_id returned by next_task for the INIT." },
+          "task_id": { "type": "string", "description": "The TASK_ID from that INIT." },
+          "iteration": { "type": "integer", "minimum": 0, "description": "The ITERATION from that INIT." },
+          "title": { "type": "string", "maxLength": 80, "description": "A concise, single-line task label with no Markdown prefix, quotes, or newline." }
+        },
+        "required": ["message_id", "task_id", "iteration", "title"],
+        "additionalProperties": false
+      },
+      "location": "queue_set_title",
+      "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+    },
+    {
       "name": "task_history",
       "title": "Task history",
       "description": "Past tasks in this workspace that reached DONE or BLOCKED, newest first, with a short summary of each outcome. Useful for orienting in a fresh conversation without relying solely on this Project's own memory. Works even if the local bridge is currently offline.",

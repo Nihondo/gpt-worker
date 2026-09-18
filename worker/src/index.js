@@ -85,6 +85,10 @@ const ALLOWED_ORIGINS = new Set(["https://chatgpt.com", "https://chat.openai.com
 const RPC_TIMEOUT_MS = 20_000; // local WS round-trip budget
 const POLL_MAX_MS = 20_000; // CLI long-poll budget
 const LEASE_MS = 120_000; // next_task lease before it can be re-claimed
+// Task titles are concise display metadata produced by the Web planning
+// partner when it first receives an INIT. This fixed, code-point limit is
+// deliberately independent from the per-workspace message-body limit.
+const TASK_TITLE_MAX_CHARS = 80;
 // `body`'s default cap. It exists so every message stays a summary — file
 // contents, diffs, and command output are never put in it (GPT re-reads the
 // workspace itself instead) — not because of any Cloudflare/SQLite ceiling;
@@ -880,6 +884,8 @@ const DASHBOARD_STYLE = `
   .list-row[aria-selected="true"] { background: linear-gradient(135deg, #ecebff, #fcecf6); border-color: var(--primary); }
   .list-row .meta { margin: 4px 0; }
   .list-row .preview { font-size: .75rem; color: var(--muted); margin-top: 4px; }
+  .list-row .task-title { color: var(--ink); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task-detail-title { color: var(--ink); font-size: .95rem; font-weight: 750; }
   .item { border-top: 1px solid var(--line); padding: 10px 0; }
   .item:first-child { border-top: 0; }
   .workspace-item { display: flex; align-items: center; gap: 8px; padding: 9px 4px; border-top: 1px solid rgb(255 255 255 / 22%); }
@@ -1112,6 +1118,14 @@ function byteLength(str) {
   return new TextEncoder().encode(str).length;
 }
 
+/** Validates and makes a title safe for compact, one-line list rendering. */
+function normalizeTaskTitle(raw) {
+  if (typeof raw !== "string") return null;
+  const title = raw.trim().replace(/\s+/gu, " ");
+  if (!title || /[\u0000-\u001f\u007f-\u009f]/u.test(title)) return null;
+  return Array.from(title).length <= TASK_TITLE_MAX_CHARS ? title : null;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1193,6 +1207,7 @@ export class BridgeDO {
       CREATE TABLE IF NOT EXISTS tasks (
         task_id          TEXT PRIMARY KEY,
         goal             TEXT NOT NULL,
+        title            TEXT,
         iteration        INTEGER NOT NULL,
         protocol_state   TEXT NOT NULL,
         waiting_for      TEXT NOT NULL,
@@ -1201,6 +1216,14 @@ export class BridgeDO {
         terminal_summary TEXT
       )
     `);
+    // Existing Durable Objects already have the pre-title `tasks` table.
+    // SQLite's CREATE TABLE IF NOT EXISTS does not add columns, so migrate
+    // only those instances. Old rows intentionally remain NULL and use the
+    // goal preview fallback in every read surface.
+    const taskColumns = this.sql.exec(`PRAGMA table_info('tasks')`).toArray();
+    if (!taskColumns.some((column) => column.name === "title")) {
+      this.sql.exec(`ALTER TABLE tasks ADD COLUMN title TEXT`);
+    }
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(protocol_state, updated_at DESC)`);
 
     // Non-secret, Workspace-scoped preferences. Keeping these here avoids
@@ -2214,6 +2237,7 @@ export class BridgeDO {
         return toolOk(next.empty ? next : { operating_instructions: operatingInstructions(connector), ...next });
       }
       if (tool.location === "queue_submit") return this.queueSubmit(args);
+      if (tool.location === "queue_set_title") return this.queueSetTitle(args);
       if (tool.location === "queue_history") return toolOk(this.taskHistory(args));
       if (tool.location === "workspace_guidance") return toolOk(this.workspaceGuidance());
       const relay = await this.callLocal(name, {
@@ -2258,6 +2282,7 @@ export class BridgeDO {
     if (rows.length === 0) return { empty: true };
     const row = rows[0];
     this.sql.exec(`UPDATE msgs SET state = 'leased', lease_until = ? WHERE message_id = ?`, now + LEASE_MS, row.message_id);
+    const task = this.getTask(row.task_id);
     return {
       empty: false,
       message_id: row.message_id,
@@ -2265,7 +2290,55 @@ export class BridgeDO {
       iteration: row.iteration,
       kind: row.kind,
       body: row.body,
+      task_title: task && task.title ? task.title : null,
     };
+  }
+
+  /**
+   * Persist the Web-generated label for a task only during the active INIT
+   * lease. It intentionally does not advance protocol state, create queue
+   * messages, or touch updated_at: this is presentation metadata, not a
+   * PLAN/DONE/BLOCKED transition.
+   */
+  queueSetTitle(args) {
+    const { message_id: messageId, task_id: taskId, iteration, title: rawTitle } = args || {};
+    if (typeof messageId !== "string" || typeof taskId !== "string" || !Number.isInteger(iteration) || typeof rawTitle !== "string") {
+      return toolError("INVALID_ARGS", "message_id, task_id, iteration and title are required");
+    }
+    const title = normalizeTaskTitle(rawTitle);
+    if (!title) {
+      return toolError("INVALID_TITLE", `title must be one non-empty line of at most ${TASK_TITLE_MAX_CHARS} characters`);
+    }
+
+    const now = Date.now();
+    const messages = this.sql
+      .exec(
+        `SELECT message_id FROM msgs
+         WHERE message_id = ? AND dir = 'to_gpt' AND task_id = ? AND iteration = ?
+           AND kind = 'INIT' AND state = 'leased' AND lease_until >= ?`,
+        messageId,
+        taskId,
+        iteration,
+        now
+      )
+      .toArray();
+    const task = this.getTask(taskId);
+    if (
+      messages.length === 0 ||
+      !task ||
+      task.iteration !== iteration ||
+      iteration !== 0 ||
+      task.protocol_state !== "WAITING_PLAN"
+    ) {
+      return toolError("NO_MATCHING_TASK", `No current INIT lease for task_id=${taskId} iteration=${iteration}`);
+    }
+
+    if (task.title) {
+      if (task.title === title) return toolOk({ title: task.title, idempotent: true });
+      return toolError("TITLE_ALREADY_SET", "Task title is already set and cannot be replaced");
+    }
+    this.sql.exec(`UPDATE tasks SET title = ? WHERE task_id = ?`, title, taskId);
+    return toolOk({ title, idempotent: false });
   }
 
   queueSubmit(args) {
@@ -2356,7 +2429,7 @@ export class BridgeDO {
     const limit = Math.min(Math.max(Number(args && args.limit) || 20, 1), 100);
     const rows = this.sql
       .exec(
-        `SELECT task_id, protocol_state, terminal_summary, updated_at FROM tasks
+        `SELECT task_id, title, protocol_state, terminal_summary, updated_at FROM tasks
          WHERE protocol_state IN ('DONE', 'BLOCKED')
          ORDER BY updated_at DESC LIMIT ?`,
         limit
@@ -2365,6 +2438,7 @@ export class BridgeDO {
     return {
       tasks: rows.map((r) => ({
         task_id: r.task_id,
+        title: r.title || null,
         outcome: r.protocol_state,
         summary: (r.terminal_summary || "").length > 500 ? r.terminal_summary.slice(0, 500) + "…" : r.terminal_summary || "",
         created_at: r.updated_at,
@@ -2389,6 +2463,7 @@ export class BridgeDO {
     return {
       taskId: task.task_id,
       goal: task.goal,
+      title: task.title || null,
       iteration: task.iteration,
       protocolState: task.protocol_state,
       waitingFor: task.waiting_for,
@@ -2667,7 +2742,7 @@ export class BridgeDO {
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = this.sql
       .exec(
-        `SELECT task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary FROM tasks ${where} ORDER BY updated_at DESC, task_id DESC LIMIT ?`,
+        `SELECT task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary FROM tasks ${where} ORDER BY updated_at DESC, task_id DESC LIMIT ?`,
         ...args,
         limit + 1
       )
@@ -2678,6 +2753,7 @@ export class BridgeDO {
       tasks: page.map((r) => ({
         taskId: r.task_id,
         goal: r.goal,
+        title: r.title || null,
         iteration: r.iteration,
         protocolState: r.protocol_state,
         waitingFor: r.waiting_for,

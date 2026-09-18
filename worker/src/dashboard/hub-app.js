@@ -47,6 +47,10 @@
     return { text: chars.slice(0, maxChars).join("") + "…", truncated: true };
   }
 
+  function taskListLabel(task) {
+    return typeof task.title === "string" && task.title ? task.title : truncateText(task.goal, LIST_PREVIEW_CHARS).text;
+  }
+
   // ---- 3-stage indicator: [Web] — [Hub] — [Local] ----
   // See docs/plans/dashboard-ux-redesign.md "3ステージマッピング". A task's
   // protocolState encodes *responsibility/protocol stage*, not physical
@@ -173,12 +177,23 @@
   document.getElementById("tab-messages").addEventListener("click", function () { setActivityTab("messages"); });
 
   // ---- workspace list ----
+  function updateWorkspaceSelection(workspaceId) {
+    Array.prototype.forEach.call(document.querySelectorAll(".workspace-choice"), function (button) {
+      var isSelected = button.getAttribute("data-workspace-id") === workspaceId;
+      button.classList.toggle("selected", isSelected);
+      if (isSelected) button.setAttribute("aria-current", "true");
+      else button.removeAttribute("aria-current");
+    });
+  }
+
   function renderWorkspaceList(data) {
     clearEl(listEl);
     var workspaces = data.workspaces || [];
     workspaces.forEach(function (w) {
       var item = el("div", { className: "workspace-item" });
       var nameBtn = el("button", { className: "workspace-choice" + (w.workspaceId === state.workspaceId ? " selected" : ""), text: w.name });
+      nameBtn.setAttribute("data-workspace-id", w.workspaceId);
+      if (w.workspaceId === state.workspaceId) nameBtn.setAttribute("aria-current", "true");
       nameBtn.addEventListener("click", function () { selectWorkspace(w.workspaceId, w.name); });
       item.appendChild(nameBtn);
       var status = "Idle";
@@ -201,6 +216,7 @@
 
   function selectWorkspace(id, name) {
     state.workspaceId = id;
+    updateWorkspaceSelection(id);
     state.selectionGen += 1;
     state.activeTaskId = null;
     state.messagesCursor = null;
@@ -379,7 +395,7 @@
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
     head.appendChild(el("span", { className: "meta", text: fmtTime(t.updatedAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "preview", text: truncateText(t.goal, LIST_PREVIEW_CHARS).text }));
+    row.appendChild(el("div", { className: "preview" + (t.title ? " task-title" : ""), text: taskListLabel(t) }));
     row.addEventListener("click", function () { selectTask(t, id, gen, row); });
     return row;
   }
@@ -391,6 +407,7 @@
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
     head.appendChild(el("span", { className: "meta", text: "Task " + t.taskId }));
     wrap.appendChild(head);
+    if (t.title) wrap.appendChild(el("p", { className: "meta task-detail-title", text: t.title }));
     wrap.appendChild(el("p", { className: "meta", text: "Iteration " + t.iteration + " · waiting for " + (t.waitingFor || "none") + " · started " + fmtTime(t.taskStartedAt) + " · updated " + fmtTime(t.updatedAt) }));
     wrap.appendChild(renderStageIndicator(taskStage(t)));
     wrap.appendChild(renderTextSection("task-detail-goal", "Goal", t.goal));
