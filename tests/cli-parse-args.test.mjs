@@ -5,6 +5,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   buildChatOpenUrl,
   effectiveChatUrl,
@@ -332,5 +334,18 @@ describe("nudgeChatGpt conversation callback and tab separation", () => {
     assert.ok(p instanceof Promise);
     await p;
     assert.equal(openCalled, true);
+  });
+});
+
+describe("cmdUrl WebUI output", () => {
+  test("gpt-worker url outputs WebUI URL for hub and workspace", () => {
+    const cliPath = path.resolve("bridge/cli.mjs");
+    const hubOut = execFileSync(process.execPath, [cliPath, "url"], { encoding: "utf8" });
+    assert.match(hubOut, /^WebUI URL:\s+https?:\/\/[^\/]+\/dashboard\/hub/m);
+    assert.match(hubOut, /^OAuth Server URL:\s+https?:\/\/[^\/]+\/mcp/m);
+
+    const wsOut = execFileSync(process.execPath, [cliPath, "url", "-w", "."], { encoding: "utf8" });
+    assert.match(wsOut, /^WebUI URL:\s+https?:\/\/[^\/]+\/dashboard\/[a-f0-9]{16}/m);
+    assert.match(wsOut, /^OAuth Server URL:\s+https?:\/\/[^\/]+\/mcp\/[a-f0-9]{16}/m);
   });
 });

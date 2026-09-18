@@ -310,25 +310,27 @@ Cloudflare Worker はブラウザダッシュボードも配信します。キ�
 
 ```bash
 gpt-worker url -w .
+# WebUI URL:         https://<your-worker>.workers.dev/dashboard/<workspace_id>
 # OAuth Server URL:  https://<your-worker>.workers.dev/mcp/<workspace_id>
 # OAuth owner token: <gpt_token>
 ```
 
-`https://<your-worker>.workers.dev/dashboard/<workspace_id>` を開き、上記と同じ owner token（そのワークスペースの `gpt_token`）でログインします。**共有 hub token ではここではログインできません**（拒否されます）。ログインすると、その owner token は 24 時間有効なブラウザセッション（そのワークスペースのダッシュボード専用パスに限定された `HttpOnly`/`Secure` Cookie）と交換されます——以降のリクエストで owner token 自体が再送されることはありません。
+`WebUI URL`（`https://<your-worker>.workers.dev/dashboard/<workspace_id>`）を開き、上記と同じ owner token（そのワークスペースの `gpt_token`）でログインします。**共有 hub token ではここではログインできません**（拒否されます）。ログインすると、その owner token は 24 時間有効なブラウザセッション（そのワークスペースのダッシュボード専用パスに限定された `HttpOnly`/`Secure` Cookie）と交換されます——以降のリクエストで owner token 自体が再送されることはありません。
 
 **登録済み全ワークスペースの横断**（共有 hub token でログイン）:
 
 ```bash
 gpt-worker url
+# WebUI URL:         https://<your-worker>.workers.dev/dashboard/hub
 # OAuth Server URL:  https://<your-worker>.workers.dev/mcp
 # OAuth owner token: <hub_gpt_token>
 ```
 
-`https://<your-worker>.workers.dev/dashboard/hub` を開き、その共有 hub token でログインします（**単一ワークスペースの `gpt_token` ではここではログインできません**）。ログイン後は、この共有コネクタに登録されている全ワークスペース（`gpt-worker init` で追加され、ChatGPT の `list_workspaces` にも表示されるのと同じ一覧）を選択できるワークスペース一覧が表示され、選んだワークスペースについて単一ワークスペース用ダッシュボードと全く同じ閲覧・操作ができます。2つのログインは完全に別セッションです——ワークスペースのセッションで hub ダッシュボードに入ることはできず、hub のセッションでワークスペース自身のダッシュボード URL に直接ログインすることもできません。また hub 側は自身が登録済みのワークスペースにしか到達できず、任意のワークスペースには到達できません。
+`WebUI URL`（`https://<your-worker>.workers.dev/dashboard/hub`）を開き、その共有 hub token でログインします（**単一ワークスペースの `gpt_token` ではここではログインできません**）。ログイン後は、この共有コネクタに登録されている全ワークスペース（`gpt-worker init` で追加され、ChatGPT の `list_workspaces` にも表示されるのと同じ一覧）を選択できるワークスペース一覧が表示され、選んだワークスペースについて単一ワークスペース用ダッシュボードと全く同じ閲覧・操作ができます。2つのログインは完全に別セッションです——ワークスペースのセッションで hub ダッシュボードに入ることはできず、hub のセッションでワークスペース自身のダッシュボード URL に直接ログインすることもできません。また hub 側は自身が登録済みのワークスペースにしか到達できず、任意のワークスペースには到達できません。
 
 できること・できないこと:
-- **できること**: キューに残っているメッセージやタスク履歴の閲覧（時系列タイムライン表示含む）、メッセージの確認（ack）や破棄（discard）、guidance（開発ルール）やメッセージ上限サイズの編集、ブラウザからの新規タスク投入（これらはワークスペース単位・hub 横断のどちらのダッシュボードからも操作可能です）。
-- **できないこと（現時点の仕様）**: ChatGPT Project URL（`chat-url`）の編集・表示（ローカルマシン側にのみ保存される設定のため）、リアルタイムのプッシュ通知（ダッシュボードは約10秒ごとの自動ポーリングで更新されますが、サーバーからの即時プッシュ配信ではありません）。
+- **できること**: キューに残っているメッセージやタスク履歴の閲覧（時系列タイムライン表示含む）、メッセージの確認（ack）や破棄（discard）、guidance（開発ルール）やメッセージ上限サイズの編集、ブラウザ設定（共有 Project URL・個別 override・会話 URL）の確認・編集・クリア、ブラウザからの新規タスク投入（これらはワークスペース単位・hub 横断のどちらのダッシュボードからも操作可能です）。
+- **できないこと（現時点の仕様）**: リアルタイムのプッシュ通知（ダッシュボードは約10秒ごとの自動ポーリングで更新されますが、サーバーからの即時プッシュ配信ではありません）。
 - データ保持期間は Worker 本体の仕様に準拠します（acked メッセージは7日後、完了したタスク履歴は30日後に自動消去）。
 
 ワークスペース単位のダッシュボードは、そのワークスペースの owner token をローテーションした場合（`gpt-worker rotate --gpt -w .`）、またはワークスペースを削除した場合（`gpt-worker remove -w . --yes`）にセッションが即座に無効化されます。hub ダッシュボードは、共有 hub token をローテーションした場合（`gpt-worker rotate --hub`）にセッションが即座に無効化されます——[データの保持期間](#データの保持期間)を参照してください。
@@ -439,7 +441,7 @@ gpt-worker remove -w /path/to/project --yes
 | コマンド | 説明 |
 |---|---|
 | `gpt-worker init -w <dir>` | プロジェクトを登録（初回は Worker をデプロイ） |
-| `gpt-worker url [-w <dir>]` | ChatGPT に登録する Server URL と認証トークンを表示（`-w` を付けるとそのワークスペース専用のコネクタ URL を表示） |
+| `gpt-worker url [-w <dir>]` | WebUI（ダッシュボード）URL、OAuth Server URL、認証トークンを表示（`-w` を付けるとそのワークスペース専用 URL を表示） |
 | `gpt-worker start -w <dir>` | ローカルブリッジ（通信プロセス）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
 | `gpt-worker status -w <dir>` | ブリッジの稼働状況とタスク状態を確認 |

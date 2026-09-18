@@ -472,7 +472,8 @@ async function cmdUrl(args) {
       console.error(`Failed to retrieve owner token: ${res.error || "not provisioned"}`);
       process.exit(1);
     }
-    console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp/${tokens.workspaceId}
+    console.log(`WebUI URL:         ${worker.workerUrl}/dashboard/${tokens.workspaceId}
+OAuth Server URL:  ${worker.workerUrl}/mcp/${tokens.workspaceId}
 OAuth owner token: ${gptToken}
 Rotate the owner token with: gpt-worker rotate --gpt -w ${root}`);
     return;
@@ -490,7 +491,8 @@ Rotate the owner token with: gpt-worker rotate --gpt -w ${root}`);
     process.exit(1);
   }
 
-  console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp
+  console.log(`WebUI URL:         ${worker.workerUrl}/dashboard/hub
+OAuth Server URL:  ${worker.workerUrl}/mcp
 OAuth owner token: ${hubGptToken}
 Rotate the owner token with: gpt-worker rotate --hub`);
 }

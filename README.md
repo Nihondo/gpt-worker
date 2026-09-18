@@ -311,26 +311,28 @@ Your Cloudflare Worker also serves a browser dashboard — a kanban-style view o
 
 ```bash
 gpt-worker url -w .
+# WebUI URL:         https://<your-worker>.workers.dev/dashboard/<workspace_id>
 # OAuth Server URL:  https://<your-worker>.workers.dev/mcp/<workspace_id>
 # OAuth owner token: <gpt_token>
 ```
 
-Open `https://<your-worker>.workers.dev/dashboard/<workspace_id>` and log in with that same owner token (the `gpt_token` shown above for that workspace — **not** the shared hub token; that one is rejected here). Login exchanges the token for a 24-hour browser session (an `HttpOnly`/`Secure` cookie scoped to that workspace's own dashboard path) — the owner token itself is never sent again after that.
+Open the `WebUI URL` (`https://<your-worker>.workers.dev/dashboard/<workspace_id>`) and log in with that same owner token (the `gpt_token` shown above for that workspace — **not** the shared hub token; that one is rejected here). Login exchanges the token for a 24-hour browser session (an `HttpOnly`/`Secure` cookie scoped to that workspace's own dashboard path) — the owner token itself is never sent again after that.
 
 **Every registered workspace at once**, with the shared hub token:
 
 ```bash
 gpt-worker url
+# WebUI URL:         https://<your-worker>.workers.dev/dashboard/hub
 # OAuth Server URL:  https://<your-worker>.workers.dev/mcp
 # OAuth owner token: <hub_gpt_token>
 ```
 
-Open `https://<your-worker>.workers.dev/dashboard/hub` and log in with that shared hub token (**not** a single workspace's `gpt_token`; that one is rejected here). After login you get a workspace picker listing every workspace registered with this shared connector (the same set `gpt-worker init` adds you to and `list_workspaces` shows ChatGPT); selecting one gives you the exact same view/actions as that workspace's own dashboard above. The two logins are entirely separate sessions — a workspace session can't reach the hub dashboard and a hub session can't directly authenticate a workspace's own dashboard URL — and the hub only ever reaches a workspace_id it has registered, never an arbitrary one.
+Open the `WebUI URL` (`https://<your-worker>.workers.dev/dashboard/hub`) and log in with that shared hub token (**not** a single workspace's `gpt_token`; that one is rejected here). After login you get a workspace picker listing every workspace registered with this shared connector (the same set `gpt-worker init` adds you to and `list_workspaces` shows ChatGPT); selecting one gives you the exact same view/actions as that workspace's own dashboard above. The two logins are entirely separate sessions — a workspace session can't reach the hub dashboard and a hub session can't directly authenticate a workspace's own dashboard URL — and the hub only ever reaches a workspace_id it has registered, never an arbitrary one.
 
 What it can and can't do:
-- **Can**: view queued messages and task history (including a chronological timeline), ack or discard messages, edit guidance rules and message body limits, and queue new tasks directly from your browser (available from either the single-workspace or hub dashboard).
-- **Can't** (by design): edit or display the ChatGPT Project URL (`chat-url`, which is stored locally on the bridge machine, not on the Worker), or provide WebSocket-based instant push updates (the dashboard automatically polls approximately every 10 seconds).
-- Follows standard retention policies: an acked message is removed after 7 days, and completed task history after 30 days.
+- **Can do**: browse pending messages and full task exchange history with timestamps, ack or discard messages, view and edit guidance or body limits, view/edit/clear browser settings (shared ChatGPT Project URL, workspace override, conversation URL), start new tasks from the browser (available from both the per-workspace and hub dashboards).
+- **Can't do (current design)**: real-time push updates (the dashboard auto-polls every ~10s; it does not hold a WebSocket open to the browser).
+- Retention follows standard policies: an acked message is removed after 7 days, and completed task history after 30 days.
 
 A workspace's own dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`). A hub dashboard session is revoked immediately if you rotate the shared hub token (`gpt-worker rotate --hub`) — see [Data Retention](#data-retention).
 
@@ -440,7 +442,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | Command | Description |
 |---|---|
 | `gpt-worker init -w <dir>` | Register workspace (deploys Worker on first run) |
-| `gpt-worker url [-w <dir>]` | Display the Server URL and authentication token (`-w` displays a connector URL dedicated to that workspace) |
+| `gpt-worker url [-w <dir>]` | Display WebUI (dashboard) URL, OAuth Server URL, and owner token (`-w` displays URLs dedicated to that workspace) |
 | `gpt-worker start -w <dir>` | Start the local bridge process |
 | `gpt-worker stop -w <dir>` | Stop the local bridge process |
 | `gpt-worker status -w <dir>` | Check bridge process status and active task |
