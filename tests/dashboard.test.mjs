@@ -441,6 +441,7 @@ describe("dashboard: ack / discard / discard-task constraints", () => {
     const res = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/ack`, { messageId: toLocalId }, { cookie }), env);
     assert.equal((await res.json()).ok, true);
     assert.equal(doo.localList({}).messages.some((m) => m.message_id === toLocalId), false, "acked messages drop out of the unacked queue view");
+    assert.equal(doo.getTask("t1").protocol_state, "EXECUTING", "PLAN ack transitions task to EXECUTING");
   });
 
   test("discard of an active task's to_gpt message is refused in favor of discard-task", async () => {
@@ -485,6 +486,60 @@ describe("dashboard: ack / discard / discard-task constraints", () => {
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
     const res = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/discard`, { messageId: started.message_id }, { cookie }), env);
     assert.equal((await res.json()).ok, true);
+  });
+});
+
+describe("dashboard: complete-task and continue-task", () => {
+  test("complete-task transitions LOCAL_DECISION task to DONE", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localStartTask({ task_id: "t-dec", goal: "review task", text: "INIT" });
+    doo.queueNext("t-dec");
+    const sub = doo.queueSubmit({ task_id: "t-dec", iteration: 0, state: "DONE", body: "Looks good" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+    assert.equal(doo.getTask("t-dec").waiting_for, "LOCAL_DECISION");
+
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/complete-task`, { taskId: "t-dec" }, { cookie }), env);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).ok, true);
+
+    const task = doo.getTask("t-dec");
+    assert.equal(task.protocol_state, "DONE");
+    assert.equal(task.waiting_for, "none");
+    assert.equal(task.terminal_summary, "Looks good");
+  });
+
+  test("continue-task transitions LOCAL_DECISION task to EXECUTING and clears terminal_summary", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localStartTask({ task_id: "t-cont", goal: "review task", text: "INIT" });
+    doo.queueNext("t-cont");
+    const sub = doo.queueSubmit({ task_id: "t-cont", iteration: 0, state: "DONE", body: "Review points" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/continue-task`, { taskId: "t-cont" }, { cookie }), env);
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).ok, true);
+
+    const task = doo.getTask("t-cont");
+    assert.equal(task.protocol_state, "EXECUTING");
+    assert.equal(task.waiting_for, "none");
+    assert.equal(task.terminal_summary, null);
+  });
+
+  test("complete-task and continue-task reject task not in LOCAL_DECISION with INVALID_STATE", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localStartTask({ task_id: "t-wrong", goal: "running", text: "INIT" });
+
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res1 = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/complete-task`, { taskId: "t-wrong" }, { cookie }), env);
+    assert.equal((await res1.json()).error, "INVALID_STATE");
+
+    const res2 = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/continue-task`, { taskId: "t-wrong" }, { cookie }), env);
+    assert.equal((await res2.json()).error, "INVALID_STATE");
   });
 });
 
@@ -961,6 +1016,32 @@ describe("hub dashboard: relayed operations reach only the selected target works
     const ackRes = await worker.fetch(jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/ack`, { messageId: toLocalId }, { cookie }), env);
     assert.equal((await ackRes.json()).ok, true);
     assert.equal(doo.localList({}).messages.some((m) => m.message_id === toLocalId), false);
+
+    // complete-task through the hub
+    doo.localStartTask({ task_id: "t-dec-hub", goal: "review", text: "GOAL:\nreview", force: true });
+    doo.queueNext("t-dec-hub");
+    const subHubDone = doo.queueSubmit({ task_id: "t-dec-hub", iteration: 0, state: "DONE", body: "Review done" });
+    doo.localAck({ message_id: subHubDone.structuredContent.message_id });
+    assert.equal(doo.getTask("t-dec-hub").waiting_for, "LOCAL_DECISION");
+
+    const completeRes = await worker.fetch(jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/complete-task`, { taskId: "t-dec-hub" }, { cookie }), env);
+    assert.equal((await completeRes.json()).ok, true);
+    assert.equal(doo.getTask("t-dec-hub").protocol_state, "DONE");
+
+    // continue-task through the hub
+    doo.localStartTask({ task_id: "t-cont-hub", goal: "review2", text: "GOAL:\nreview2" });
+    doo.queueNext("t-cont-hub");
+    const subHubDone2 = doo.queueSubmit({ task_id: "t-cont-hub", iteration: 0, state: "DONE", body: "Review done 2" });
+    doo.localAck({ message_id: subHubDone2.structuredContent.message_id });
+
+    const continueRes = await worker.fetch(jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/continue-task`, { taskId: "t-cont-hub" }, { cookie }), env);
+    assert.equal((await continueRes.json()).ok, true);
+    assert.equal(doo.getTask("t-cont-hub").protocol_state, "EXECUTING");
+    assert.equal(doo.getTask("t-cont-hub").terminal_summary, null);
+
+    // workspace isolation: complete-task against unregistered workspace is 404
+    const unregRes = await worker.fetch(jsonReq(`/dashboard/hub/api/workspaces/unknownworkspace12/complete-task`, { taskId: "any" }, { cookie }), env);
+    assert.equal(unregRes.status, 404);
   });
 
   test("messages/tasks pagination cursor and query params are forwarded through the hub relay", async () => {
@@ -1502,5 +1583,28 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     const { env } = makeRealBridgeDoEnv();
     const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
     assertSelectionSnapshotContract(await res.text());
+  });
+
+  test("workspace and hub app.js render WAITING_LOCAL sub-states and LOCAL_DECISION action buttons", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
+    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
+
+    [workspaceJs, hubJs].forEach((js) => {
+      assert.match(js, /WAITING_LOCAL/);
+      assert.match(js, /LOCAL_PLAN_ACK/);
+      assert.match(js, /LOCAL_DONE_ACK/);
+      assert.match(js, /LOCAL_BLOCKED_ACK/);
+      assert.match(js, /LOCAL_DECISION/);
+      assert.match(js, /Complete task/);
+      assert.match(js, /Continue implementation/);
+      assert.match(js, /complete-task/);
+      assert.match(js, /continue-task/);
+      assert.match(js, /decision-actions/);
+      assert.doesNotMatch(js, /style:.*margin-top/);
+    });
+
+    assert.match(DASHBOARD_CSS, /\.decision-actions/);
   });
 });

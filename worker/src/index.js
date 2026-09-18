@@ -2262,24 +2262,16 @@ export class BridgeDO {
     }
 
     const now = Date.now();
-    if (state === "PLAN") {
-      this.sql.exec(
-        `UPDATE tasks SET protocol_state = 'EXECUTING', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
-        now,
-        task_id
-      );
-    } else {
-      this.sql.exec(
-        `UPDATE tasks
-         SET protocol_state = ?, waiting_for = ?, terminal_summary = ?, updated_at = ?
-         WHERE task_id = ?`,
-        state,
-        state === "BLOCKED" ? "USER" : "none",
-        body,
-        now,
-        task_id
-      );
-    }
+    const waitingFor = state === "PLAN" ? "LOCAL_PLAN_ACK" : state === "DONE" ? "LOCAL_DONE_ACK" : "LOCAL_BLOCKED_ACK";
+    this.sql.exec(
+      `UPDATE tasks
+       SET protocol_state = 'WAITING_LOCAL', waiting_for = ?, terminal_summary = ?, updated_at = ?
+       WHERE task_id = ?`,
+      waitingFor,
+      state === "PLAN" ? null : body,
+      now,
+      task_id
+    );
 
     const messageId = crypto.randomUUID();
     this.sql.exec(
@@ -2301,12 +2293,9 @@ export class BridgeDO {
   /** Past tasks that reached a terminal state (DONE/BLOCKED), newest first —
    *  lets GPT orient itself in a fresh conversation without depending
    *  solely on this Project's own (less reliable) memory. Lives entirely
-   *  in this queue's SQLite, so unlike the 7 workspace tools it works even
-   *  while the local bridge is offline. This checks `kind`, not `state`:
-   *  DONE/BLOCKED is a conclusion GPT itself already reached, regardless of
-   *  whether the local CLI has polled and acked it yet (a message can sit
-   *  'pending' for a while if the bridge was offline) — only an in-flight
-   *  PLAN (a different kind) isn't "history" yet. */
+   *  in this queue's SQLite, so unlike the workspace tools it works even
+   *  while the local bridge is offline. Returns terminal tasks (DONE/BLOCKED)
+   *  that have been acknowledged/finalized by the local side. */
   taskHistory(args) {
     const limit = Math.min(Math.max(Number(args && args.limit) || 20, 1), 100);
     const rows = this.sql
@@ -2553,6 +2542,8 @@ export class BridgeDO {
     if (name === "limits" && method === "GET") return json(this.localMaxBodyBytesGet(), 200, dashboardApiHeaders());
     if (name === "limits" && method === "POST") return json(await this.dashboardSetLimits(request), 200, dashboardApiHeaders());
     if (name === "ack" && method === "POST") return json(await this.dashboardAck(request), 200, dashboardApiHeaders());
+    if (name === "complete-task" && method === "POST") return json(await this.dashboardCompleteTask(request), 200, dashboardApiHeaders());
+    if (name === "continue-task" && method === "POST") return json(await this.dashboardContinueTask(request), 200, dashboardApiHeaders());
     if (name === "discard" && method === "POST") return json(await this.dashboardDiscard(request), 200, dashboardApiHeaders());
     if (name === "discard-task" && method === "POST") return json(await this.dashboardDiscardTask(request), 200, dashboardApiHeaders());
     if (name === "start-task" && method === "POST") return json(await this.dashboardStartTask(request), 200, dashboardApiHeaders());
@@ -2704,15 +2695,6 @@ export class BridgeDO {
     const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
     if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
     if (parsed.parseError || !parsed.value || typeof parsed.value.messageId !== "string") return { error: "INVALID_ARGS" };
-    const rows = this.sql.exec(`SELECT dir, task_id FROM msgs WHERE message_id = ?`, parsed.value.messageId).toArray();
-    if (rows.length === 0) return { error: "NOT_FOUND" };
-    const row = rows[0];
-    if (row.dir === "to_gpt") {
-      const task = this.getTask(row.task_id);
-      if (task && !["DONE", "BLOCKED"].includes(task.protocol_state)) {
-        return { error: "USE_DISCARD_TASK", message: "This message belongs to an active task; discard the task instead to keep protocol state consistent." };
-      }
-    }
     return this.localDiscard({ message_id: parsed.value.messageId });
   }
 
@@ -2724,6 +2706,20 @@ export class BridgeDO {
     if (!task) return { error: "NOT_FOUND" };
     if (["DONE", "BLOCKED"].includes(task.protocol_state)) return { error: "ALREADY_TERMINAL" };
     return this.localDiscardTask({ task_id: parsed.value.taskId });
+  }
+
+  async dashboardCompleteTask(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.taskId !== "string") return { error: "INVALID_ARGS" };
+    return this.localCompleteTask({ task_id: parsed.value.taskId });
+  }
+
+  async dashboardContinueTask(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.taskId !== "string") return { error: "INVALID_ARGS" };
+    return this.localContinueTask({ task_id: parsed.value.taskId });
   }
 
   /** The one path that creates a task from the dashboard — always through
@@ -3069,27 +3065,42 @@ export class BridgeDO {
         return json(this.localDiscardTask(body));
       case "discard":
         return json(this.localDiscard(body));
+      case "complete_task":
+        return json(this.localCompleteTask(body));
+      case "continue_task":
+        return json(this.localContinueTask(body));
       default:
         return json({ error: "UNKNOWN_OP" }, 400);
     }
   }
 
   /** Ad-hoc cleanup of one message by id, either direction — for manually
-   *  clearing test/abandoned entries found via `gpt-worker queue`. */
+   *  clearing test/abandoned entries found via `gpt-worker queue`.
+   *  Refuses messages belonging to active tasks to keep protocol state consistent;
+   *  callers must use localDiscardTask() instead. */
   localDiscard(body) {
-    if (typeof body.message_id !== "string") return { error: "INVALID_ARGS" };
+    if (typeof body?.message_id !== "string") return { error: "INVALID_ARGS" };
+    const rows = this.sql.exec(`SELECT dir, task_id FROM msgs WHERE message_id = ?`, body.message_id).toArray();
+    if (rows.length === 0) return { error: "NOT_FOUND" };
+    const row = rows[0];
+    const task = this.getTask(row.task_id);
+    if (task && !["DONE", "BLOCKED"].includes(task.protocol_state)) {
+      return {
+        error: "USE_DISCARD_TASK",
+        message: "This message belongs to an active task; discard the task instead to keep protocol state consistent.",
+      };
+    }
     this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ?`, body.message_id);
     return { ok: true };
   }
 
-  /** Marks every not-yet-acked to_gpt message for a task_id as acked, without
+  /** Marks every not-yet-acked message for a task_id as acked, without
    *  requiring a matching submit_plan. Used when `gpt-worker task --force`
-   *  replaces an unfinished task — otherwise the abandoned INIT/EXECUTED
-   *  would sit in the queue forever and next_task() could hand it to
-   *  ChatGPT ahead of the new task's message. */
+   *  replaces an unfinished task — otherwise the abandoned control messages
+   *  would sit in the queue forever. */
   localDiscardTask(body) {
     if (typeof body.task_id !== "string") return { error: "INVALID_ARGS" };
-    this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE dir = 'to_gpt' AND task_id = ? AND state != 'acked'`, body.task_id);
+    this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE task_id = ? AND state != 'acked'`, body.task_id);
     this.sql.exec(
       `UPDATE tasks
        SET protocol_state = 'BLOCKED', waiting_for = 'none', terminal_summary = 'Task replaced or discarded locally.', updated_at = ?
@@ -3364,9 +3375,86 @@ export class BridgeDO {
   }
 
   localAck(body) {
-    if (typeof body.message_id !== "string") return { error: "INVALID_ARGS" };
-    this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ? AND dir = 'to_local'`, body.message_id);
+    if (!body || typeof body.message_id !== "string") return { error: "INVALID_ARGS" };
+    const rows = this.sql
+      .exec(`SELECT * FROM msgs WHERE message_id = ? AND dir = 'to_local'`, body.message_id)
+      .toArray();
+    if (rows.length === 0) return { ok: true };
+    const msg = rows[0];
+    if (msg.state !== "acked") {
+      this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ? AND dir = 'to_local'`, body.message_id);
+    }
+
+    const task = this.getTask(msg.task_id);
+    if (
+      task &&
+      task.protocol_state === "WAITING_LOCAL" &&
+      task.iteration === msg.iteration
+    ) {
+      const now = Date.now();
+      if (msg.kind === "PLAN" && task.waiting_for === "LOCAL_PLAN_ACK") {
+        this.sql.exec(
+          `UPDATE tasks SET protocol_state = 'EXECUTING', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
+          now,
+          task.task_id
+        );
+      } else if (msg.kind === "BLOCKED" && task.waiting_for === "LOCAL_BLOCKED_ACK") {
+        this.sql.exec(
+          `UPDATE tasks SET protocol_state = 'BLOCKED', waiting_for = 'USER', updated_at = ? WHERE task_id = ?`,
+          now,
+          task.task_id
+        );
+      } else if (msg.kind === "DONE" && task.waiting_for === "LOCAL_DONE_ACK") {
+        if (msg.iteration >= 1) {
+          this.sql.exec(
+            `UPDATE tasks SET protocol_state = 'DONE', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
+            now,
+            task.task_id
+          );
+        } else {
+          this.sql.exec(
+            `UPDATE tasks SET protocol_state = 'WAITING_LOCAL', waiting_for = 'LOCAL_DECISION', updated_at = ? WHERE task_id = ?`,
+            now,
+            task.task_id
+          );
+        }
+      }
+    }
     return { ok: true };
+  }
+
+  localCompleteTask(body) {
+    const taskId = body && typeof body.task_id === "string" ? body.task_id : null;
+    if (!taskId) return { error: "INVALID_ARGS" };
+    const task = this.getTask(taskId);
+    if (!task) return { error: "NOT_FOUND" };
+    if (task.protocol_state !== "WAITING_LOCAL" || task.waiting_for !== "LOCAL_DECISION") {
+      return { error: "INVALID_STATE", state: task.protocol_state, waiting_for: task.waiting_for };
+    }
+    const now = Date.now();
+    this.sql.exec(
+      `UPDATE tasks SET protocol_state = 'DONE', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
+      now,
+      taskId
+    );
+    return { ok: true, task: this.taskView(this.getTask(taskId)) };
+  }
+
+  localContinueTask(body) {
+    const taskId = body && typeof body.task_id === "string" ? body.task_id : null;
+    if (!taskId) return { error: "INVALID_ARGS" };
+    const task = this.getTask(taskId);
+    if (!task) return { error: "NOT_FOUND" };
+    if (task.protocol_state !== "WAITING_LOCAL" || task.waiting_for !== "LOCAL_DECISION") {
+      return { error: "INVALID_STATE", state: task.protocol_state, waiting_for: task.waiting_for };
+    }
+    const now = Date.now();
+    this.sql.exec(
+      `UPDATE tasks SET protocol_state = 'EXECUTING', waiting_for = 'none', terminal_summary = NULL, updated_at = ? WHERE task_id = ?`,
+      now,
+      taskId
+    );
+    return { ok: true, task: this.taskView(this.getTask(taskId)) };
   }
 
   localStatus() {

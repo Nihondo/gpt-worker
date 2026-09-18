@@ -9,11 +9,39 @@ handoff, checking browser delivery, and running the local execution loop.
 ## State machine
 
 ```
-local: (no task) --task--> WAITING_PLAN --wait,PLAN--> EXECUTING --report--> WAITING_REVIEW --wait,DONE--> (cleared)
-                                                                                   |
-                                                                                   +--wait,PLAN--> EXECUTING (next iteration)
-                                                                                   |
-                                                                                   +--wait,BLOCKED--> BLOCKED (needs the user)
+local: (no task) --task--> WAITING_PLAN
+                              |
+                              +--GPT submit PLAN----------------> WAITING_LOCAL (LOCAL_PLAN_ACK)
+                              |                                     |
+                              |                                     +--local ack--> EXECUTING
+                              |                                                       |
+                              |                                 +---------------------+
+                              |                                 |
+                              |                                 +--report--> WAITING_REVIEW
+                              |                                                 |
+                              |                                                 +--GPT submit PLAN----------> WAITING_LOCAL (LOCAL_PLAN_ACK)
+                              |                                                 |                               |
+                              |                                                 |                               +--local ack--> EXECUTING (iter + 1)
+                              |                                                 |
+                              |                                                 +--GPT submit BLOCKED-------> WAITING_LOCAL (LOCAL_BLOCKED_ACK)
+                              |                                                 |                               |
+                              |                                                 |                               +--local ack--> BLOCKED (USER)
+                              |                                                 |
+                              |                                                 +--GPT submit DONE (iter>=1)-> WAITING_LOCAL (LOCAL_DONE_ACK)
+                              |                                                                                 |
+                              |                                                                                 +--local ack--> DONE
+                              |
+                              +--GPT submit DONE (iter 0)-------> WAITING_LOCAL (LOCAL_DONE_ACK)
+                              |                                     |
+                              |                                     +--local ack--> WAITING_LOCAL (LOCAL_DECISION)
+                              |                                                       |
+                              |                                                       +--complete--> DONE
+                              |                                                       |
+                              |                                                       +--continue--> EXECUTING (iter 0)
+                              |
+                              +--GPT submit BLOCKED-------------> WAITING_LOCAL (LOCAL_BLOCKED_ACK)
+                                                                    |
+                                                                    +--local ack--> BLOCKED (USER)
 ```
 
 Each round has one `iteration` number, shared by the local→GPT message and
@@ -21,7 +49,7 @@ GPT's reply to it:
 
 | iteration | local → GPT (`next_task`)     | GPT → local (`submit_plan`) |
 |-----------|--------------------------------|------------------------------|
-| 0         | `INIT` (the goal)               | `PLAN`                       |
+| 0         | `INIT` (the goal)               | `PLAN` (or review-only `DONE` / `BLOCKED`) |
 | 1         | `EXECUTED` (round 0's result)    | `PLAN` or `DONE` or `BLOCKED` |
 | 2         | `EXECUTED` (round 1's result)    | `PLAN` or `DONE` or `BLOCKED` |
 | …         | …                                | …                             |
@@ -177,13 +205,33 @@ Durable Object.
 
 ### DONE / BLOCKED (GPT → local)
 
-`submit_plan(state="DONE", body="<summary>")` ends the task; the Worker
-persists the terminal state and the local agent reports the summary to the
-user.
+When GPT submits `DONE` or `BLOCKED`, the task transitions to `WAITING_LOCAL`
+with `waiting_for` set to `LOCAL_DONE_ACK` or `LOCAL_BLOCKED_ACK`. The proposed
+summary or reason is staged in `terminal_summary`.
 
-`submit_plan(state="BLOCKED", body="<reason>")` means GPT cannot proceed
-without a decision only the user can make; the local agent surfaces the
-reason and waits.
+1. **`DONE` at iteration ≥ 1**:
+   When the local agent receives and acknowledges the message (`gpt-worker wait`),
+   the task transitions to `DONE` (`waiting_for: none`). The active task window is
+   closed, and the local agent reports the summary to the user.
+
+2. **`DONE` at iteration 0 (planning/review only)**:
+   When acknowledged, the task transitions to `WAITING_LOCAL` with
+   `waiting_for: LOCAL_DECISION`. Because the user or agent may want to execute
+   the recommendations or simply accept the review as complete, two actions are
+   available (via CLI or Dashboard):
+   - `gpt-worker complete` (`POST /api/complete-task`): Accept the review as final;
+     transitions the task to `DONE`.
+   - `gpt-worker continue` (`POST /api/continue-task`): Transition the task back to
+     `EXECUTING` and clear `terminal_summary`, allowing the local agent to implement
+     the changes and submit `gpt-worker report` (advancing to iteration 1) within
+     the same task. **Authority invariant**: `continue` is purely a state mechanism
+     for task continuity and grants no new authority to edit files. An agent must not
+     modify workspace files unless the original request authorized implementation or
+     the user subsequently authorized implementing the findings.
+
+3. **`BLOCKED`**:
+   When acknowledged, the task transitions to `BLOCKED` (`waiting_for: USER`).
+   The local agent surfaces the reason and waits for user guidance.
 
 ## Operating instructions
 

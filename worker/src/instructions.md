@@ -82,7 +82,7 @@ Reference files by path and symbol instead of quoting their contents: the receiv
 
 ## 9. Choose exactly one state
 PLAN — additional authorized work or validation is required; retain valid earlier decisions and specify the remaining work. Do not return PLAN merely because optional improvements or unrelated issues exist.
-DONE — the requested scope and necessary validation are complete. Planning-only and review-only tasks may be DONE without implementing their proposals; retain important findings, assumptions, and validation limitations in the summary.
+DONE — the requested scope and necessary validation are complete. Planning-only and review-only tasks may be DONE without implementing their proposals; retain important findings, assumptions, and validation limitations in the summary (the local side will choose whether to conclude the task or, if authorized by the user, continue into implementation).
 BLOCKED — a required decision, permission, input, inaccessible resource, or prerequisite prevents useful progress. State exactly what is missing and the smallest action needed to continue.
 
 ## 10. Submit

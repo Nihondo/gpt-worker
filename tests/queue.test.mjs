@@ -246,7 +246,9 @@ describe("queueSetTitle: current INIT lease only", () => {
     const doo = makeDO();
     const next = startAndLease(doo);
     doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "Remembered title" });
-    doo.queueSubmit({ task_id: "t1", iteration: 0, state: "DONE", body: "done" });
+    const sub = doo.queueSubmit({ task_id: "t1", iteration: 0, state: "DONE", body: "done" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+    doo.localCompleteTask({ task_id: "t1" });
     assert.equal(doo.taskView(doo.getTask("t1")).title, "Remembered title");
     assert.equal(doo.taskHistory({}).tasks[0].title, "Remembered title");
   });
@@ -260,10 +262,15 @@ describe("localAck / localDiscard / localDiscardTask", () => {
     assert.equal(doo.localList({ task_id: "t1" }).messages.length, 1);
   });
 
-  test("localDiscard clears a message regardless of direction", () => {
+  test("localDiscard clears a message regardless of direction when task is terminal", () => {
     const doo = makeDO();
     const enq = doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "x" });
-    doo.localDiscard({ message_id: enq.message_id });
+    // Active task check protects active tasks:
+    assert.equal(doo.localDiscard({ message_id: enq.message_id }).error, "USE_DISCARD_TASK");
+    // Once task is terminal, localDiscard succeeds regardless of direction (clears to_gpt):
+    doo.sql.exec("UPDATE tasks SET protocol_state = 'DONE' WHERE task_id = 't1'");
+    const res = doo.localDiscard({ message_id: enq.message_id });
+    assert.equal(res.ok, true);
     assert.equal(doo.localList({ task_id: "t1" }).messages.length, 0);
   });
 
@@ -289,10 +296,13 @@ describe("taskHistory", () => {
   test("includes acked DONE/BLOCKED, newest first, but not an in-flight PLAN", () => {
     const doo = makeDO();
     doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal 1" });
-    doo.queueSubmit({ task_id: "t1", iteration: 0, state: "DONE", body: "finished t1" });
+    const s1 = doo.queueSubmit({ task_id: "t1", iteration: 0, state: "DONE", body: "finished t1" });
+    doo.localAck({ message_id: s1.structuredContent.message_id });
+    doo.localCompleteTask({ task_id: "t1" });
 
     doo.localEnqueue({ kind: "INIT", task_id: "t2", iteration: 0, body: "goal 2" });
-    doo.queueSubmit({ task_id: "t2", iteration: 0, state: "PLAN", body: "still working on t2" });
+    const s2 = doo.queueSubmit({ task_id: "t2", iteration: 0, state: "PLAN", body: "still working on t2" });
+    doo.localAck({ message_id: s2.structuredContent.message_id });
 
     const history = doo.taskHistory({});
     assert.equal(history.tasks.length, 1);
@@ -305,7 +315,9 @@ describe("taskHistory", () => {
     const doo = makeDO();
     for (const t of ["a", "b", "c"]) {
       doo.localEnqueue({ kind: "INIT", task_id: t, iteration: 0, body: "x" });
-      doo.queueSubmit({ task_id: t, iteration: 0, state: "DONE", body: `done ${t}` });
+      const s = doo.queueSubmit({ task_id: t, iteration: 0, state: "DONE", body: `done ${t}` });
+      doo.localAck({ message_id: s.structuredContent.message_id });
+      doo.localCompleteTask({ task_id: t });
     }
     assert.equal(doo.taskHistory({ limit: 2 }).tasks.length, 2);
   });
@@ -319,7 +331,10 @@ describe("Worker-owned task state", () => {
     assert.equal(doo.activeTask().task_id, "t1");
 
     doo.queueNext("t1");
-    doo.queueSubmit({ task_id: "t1", iteration: 0, state: "PLAN", body: "implement" });
+    const subPlan = doo.queueSubmit({ task_id: "t1", iteration: 0, state: "PLAN", body: "implement" });
+    assert.equal(doo.activeTask().protocol_state, "WAITING_LOCAL");
+    assert.equal(doo.activeTask().waiting_for, "LOCAL_PLAN_ACK");
+    doo.localAck({ message_id: subPlan.structuredContent.message_id });
     assert.equal(doo.activeTask().protocol_state, "EXECUTING");
 
     const report = doo.localReportTask({ task_id: "t1", changed: 1, tests: "ok", text: "EXECUTED" });
@@ -327,7 +342,10 @@ describe("Worker-owned task state", () => {
     assert.equal(report.task.protocolState, "WAITING_REVIEW");
 
     doo.queueNext("t1");
-    doo.queueSubmit({ task_id: "t1", iteration: 1, state: "DONE", body: "complete" });
+    const subDone = doo.queueSubmit({ task_id: "t1", iteration: 1, state: "DONE", body: "complete" });
+    assert.equal(doo.activeTask().protocol_state, "WAITING_LOCAL");
+    assert.equal(doo.activeTask().waiting_for, "LOCAL_DONE_ACK");
+    doo.localAck({ message_id: subDone.structuredContent.message_id });
     assert.equal(doo.activeTask(), null);
     assert.deepEqual(doo.taskHistory({}).tasks[0], {
       task_id: "t1",
@@ -549,5 +567,266 @@ describe("alarm(): retention sweeps for msgs and tasks", () => {
 
     assert.equal(await doo.verifyDashboardSession(expired.raw), false);
     assert.equal(await doo.verifyDashboardSession(fresh.raw), true);
+  });
+});
+
+describe("WAITING_LOCAL and LOCAL_DECISION lifecycle", () => {
+  test("PLAN submission moves task to WAITING_LOCAL / LOCAL_PLAN_ACK and Ack moves to EXECUTING", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-plan", goal: "implement plan", text: "INIT" });
+    doo.queueNext("t-plan");
+    const sub = doo.queueSubmit({
+      task_id: "t-plan",
+      iteration: 0,
+      state: "PLAN",
+      body: "Here is the plan",
+    });
+    assert.ok(sub.structuredContent.message_id);
+
+    const taskMid = doo.getTask("t-plan");
+    assert.equal(taskMid.protocol_state, "WAITING_LOCAL");
+    assert.equal(taskMid.waiting_for, "LOCAL_PLAN_ACK");
+
+    // Local receives and acks the PLAN message
+    const msg = doo.localList({ task_id: "t-plan" }).messages.find((m) => m.dir === "to_local");
+    assert.ok(msg);
+    const ackRes = doo.localAck({ message_id: msg.message_id });
+    assert.equal(ackRes.ok, true);
+
+    const taskAfter = doo.getTask("t-plan");
+    assert.equal(taskAfter.protocol_state, "EXECUTING");
+    assert.equal(taskAfter.waiting_for, "none");
+  });
+
+  test("BLOCKED submission moves task to WAITING_LOCAL / LOCAL_BLOCKED_ACK and Ack moves to BLOCKED / USER", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-block", goal: "blocked task", text: "INIT" });
+    doo.queueNext("t-block");
+    const sub = doo.queueSubmit({
+      task_id: "t-block",
+      iteration: 0,
+      state: "BLOCKED",
+      body: "Need clarification",
+    });
+    assert.ok(sub.structuredContent.message_id);
+
+    const taskMid = doo.getTask("t-block");
+    assert.equal(taskMid.protocol_state, "WAITING_LOCAL");
+    assert.equal(taskMid.waiting_for, "LOCAL_BLOCKED_ACK");
+    assert.equal(taskMid.terminal_summary, "Need clarification");
+
+    const msg = doo.localList({ task_id: "t-block" }).messages.find((m) => m.dir === "to_local");
+    assert.ok(msg);
+    const ackRes = doo.localAck({ message_id: msg.message_id });
+    assert.equal(ackRes.ok, true);
+
+    const taskAfter = doo.getTask("t-block");
+    assert.equal(taskAfter.protocol_state, "BLOCKED");
+    assert.equal(taskAfter.waiting_for, "USER");
+  });
+
+  test("DONE submission at iter >= 1 moves to WAITING_LOCAL / LOCAL_DONE_ACK and Ack moves to DONE", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-done-iter1", goal: "implemented task", text: "INIT" });
+    doo.queueNext("t-done-iter1");
+    doo.queueSubmit({ task_id: "t-done-iter1", iteration: 0, state: "PLAN", body: "Plan" });
+    const planMsg = doo.localList({ task_id: "t-done-iter1" }).messages.find((m) => m.dir === "to_local");
+    doo.localAck({ message_id: planMsg.message_id });
+
+    // Local reports iteration 1
+    doo.localReportTask({ task_id: "t-done-iter1", changed: 1, tests: "ok", text: "Done implementation" });
+    doo.queueNext("t-done-iter1"); // leased by gpt
+
+    const sub = doo.queueSubmit({
+      task_id: "t-done-iter1",
+      iteration: 1,
+      state: "DONE",
+      body: "All verified and completed",
+    });
+    assert.ok(sub.structuredContent.message_id);
+
+    const taskMid = doo.getTask("t-done-iter1");
+    assert.equal(taskMid.protocol_state, "WAITING_LOCAL");
+    assert.equal(taskMid.waiting_for, "LOCAL_DONE_ACK");
+    assert.equal(taskMid.terminal_summary, "All verified and completed");
+
+    const msg = doo.localList({ task_id: "t-done-iter1" }).messages.find((m) => m.dir === "to_local" && m.state === "pending");
+    assert.ok(msg);
+    const ackRes = doo.localAck({ message_id: msg.message_id });
+    assert.equal(ackRes.ok, true);
+
+    const taskAfter = doo.getTask("t-done-iter1");
+    assert.equal(taskAfter.protocol_state, "DONE");
+    assert.equal(taskAfter.waiting_for, "none");
+    assert.equal(taskAfter.terminal_summary, "All verified and completed");
+  });
+
+  test("DONE submission at iter 0 (review-only) moves to LOCAL_DECISION on Ack, then can complete_task", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-review", goal: "review task", text: "INIT" });
+    doo.queueNext("t-review");
+    const sub = doo.queueSubmit({
+      task_id: "t-review",
+      iteration: 0,
+      state: "DONE",
+      body: "Review complete: looks good or please fix typo",
+    });
+    assert.ok(sub.structuredContent.message_id);
+
+    const taskMid = doo.getTask("t-review");
+    assert.equal(taskMid.protocol_state, "WAITING_LOCAL");
+    assert.equal(taskMid.waiting_for, "LOCAL_DONE_ACK");
+
+    const msg = doo.localList({ task_id: "t-review" }).messages.find((m) => m.dir === "to_local");
+    assert.ok(msg);
+    const ackRes = doo.localAck({ message_id: msg.message_id });
+    assert.equal(ackRes.ok, true);
+
+    const taskDecision = doo.getTask("t-review");
+    assert.equal(taskDecision.protocol_state, "WAITING_LOCAL");
+    assert.equal(taskDecision.waiting_for, "LOCAL_DECISION");
+    assert.equal(taskDecision.terminal_summary, "Review complete: looks good or please fix typo");
+
+    // Local chooses to complete task directly
+    const compRes = doo.localCompleteTask({ task_id: "t-review" });
+    assert.equal(compRes.ok, true);
+
+    const taskDone = doo.getTask("t-review");
+    assert.equal(taskDone.protocol_state, "DONE");
+    assert.equal(taskDone.waiting_for, "none");
+    assert.equal(taskDone.terminal_summary, "Review complete: looks good or please fix typo");
+  });
+
+  test("DONE submission at iter 0 moves to LOCAL_DECISION on Ack, then can continue_task to EXECUTING", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-continue", goal: "review then implement", text: "INIT" });
+    doo.queueNext("t-continue");
+    doo.queueSubmit({
+      task_id: "t-continue",
+      iteration: 0,
+      state: "DONE",
+      body: "Review finished. Implement suggestions.",
+    });
+
+    const msg = doo.localList({ task_id: "t-continue" }).messages.find((m) => m.dir === "to_local");
+    assert.ok(msg);
+    doo.localAck({ message_id: msg.message_id });
+
+    // Local chooses to continue task
+    const contRes = doo.localContinueTask({ task_id: "t-continue" });
+    assert.equal(contRes.ok, true);
+
+    const taskCont = doo.getTask("t-continue");
+    assert.equal(taskCont.protocol_state, "EXECUTING");
+    assert.equal(taskCont.waiting_for, "none");
+    assert.equal(taskCont.terminal_summary, null, "terminal_summary should be cleared on continue");
+
+    // Now local can report round 1 using the real localReportTask contract
+    const rep = doo.localReportTask({
+      task_id: "t-continue",
+      changed: 1,
+      tests: "All tests pass",
+      text: "Implemented suggested changes",
+    });
+    assert.equal(rep.task.iteration, 1);
+    assert.equal(rep.task.protocolState, "WAITING_REVIEW");
+    assert.equal(doo.getTask("t-continue").waiting_for, "GPT_REVIEW");
+  });
+
+  test("localCompleteTask and localContinueTask reject tasks not in LOCAL_DECISION", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-exec", goal: "in progress", text: "INIT" });
+
+    const badComp = doo.localCompleteTask({ task_id: "t-exec" });
+    assert.equal(badComp.error, "INVALID_STATE");
+
+    const badCont = doo.localContinueTask({ task_id: "t-exec" });
+    assert.equal(badCont.error, "INVALID_STATE");
+  });
+
+  test("duplicate localAck is idempotent and does not corrupt task state", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-idemp", goal: "idempotent test", text: "INIT" });
+    doo.queueNext("t-idemp");
+    doo.queueSubmit({
+      task_id: "t-idemp",
+      iteration: 0,
+      state: "PLAN",
+      body: "Plan",
+    });
+
+    const msg = doo.localList({ task_id: "t-idemp" }).messages.find((m) => m.dir === "to_local");
+    assert.ok(msg);
+    const firstAck = doo.localAck({ message_id: msg.message_id });
+    assert.equal(firstAck.ok, true);
+
+    const secondAck = doo.localAck({ message_id: msg.message_id });
+    assert.equal(secondAck.ok, true);
+
+    const task = doo.getTask("t-idemp");
+    assert.equal(task.protocol_state, "EXECUTING");
+  });
+
+  test("localAck on stale/wrong-iteration message does not overwrite newer task state", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-stale", goal: "stale test", text: "INIT" });
+    doo.queueNext("t-stale");
+    const subPlan = doo.queueSubmit({ task_id: "t-stale", iteration: 0, state: "PLAN", body: "Plan" });
+    doo.localAck({ message_id: subPlan.structuredContent.message_id });
+    // Advance task to iteration 1 WAITING_REVIEW
+    doo.localReportTask({ task_id: "t-stale", changed: 1, tests: "ok", text: "EXECUTED" });
+    assert.equal(doo.getTask("t-stale").iteration, 1);
+    assert.equal(doo.getTask("t-stale").protocol_state, "WAITING_REVIEW");
+
+    // Acking the old iteration 0 message again does not drag the task back to EXECUTING
+    const staleAck = doo.localAck({ message_id: subPlan.structuredContent.message_id });
+    assert.equal(staleAck.ok, true);
+    const task = doo.getTask("t-stale");
+    assert.equal(task.iteration, 1);
+    assert.equal(task.protocol_state, "WAITING_REVIEW");
+  });
+
+  test("localDiscard refuses to directly discard messages belonging to active tasks", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-protect", goal: "protected", text: "INIT" });
+    doo.queueNext("t-protect");
+    const sub = doo.queueSubmit({ task_id: "t-protect", iteration: 0, state: "PLAN", body: "Plan" });
+
+    // Active WAITING_LOCAL reply cannot be directly discarded
+    const badDiscard = doo.localDiscard({ message_id: sub.structuredContent.message_id });
+    assert.equal(badDiscard.error, "USE_DISCARD_TASK");
+    assert.equal(doo.getTask("t-protect").protocol_state, "WAITING_LOCAL");
+
+    // But after discarding the whole task, direct discard on any leftover is allowed
+    doo.localDiscardTask({ task_id: "t-protect" });
+    assert.equal(doo.getTask("t-protect").protocol_state, "BLOCKED");
+    const okDiscard = doo.localDiscard({ message_id: sub.structuredContent.message_id });
+    assert.equal(okDiscard.ok, true);
+  });
+
+  test("localDiscardTask automatically acks pending to_local messages in WAITING_LOCAL", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t-discard", goal: "will be discarded", text: "INIT" });
+    doo.queueNext("t-discard");
+    doo.queueSubmit({
+      task_id: "t-discard",
+      iteration: 0,
+      state: "PLAN",
+      body: "Plan",
+    });
+
+    assert.equal(doo.getTask("t-discard").protocol_state, "WAITING_LOCAL");
+    const discardRes = doo.localDiscardTask({ task_id: "t-discard" });
+    assert.equal(discardRes.ok, true);
+
+    // Unacked list is now empty
+    const unacked = doo.localList({ task_id: "t-discard" }).messages;
+    assert.equal(unacked.length, 0);
+
+    // DB inspection confirms all message rows are indeed acked
+    const stored = doo.sql.exec(`SELECT state FROM msgs WHERE task_id = 't-discard'`).toArray();
+    assert.ok(stored.length > 0, "should have stored messages");
+    assert.ok(stored.every((m) => m.state === "acked"), "all messages must be acked in DB");
+    assert.equal(doo.getTask("t-discard").protocol_state, "BLOCKED");
   });
 });

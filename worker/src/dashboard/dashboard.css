@@ -106,6 +106,7 @@ button:hover { filter: brightness(1.06); }
 .stage-connector { inline-size: 10px; block-size: 2px; background: #cbd0e6; }
 .stage-label { font-size: .72rem; color: var(--muted); margin-inline-start: 3px; }
 .stage-label.blocked { color: var(--danger); font-weight: 700; }
+.decision-actions { display: flex; flex-direction: row; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
 @media (max-width: 920px) {
   .dashboard-layout { grid-template-columns: 1fr; }
   .workspace-sidebar { position: static; }

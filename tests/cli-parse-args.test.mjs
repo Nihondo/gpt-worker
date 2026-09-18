@@ -61,6 +61,25 @@ describe("parseArgs", () => {
     assert.deepEqual(args._, ["some goal"]);
     assert.equal(args.force, true);
   });
+
+  test("parses options passed after complete or continue subcommands", () => {
+    // main() strips the command name before calling parseArgs(rest)
+    const completeArgs = parseArgs(["-w", "/tmp/x"]);
+    assert.equal(completeArgs.workspace, "/tmp/x");
+
+    const continueArgs = parseArgs(["-w", "/tmp/y"]);
+    assert.equal(continueArgs.workspace, "/tmp/y");
+  });
+});
+
+describe("complete and continue command dispatch", () => {
+  test("main() dispatches complete and continue and lists them in Usage", async () => {
+    const fs = await import("node:fs");
+    const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
+    assert.match(cliSource, /case "complete":\s*\n\s*return cmdComplete\(args\);/);
+    assert.match(cliSource, /case "continue":\s*\n\s*return cmdContinue\(args\);/);
+    assert.match(cliSource, /Usage: gpt-worker.*\|complete\|continue>/);
+  });
 });
 
 describe("buildChatOpenUrl", () => {

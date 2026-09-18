@@ -63,6 +63,13 @@
     if (t.protocolState === "WAITING_PLAN") return { node: "web", label: "Waiting for Web plan" };
     if (t.protocolState === "EXECUTING") return { node: "local", label: "Executing locally" };
     if (t.protocolState === "WAITING_REVIEW") return { node: "web", label: "Waiting for Web review" };
+    if (t.protocolState === "WAITING_LOCAL") {
+      if (t.waitingFor === "LOCAL_PLAN_ACK") return { node: "local", label: "Waiting for Local to receive plan" };
+      if (t.waitingFor === "LOCAL_DONE_ACK") return { node: "local", label: "Waiting for Local to receive completion" };
+      if (t.waitingFor === "LOCAL_BLOCKED_ACK") return { node: "local", label: "Waiting for Local to receive blocker" };
+      if (t.waitingFor === "LOCAL_DECISION") return { node: "local", label: "Waiting for Local decision" };
+      return { node: "local", label: "Waiting for Local" };
+    }
     if (t.protocolState === "DONE") return { node: null, label: "Done", terminal: true };
     if (t.protocolState === "BLOCKED") {
       return { node: null, label: t.waitingFor === "USER" ? "Blocked — needs user" : "Blocked", terminal: true, blocked: true };
@@ -389,9 +396,24 @@
     wrap.appendChild(renderStageIndicator(taskStage(t)));
     wrap.appendChild(renderTextSection("task-detail-goal", "Goal", t.goal));
     if (t.terminalSummary) {
-      wrap.appendChild(renderTextSection("task-detail-summary", "Terminal summary", t.terminalSummary));
+      var summaryHeading = (t.protocolState === "DONE" || t.protocolState === "BLOCKED") ? "Terminal summary" : "Proposed completion";
+      wrap.appendChild(renderTextSection("task-detail-summary", summaryHeading, t.terminalSummary));
     }
     wrap.appendChild(renderTaskHistory(t));
+    if (t.protocolState === "WAITING_LOCAL" && t.waitingFor === "LOCAL_DECISION") {
+      var actions = el("div", { className: "decision-actions" });
+      var completeBtn = el("button", { text: "Complete task" });
+      completeBtn.addEventListener("click", function () {
+        api("/api/complete-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
+      });
+      actions.appendChild(completeBtn);
+      var continueBtn = el("button", { text: "Continue implementation" });
+      continueBtn.addEventListener("click", function () {
+        api("/api/continue-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
+      });
+      actions.appendChild(continueBtn);
+      wrap.appendChild(actions);
+    }
     if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
       var discardBtn = el("button", { className: "danger", text: "Discard task" });
       discardBtn.addEventListener("click", function () {
@@ -488,17 +510,15 @@
     if (m.dir === "to_local" && m.state !== "acked") {
       var ackBtn = el("button", { text: "Ack" });
       ackBtn.addEventListener("click", function () {
-        // Not .then(loadMessages) — that would pass the resolved {ok,status,body}
-        // object through as loadMessages(more), which loadMessages() treats as a
-        // truthy "load more" flag (skips clearing the list, and may fetch the
-        // next cursor page instead of refreshing the first page).
         api("/api/ack", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId: m.messageId }) }).then(function () {
           loadMessages(false);
+          loadOverview();
+          loadTasks(false);
         });
       });
       wrap.appendChild(ackBtn);
     }
-    var canDiscardDirectly = m.state !== "acked" && !(m.dir === "to_gpt" && state.activeTaskId === m.taskId);
+    var canDiscardDirectly = m.state !== "acked" && !(state.activeTaskId === m.taskId);
     if (canDiscardDirectly) {
       var discardBtn = el("button", { className: "danger", text: "Discard" });
       discardBtn.addEventListener("click", function () {
@@ -511,7 +531,7 @@
         });
       });
       wrap.appendChild(discardBtn);
-    } else if (m.dir === "to_gpt" && m.state !== "acked" && state.activeTaskId === m.taskId) {
+    } else if (m.state !== "acked" && state.activeTaskId === m.taskId) {
       wrap.appendChild(el("span", { className: "note", text: "(part of the active task — use \"Discard task\" above)" }));
     }
     return wrap;

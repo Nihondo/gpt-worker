@@ -164,6 +164,7 @@ This records evidence; it does not run the command. ChatGPT reads it through `ex
 
 - **PLAN:** repeat authorized execution and review without requiring the user to prompt each round.
 - **DONE:** check that the requested deliverable and necessary validation are actually complete, then summarize the outcome and any limitations. Distinguish ChatGPT's review from tests performed locally.
+  - For review-only or planning-only tasks (iteration 0), receiving DONE leaves the task in `WAITING_LOCAL` (`LOCAL_DECISION`). Run `gpt-worker complete -w <workspace>` to finalize the task. `continue` grants no new authority: do not edit files or run `continue` unless the original request authorized implementation or the user subsequently authorized implementing findings. If authorized, run `gpt-worker continue -w <workspace>` to return the task to `EXECUTING` and proceed with implementation.
 - **BLOCKED:** present the specific blocker and decision or missing input. Preserve completed work and the information needed to resume.
 
 If successive rounds repeat the same issue without progress, diagnose the cause and surface a concrete blocker. Do not add an arbitrary round-count approval gate while useful, authorized progress continues. If the user explicitly stops or changes the workflow, honor that and state which review remains incomplete.
@@ -212,6 +213,7 @@ gpt-worker state -w <workspace>
 | Observed state | Action |
 |---|---|
 | `WAITING_PLAN` | Run `wait`; do not create another task. |
+| `WAITING_LOCAL` | A reply is staged or pending acknowledgement. Run `wait` to receive it. If `waiting_for` is `LOCAL_DECISION`, run `gpt-worker complete -w <workspace>` to finalize the review as done, or `gpt-worker continue -w <workspace>` (only if authorized to implement) to transition back to `EXECUTING`. |
 | `EXECUTING` | If the PLAN reply is still pending (`status` shows `to_local` messages), receive it with `wait`. Otherwise continue the received PLAN, or report completed work if not yet reported. Recover lost PLAN text from the previous tool response/session record: `state` contains metadata, not the body, and `wait` cannot replay an acknowledged PLAN. If it is unrecoverable, report that limitation and request a fresh PLAN without inventing one. |
 | `WAITING_REVIEW` | Run `wait`; do not repeat `report`. |
 | No active task, but a final reply may be pending | Run `wait` once to drain queued DONE/BLOCKED before starting new work. Terminal tasks disappear from active `state`; an empty active state is not a completion summary. |
