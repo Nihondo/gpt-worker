@@ -1137,7 +1137,8 @@ describe("dashboard: Text-module asset extraction", () => {
 // ---------------------------------------------------------------------------
 // UX redesign (docs/plans/dashboard-ux-redesign.md): Activity/Settings tabs,
 // Tasks/Messages sub-tabs, list-pane -> detail-pane split, truncation with
-// "Read more", and the [Web]-[Hub]-[Local] stage indicator. Frontend-only —
+// compact list rows, full detail text, and the [Web]-[Hub]-[Local] stage
+// indicator. Frontend-only —
 // no dashboardApiDispatch/auth/CSRF/rate-limit/pagination/retention change,
 // so this block only pins markup/source-level contracts on top of the
 // existing suites above (all of which must remain green unmodified).
@@ -1317,39 +1318,52 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     assertStageMappingPresent(await res.text());
   });
 
-  // Unicode-safe truncation: must slice on code points (Array.from), not
-  // UTF-16 code units, so a surrogate pair is never split in half.
+  // Unicode-safe list truncation: must slice on code points (Array.from),
+  // not UTF-16 code units, so a surrogate pair is never split in half.
   function assertTruncationContract(js) {
     assert.match(js, /LIST_PREVIEW_CHARS\s*=\s*180/);
-    assert.match(js, /DETAIL_PREVIEW_CHARS\s*=\s*1200/);
     const fnIdx = js.indexOf("function truncateText(value, maxChars)");
     assert.ok(fnIdx >= 0, "truncateText(value, maxChars) must exist");
     const fnBody = js.slice(fnIdx, fnIdx + 400);
     assert.match(fnBody, /Array\.from\(/, "must slice on code points via Array.from, not a raw UTF-16 .slice()");
   }
 
-  test("workspace app.js defines the 180/1200-char, code-point-safe truncation contract", async () => {
+  test("workspace app.js defines a 180-char, code-point-safe list truncation contract", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
     assertTruncationContract(await res.text());
   });
 
-  test("hub app.js defines the 180/1200-char, code-point-safe truncation contract", async () => {
+  test("hub app.js defines a 180-char, code-point-safe list truncation contract", async () => {
     const { env } = makeRealBridgeDoEnv();
     const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
     assertTruncationContract(await res.text());
   });
 
-  // Read more/Show less accessibility contract: aria-expanded paired with
-  // aria-controls, per docs/plans/dashboard-ux-redesign.md Phase 4.
-  test("workspace app.js's expandable sections wire aria-expanded/aria-controls, never innerHTML", async () => {
+  test("detail panes show the full text without redundant Read more controls", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
+    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
+    [workspaceJs, hubJs].forEach((js) => {
+      assert.match(js, /function renderTextSection\(containerId, label, fullText\)/);
+      assert.doesNotMatch(js, /function renderExpandable\(/);
+      assert.doesNotMatch(js, /DETAIL_PREVIEW_CHARS/);
+      assert.doesNotMatch(js, /Read more/);
+    });
+  });
+
+  test("hub workspace navigator renders only name and an activity badge", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
     const js = await res.text();
-    assert.match(js, /setAttribute\("aria-expanded"/);
-    assert.match(js, /setAttribute\("aria-controls"/);
+    const start = js.indexOf("function renderWorkspaceList(data)");
+    const listFn = js.slice(start, js.indexOf("function loadWorkspaceList()", start));
+    assert.match(listFn, /className: "workspace-choice"/);
+    assert.match(listFn, /status = w\.overview\.activeTask \? "In progress" : "Idle"/);
+    assert.doesNotMatch(listFn, /to ChatGPT/);
+    assert.doesNotMatch(listFn, /to local/);
   });
 
   // Selection-snapshot contract (docs/plans/dashboard-ux-redesign.md's

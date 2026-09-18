@@ -5,7 +5,6 @@
   var base = "/dashboard/" + workspaceId;
   var POLL_MS = 10000;
   var LIST_PREVIEW_CHARS = 180;
-  var DETAIL_PREVIEW_CHARS = 1200;
 
   function api(path, options) {
     return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
@@ -125,7 +124,6 @@
     selectedTask: null, selectedMessage: null,
     selectedTaskRowEl: null, selectedMessageRowEl: null,
     activitySubview: "tasks",
-    detailExpanded: { goal: false, terminalSummary: false, body: false },
   };
 
   document.getElementById("logout-btn").addEventListener("click", function () {
@@ -252,24 +250,15 @@
     });
     return btn;
   }
-  // Read more / Show less for one long text field. `expanded` is the
-  // *current* boolean from state.detailExpanded — callers re-render the
-  // whole detail section on toggle rather than mutating this node in place.
-  function renderExpandable(containerId, label, fullText, expanded, onToggle) {
-    var trunc = truncateText(fullText, DETAIL_PREVIEW_CHARS);
+  // Detail text remains fully available in its own scrollable pane. Unlike
+  // the compact list preview, it deliberately has no expansion control.
+  function renderTextSection(containerId, label, fullText) {
     var wrap = el("div", { className: "detail-section" });
     if (label) wrap.appendChild(el("h3", { text: label }));
     var body = el("pre", { className: "detail-body" });
     body.id = containerId;
-    body.textContent = expanded ? String(fullText == null ? "" : fullText) : trunc.text;
+    body.textContent = String(fullText == null ? "" : fullText);
     wrap.appendChild(body);
-    if (trunc.truncated) {
-      var btn = el("button", { className: "read-more-btn", text: expanded ? "Show less" : "Read more" });
-      btn.setAttribute("aria-expanded", expanded ? "true" : "false");
-      btn.setAttribute("aria-controls", containerId);
-      btn.addEventListener("click", onToggle);
-      wrap.appendChild(btn);
-    }
     return wrap;
   }
 
@@ -281,9 +270,8 @@
     row.setAttribute("aria-selected", state.selectedTaskId === t.taskId ? "true" : "false");
     var head = el("div", { className: "row" });
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
-    head.appendChild(el("span", { className: "meta", text: t.taskId + " · iter " + t.iteration + " · " + fmtTime(t.updatedAt) }));
+    head.appendChild(el("span", { className: "meta", text: fmtTime(t.updatedAt) }));
     row.appendChild(head);
-    row.appendChild(renderStageIndicator(taskStage(t), { small: true }));
     row.appendChild(el("div", { className: "preview", text: truncateText(t.goal, LIST_PREVIEW_CHARS).text }));
     row.addEventListener("click", function () { selectTask(t, row); });
     return row;
@@ -298,15 +286,9 @@
     wrap.appendChild(head);
     wrap.appendChild(el("p", { className: "meta", text: "Iteration " + t.iteration + " · waiting for " + (t.waitingFor || "none") + " · started " + fmtTime(t.taskStartedAt) + " · updated " + fmtTime(t.updatedAt) }));
     wrap.appendChild(renderStageIndicator(taskStage(t)));
-    wrap.appendChild(renderExpandable("task-detail-goal", "Goal", t.goal, state.detailExpanded.goal, function () {
-      state.detailExpanded.goal = !state.detailExpanded.goal;
-      renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
-    }));
+    wrap.appendChild(renderTextSection("task-detail-goal", "Goal", t.goal));
     if (t.terminalSummary) {
-      wrap.appendChild(renderExpandable("task-detail-summary", "Terminal summary", t.terminalSummary, state.detailExpanded.terminalSummary, function () {
-        state.detailExpanded.terminalSummary = !state.detailExpanded.terminalSummary;
-        renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
-      }));
+      wrap.appendChild(renderTextSection("task-detail-summary", "Terminal summary", t.terminalSummary));
     }
     if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
       var discardBtn = el("button", { className: "danger", text: "Discard task" });
@@ -327,7 +309,6 @@
     state.selectedTaskId = t.taskId;
     state.selectedTask = t;
     state.selectedTaskRowEl = rowEl || null;
-    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
     renderTasksList();
     renderDetailPane("tasks", renderTaskDetail(t));
     openDetail();
@@ -352,9 +333,7 @@
           var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
           if (fresh) {
             // Selected row still present on the refreshed first page: follow
-            // its latest content. detailExpanded is intentionally left
-            // as-is here (not reset) so a user's open "Read more" survives
-            // routine polling — only selectTask() resets it.
+            // its latest content.
             state.selectedTask = fresh;
             renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
           }
@@ -381,12 +360,9 @@
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false");
     var head = el("div", { className: "row" });
-    head.appendChild(el("span", { className: "badge", text: m.dir }));
-    head.appendChild(el("span", { className: "badge", text: m.kind }));
     head.appendChild(el("span", { className: "badge", text: m.state }));
+    head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
-    row.appendChild(renderStageIndicator(messageStage(m), { small: true }));
     row.appendChild(el("div", { className: "preview", text: truncateText(m.body, LIST_PREVIEW_CHARS).text }));
     row.addEventListener("click", function () { selectMessage(m, row); });
     return row;
@@ -402,10 +378,7 @@
     wrap.appendChild(head);
     wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
     wrap.appendChild(renderStageIndicator(messageStage(m)));
-    wrap.appendChild(renderExpandable("message-detail-body", "Body", m.body, state.detailExpanded.body, function () {
-      state.detailExpanded.body = !state.detailExpanded.body;
-      renderDetailPane("messages", renderMessageDetail(state.selectedMessage));
-    }));
+    wrap.appendChild(renderTextSection("message-detail-body", "Body", m.body));
     if (m.dir === "to_local" && m.state !== "acked") {
       var ackBtn = el("button", { text: "Ack" });
       ackBtn.addEventListener("click", function () {
@@ -442,7 +415,6 @@
     state.selectedMessageId = m.messageId;
     state.selectedMessage = m;
     state.selectedMessageRowEl = rowEl || null;
-    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
     renderMessagesList();
     renderDetailPane("messages", renderMessageDetail(m));
     openDetail();

@@ -3,7 +3,6 @@
   var HUB_BASE = "/dashboard/hub";
   var POLL_MS = 10000;
   var LIST_PREVIEW_CHARS = 180;
-  var DETAIL_PREVIEW_CHARS = 1200;
 
   function api(base, path, options) {
     return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
@@ -145,7 +144,6 @@
     selectedTask: null, selectedMessage: null,
     selectedTaskRowEl: null, selectedMessageRowEl: null,
     activitySubview: "tasks",
-    detailExpanded: { goal: false, terminalSummary: false, body: false },
   };
 
   document.getElementById("logout-btn").addEventListener("click", function () {
@@ -179,20 +177,17 @@
     clearEl(listEl);
     var workspaces = data.workspaces || [];
     workspaces.forEach(function (w) {
-      var item = el("div", { className: "item" });
-      var head = el("div", { className: "row" });
-      var nameBtn = el("button", { className: w.workspaceId === state.workspaceId ? "" : "secondary", text: w.name });
+      var item = el("div", { className: "workspace-item" });
+      var nameBtn = el("button", { className: "workspace-choice" + (w.workspaceId === state.workspaceId ? " selected" : ""), text: w.name });
       nameBtn.addEventListener("click", function () { selectWorkspace(w.workspaceId, w.name); });
-      head.appendChild(nameBtn);
-      head.appendChild(el("span", { className: "note", text: w.workspaceId }));
-      item.appendChild(head);
+      item.appendChild(nameBtn);
+      var status = "Idle";
       if (w.error) {
-        item.appendChild(el("p", { className: "error", text: "Unavailable: " + w.error }));
+        status = "Unavailable";
       } else if (w.overview) {
-        var line = el("p", { className: "meta" });
-        line.textContent = (w.overview.connected ? "connected" : "not connected") + " · to ChatGPT " + w.overview.pendingToGpt + " · to local " + w.overview.pendingToLocal + (w.overview.activeTask ? " · active: " + w.overview.activeTask.protocolState : "");
-        item.appendChild(line);
+        status = w.overview.activeTask ? "In progress" : "Idle";
       }
+      item.appendChild(el("span", { className: "workspace-status" + (status === "In progress" ? " active" : ""), text: status }));
       listEl.appendChild(item);
     });
     if (!workspaces.length) listEl.appendChild(el("p", { className: "note", text: "No workspaces registered yet." }));
@@ -218,7 +213,6 @@
     state.selectedMessage = null;
     state.selectedTaskRowEl = null;
     state.selectedMessageRowEl = null;
-    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
     detailEl.hidden = false;
     detailTitleEl.textContent = name + " (" + id + ")";
     clearEl(document.getElementById("messages-list"));
@@ -363,24 +357,15 @@
     });
     return btn;
   }
-  // Read more / Show less for one long text field. `expanded` is the
-  // *current* boolean from state.detailExpanded — callers re-render the
-  // whole detail section on toggle rather than mutating this node in place.
-  function renderExpandable(containerId, label, fullText, expanded, onToggle) {
-    var trunc = truncateText(fullText, DETAIL_PREVIEW_CHARS);
+  // Detail text remains fully available in its own scrollable pane. Unlike
+  // the compact list preview, it deliberately has no expansion control.
+  function renderTextSection(containerId, label, fullText) {
     var wrap = el("div", { className: "detail-section" });
     if (label) wrap.appendChild(el("h3", { text: label }));
     var body = el("pre", { className: "detail-body" });
     body.id = containerId;
-    body.textContent = expanded ? String(fullText == null ? "" : fullText) : trunc.text;
+    body.textContent = String(fullText == null ? "" : fullText);
     wrap.appendChild(body);
-    if (trunc.truncated) {
-      var btn = el("button", { className: "read-more-btn", text: expanded ? "Show less" : "Read more" });
-      btn.setAttribute("aria-expanded", expanded ? "true" : "false");
-      btn.setAttribute("aria-controls", containerId);
-      btn.addEventListener("click", onToggle);
-      wrap.appendChild(btn);
-    }
     return wrap;
   }
 
@@ -392,9 +377,8 @@
     row.setAttribute("aria-selected", state.selectedTaskId === t.taskId ? "true" : "false");
     var head = el("div", { className: "row" });
     head.appendChild(el("span", { className: "badge", text: t.protocolState }));
-    head.appendChild(el("span", { className: "meta", text: t.taskId + " · iter " + t.iteration + " · " + fmtTime(t.updatedAt) }));
+    head.appendChild(el("span", { className: "meta", text: fmtTime(t.updatedAt) }));
     row.appendChild(head);
-    row.appendChild(renderStageIndicator(taskStage(t), { small: true }));
     row.appendChild(el("div", { className: "preview", text: truncateText(t.goal, LIST_PREVIEW_CHARS).text }));
     row.addEventListener("click", function () { selectTask(t, id, gen, row); });
     return row;
@@ -409,15 +393,9 @@
     wrap.appendChild(head);
     wrap.appendChild(el("p", { className: "meta", text: "Iteration " + t.iteration + " · waiting for " + (t.waitingFor || "none") + " · started " + fmtTime(t.taskStartedAt) + " · updated " + fmtTime(t.updatedAt) }));
     wrap.appendChild(renderStageIndicator(taskStage(t)));
-    wrap.appendChild(renderExpandable("task-detail-goal", "Goal", t.goal, state.detailExpanded.goal, function () {
-      state.detailExpanded.goal = !state.detailExpanded.goal;
-      renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
-    }));
+    wrap.appendChild(renderTextSection("task-detail-goal", "Goal", t.goal));
     if (t.terminalSummary) {
-      wrap.appendChild(renderExpandable("task-detail-summary", "Terminal summary", t.terminalSummary, state.detailExpanded.terminalSummary, function () {
-        state.detailExpanded.terminalSummary = !state.detailExpanded.terminalSummary;
-        renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
-      }));
+      wrap.appendChild(renderTextSection("task-detail-summary", "Terminal summary", t.terminalSummary));
     }
     if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
       var discardBtn = el("button", { className: "danger", text: "Discard task" });
@@ -440,7 +418,6 @@
     state.selectedTaskId = t.taskId;
     state.selectedTask = t;
     state.selectedTaskRowEl = rowEl || null;
-    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
     renderTasksList(id, gen);
     renderDetailPane("tasks", renderTaskDetail(t, id, gen));
     openDetail();
@@ -490,12 +467,9 @@
     row.setAttribute("role", "option");
     row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false");
     var head = el("div", { className: "row" });
-    head.appendChild(el("span", { className: "badge", text: m.dir }));
-    head.appendChild(el("span", { className: "badge", text: m.kind }));
     head.appendChild(el("span", { className: "badge", text: m.state }));
+    head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
-    row.appendChild(renderStageIndicator(messageStage(m), { small: true }));
     row.appendChild(el("div", { className: "preview", text: truncateText(m.body, LIST_PREVIEW_CHARS).text }));
     row.addEventListener("click", function () { selectMessage(m, id, gen, row); });
     return row;
@@ -511,10 +485,7 @@
     wrap.appendChild(head);
     wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
     wrap.appendChild(renderStageIndicator(messageStage(m)));
-    wrap.appendChild(renderExpandable("message-detail-body", "Body", m.body, state.detailExpanded.body, function () {
-      state.detailExpanded.body = !state.detailExpanded.body;
-      renderDetailPane("messages", renderMessageDetail(state.selectedMessage, id, gen));
-    }));
+    wrap.appendChild(renderTextSection("message-detail-body", "Body", m.body));
     if (m.dir === "to_local" && m.state !== "acked") {
       var ackBtn = el("button", { text: "Ack" });
       ackBtn.addEventListener("click", function () {
@@ -551,7 +522,6 @@
     state.selectedMessageId = m.messageId;
     state.selectedMessage = m;
     state.selectedMessageRowEl = rowEl || null;
-    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
     renderMessagesList(id, gen);
     renderDetailPane("messages", renderMessageDetail(m, id, gen));
     openDetail();
