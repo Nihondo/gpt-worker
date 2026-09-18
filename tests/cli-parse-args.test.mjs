@@ -23,6 +23,8 @@ import {
   workspaceConversationUrl,
   withoutWorkspaceChromeTab,
   workspaceChromeTabId,
+  loadChatSettings,
+  nudgeChatGpt,
 } from "../bridge/cli.mjs";
 
 describe("parseArgs", () => {
@@ -308,5 +310,27 @@ describe("selectWaitMessages", () => {
 
   test("drains final replies when terminal state has already cleared the active task", () => {
     assert.deepEqual(selectWaitMessages([done, plan]), [done, plan]);
+  });
+});
+
+describe("nudgeChatGpt conversation callback and tab separation", () => {
+  test("nudgeChatGpt is an async function that can be awaited without opening real Chrome tabs", async () => {
+    assert.equal(typeof nudgeChatGpt, "function");
+    let openCalled = false;
+    const p = nudgeChatGpt(
+      { chatUrl: "https://chatgpt.com/g/g-p-test/project" },
+      "task-1",
+      "ws-1",
+      {
+        log: () => {},
+        _openInChrome: () => {
+          openCalled = true;
+          return { submitted: true, reused: false, tabId: "123" };
+        },
+      }
+    );
+    assert.ok(p instanceof Promise);
+    await p;
+    assert.equal(openCalled, true);
   });
 });

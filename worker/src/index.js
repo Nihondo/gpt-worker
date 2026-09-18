@@ -261,7 +261,17 @@ async function handleAdminRoute(request, env, adminToken) {
   const peeked = await readJsonWithLimit(request.clone(), MAX_REQUEST_BYTES);
   if (peeked.tooLarge) return new Response("payload too large", { status: 413 });
   if (peeked.parseError || !peeked.value) return new Response("bad request", { status: 400 });
-  if (["provision_hub", "register_workspace", "unregister_workspace", "rotate_hub"].includes(peeked.value.op)) {
+  if (
+    [
+      "provision_hub",
+      "register_workspace",
+      "unregister_workspace",
+      "rotate_hub",
+      "hub_browser_settings_get",
+      "hub_browser_settings_set",
+      "hub_owner_token_get",
+    ].includes(peeked.value.op)
+  ) {
     const hub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(HUB_DO_NAME));
     const forwardUrl = new URL(request.url);
     forwardUrl.pathname = "/admin";
@@ -278,6 +288,65 @@ async function handleAdminRoute(request, env, adminToken) {
   const forwardUrl = new URL(request.url);
   forwardUrl.pathname = "/admin";
   return stub.fetch(new Request(forwardUrl, request));
+}
+
+const GIZMO_SEGMENT_PATTERN = /^g-p-([0-9a-f]{32})(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$/i;
+
+function stableGizmoId(segment) {
+  const match = GIZMO_SEGMENT_PATTERN.exec(String(segment ?? ""));
+  return match ? match[1].toLowerCase() : null;
+}
+
+function parseProjectUrl(rawUrl) {
+  if (typeof rawUrl !== "string") return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.username || parsed.password) return null;
+    if (parsed.protocol !== "https:") return null;
+    if (parsed.hostname !== "chatgpt.com") return null;
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/g\/([^/]+)\/project$/);
+    if (!match || !match[1]) return null;
+    return {
+      origin: parsed.origin,
+      projectSegment: match[1],
+      gizmoId: stableGizmoId(match[1]),
+      canonicalUrl: `${parsed.origin}/g/${match[1]}/project${parsed.search}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseConversationUrl(rawUrl) {
+  if (typeof rawUrl !== "string") return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.username || parsed.password) return null;
+    if (parsed.protocol !== "https:") return null;
+    if (parsed.hostname !== "chatgpt.com") return null;
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    const match = pathname.match(/^\/g\/([^/]+)\/c\/([^/]+)$/);
+    if (!match || !match[1] || !match[2]) return null;
+    return {
+      origin: parsed.origin,
+      projectSegment: match[1],
+      gizmoId: stableGizmoId(match[1]),
+      conversationId: match[2],
+      canonicalUrl: `${parsed.origin}/g/${match[1]}/c/${match[2]}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function areSameProject(projectInfo, conversationInfo) {
+  if (!projectInfo || !conversationInfo) return false;
+  if (projectInfo.origin !== conversationInfo.origin) return false;
+  if (projectInfo.gizmoId && conversationInfo.gizmoId) {
+    return projectInfo.gizmoId === conversationInfo.gizmoId;
+  }
+  return projectInfo.projectSegment === conversationInfo.projectSegment;
 }
 
 function randomHex(bytes) {
@@ -1288,6 +1357,10 @@ export class BridgeDO {
     if (parsed.parseError) return json({ error: "PARSE_ERROR" }, 400);
     const body = parsed.value || {};
     if (body.op === "provision_hub") return json(this.provisionHub());
+    if (body.op === "hub_browser_settings_get") return json(this.hubBrowserSettingsGet());
+    if (body.op === "hub_browser_settings_set") return json(this.hubBrowserSettingsSet(body));
+    if (body.op === "hub_owner_token_get") return json(this.hubOwnerTokenGet());
+    if (body.op === "owner_token_get") return json(this.ownerTokenGet());
     if (body.op === "register_workspace") return json(this.registerWorkspace(body));
     if (body.op === "unregister_workspace") return json(this.unregisterWorkspace(body));
     if (body.op === "rotate_hub") return json(this.rotateHubToken());
@@ -1296,6 +1369,50 @@ export class BridgeDO {
     if (body.op === "rotate") return json(this.rotateSecret(body.key));
     if (body.op === "deprovision") return json(this.deprovision());
     return json({ error: "UNKNOWN_OP" }, 400);
+  }
+
+  hubBrowserSettingsGet() {
+    if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
+    const rows = this.sql
+      .exec(
+        `SELECT k, v FROM settings WHERE k IN ('browser_chat_url_default', 'browser_chat_url_default_initialized')`
+      )
+      .toArray();
+    const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
+    return {
+      initialized: values.browser_chat_url_default_initialized === "1",
+      chatUrl: values.browser_chat_url_default ? values.browser_chat_url_default : null,
+    };
+  }
+
+  hubBrowserSettingsSet(body) {
+    if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
+    const { chatUrl } = body || {};
+    if (chatUrl !== undefined) {
+      if (chatUrl === null || chatUrl === "") {
+        this.setSetting("browser_chat_url_default", "");
+      } else {
+        const parsed = parseProjectUrl(chatUrl);
+        if (!parsed) {
+          return { error: "INVALID_ARGS", message: "invalid project url" };
+        }
+        this.setSetting("browser_chat_url_default", parsed.canonicalUrl);
+      }
+    }
+    this.setSetting("browser_chat_url_default_initialized", "1");
+    return this.hubBrowserSettingsGet();
+  }
+
+  hubOwnerTokenGet() {
+    const token = this.getSecret("hub_gpt_token");
+    if (!token) return { error: "NOT_PROVISIONED" };
+    return { gptToken: token };
+  }
+
+  ownerTokenGet() {
+    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
+    const token = this.getSecret("gpt_token");
+    return { gptToken: token };
   }
 
   /** Irreversibly wipes this workspace's tokens, queue, task state and settings — its Server URL
@@ -1363,6 +1480,7 @@ export class BridgeDO {
     this.setSecret("gpt_token", gptToken);
     this.setSecret("link_token", linkToken);
     this.setSecret("cli_token", cliToken);
+    this.setSetting("browser_settings_initialized", "1");
     return { gptToken, linkToken, cliToken };
   }
 
@@ -3043,6 +3161,10 @@ export class BridgeDO {
         return json(this.localSettingsGet());
       case "settings_set":
         return json(this.localSettingsSet(body));
+      case "browser_settings_get":
+        return json(this.localBrowserSettingsGet());
+      case "browser_settings_set":
+        return json(this.localBrowserSettingsSet(body));
       case "max_body_bytes_get":
         return json(this.localMaxBodyBytesGet());
       case "max_body_bytes_set":
@@ -3209,6 +3331,70 @@ export class BridgeDO {
     if (chatUrl !== undefined) this.setSetting("chat_url", chatUrl || "");
     if (enterDelayMs !== undefined) this.setSetting("enter_delay_ms", enterDelayMs === null ? "" : String(enterDelayMs));
     return this.localSettingsGet();
+  }
+
+  localBrowserSettingsGet() {
+    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
+    const rows = this.sql
+      .exec(
+        `SELECT k, v FROM settings WHERE k IN ('browser_chat_url_override', 'browser_conversation_url', 'browser_settings_initialized')`
+      )
+      .toArray();
+    const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
+    return {
+      initialized: values.browser_settings_initialized === "1",
+      chatUrlOverride: values.browser_chat_url_override ? values.browser_chat_url_override : null,
+      conversationUrl: values.browser_conversation_url ? values.browser_conversation_url : null,
+    };
+  }
+
+  localBrowserSettingsSet(body) {
+    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
+    const current = this.localBrowserSettingsGet();
+    const { chatUrlOverride, conversationUrl } = body || {};
+
+    let nextOverride = current.chatUrlOverride;
+    let overrideChanged = false;
+
+    if (chatUrlOverride !== undefined) {
+      if (chatUrlOverride === null || chatUrlOverride === "") {
+        if (current.chatUrlOverride !== null) {
+          nextOverride = null;
+          overrideChanged = true;
+        }
+      } else {
+        const parsed = parseProjectUrl(chatUrlOverride);
+        if (!parsed) return { error: "INVALID_ARGS", message: "invalid project url" };
+        if (current.chatUrlOverride !== parsed.canonicalUrl) {
+          nextOverride = parsed.canonicalUrl;
+          overrideChanged = true;
+        }
+      }
+    }
+
+    let nextConversation = current.conversationUrl;
+    if (conversationUrl !== undefined) {
+      if (conversationUrl === null || conversationUrl === "") {
+        nextConversation = null;
+      } else {
+        const parsedConv = parseConversationUrl(conversationUrl);
+        if (!parsedConv) return { error: "INVALID_ARGS", message: "invalid conversation url" };
+        if (nextOverride) {
+          const parsedProject = parseProjectUrl(nextOverride);
+          if (!areSameProject(parsedProject, parsedConv)) {
+            return { error: "INVALID_ARGS", message: "conversation does not match project override" };
+          }
+        }
+        nextConversation = parsedConv.canonicalUrl;
+      }
+    } else if (overrideChanged) {
+      nextConversation = null;
+    }
+
+    this.setSetting("browser_chat_url_override", nextOverride || "");
+    this.setSetting("browser_conversation_url", nextConversation || "");
+    this.setSetting("browser_settings_initialized", "1");
+    return this.localBrowserSettingsGet();
   }
 
   localGuidanceSet(body) {

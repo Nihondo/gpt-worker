@@ -21,7 +21,8 @@ import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import {
   readWorkerConfig, writeWorkerConfigAtomic, updateWorkerConfigAtomic, workerConfigPath,
-  readTokens, writeTokensAtomic,
+  readTokens, writeTokensAtomic, updateTokensAtomic,
+  stripLegacyWorkerConfigFields, stripLegacyWorkspaceGptToken,
   readState, clearLegacyState,
   writePidFile, checkPid, removePidFile,
   appendLog, recordsDir, fixPermissions,
@@ -48,7 +49,7 @@ export {
   buildChatOpenUrl, isChatGptUrl, workspaceChromeTabId, workspaceChatUrl, effectiveChatUrl,
   workspaceConversationUrl, safeBrowserConfig, withWorkspaceChromeTab, withoutWorkspaceChromeTab,
   withWorkspaceConversationUrl, withoutWorkspaceConversationUrl, withoutWorkspaceChatConversation,
-  withWorkspaceChatUrl, withoutWorkspaceChatUrl, withoutWorkspaceChatSettings, withChatUrl,
+  withWorkspaceChatUrl, withoutWorkspaceChatUrl, withoutWorkspaceChatSettings, withChatUrl, nudgeChatGpt,
 };
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -83,7 +84,7 @@ function workspaceRoot(args) {
   return fs.realpathSync(dir);
 }
 
-/** {workerUrl, adminToken, workspaceId, gptToken, linkToken, cliToken} for
+/** {workerUrl, adminToken, workspaceId, linkToken, cliToken} for
  *  one specific workspace — worker.json (shared) merged with that
  *  workspace's own tokens.json. Exits with a clear message if either half
  *  is missing, rather than letting a later network call fail confusingly. */
@@ -134,12 +135,9 @@ async function adminCall(worker, op, extra = {}) {
  * from workspace provisioning: adding a directory must never require another
  * ChatGPT Connector registration. */
 async function ensureSharedConnector(worker) {
-  if (worker.hubGptToken) return worker;
   const result = await adminCall(worker, "provision_hub");
-  if (result.error || !result.gptToken) throw new Error(`Failed to provision shared connector: ${result.error || "invalid response"}`);
-  const updated = { ...worker, hubGptToken: result.gptToken };
-  writeWorkerConfigAtomic(updated);
-  return updated;
+  if (result.error) throw new Error(`Failed to provision shared connector: ${result.error || "invalid response"}`);
+  return worker;
 }
 
 async function registerSharedWorkspace(worker, tokens, root) {
@@ -160,23 +158,156 @@ async function remoteActiveTask(cfg) {
   return result.task || null;
 }
 
-/** Move an existing per-workspace Project shortcut into the one shared local
- * config the first time that workspace is used after upgrading. New installs
- * never write these settings remotely. */
-async function sharedChatSettings(cfg) {
+export async function loadChatSettings(cfg) {
   let worker = readWorkerConfig();
-  if (!worker || worker.chatUrl) return worker;
-  const legacy = await localCall(cfg, "settings_get");
-  if (legacy.error || !legacy.chatUrl) return worker;
-  worker = updateWorkerConfigAtomic((current) => {
-    if (!current || current.chatUrl) return current;
-    return {
-      ...current,
-      chatUrl: legacy.chatUrl,
-      enterDelayMs: legacy.enterDelayMs,
-    };
-  });
-  return worker;
+  if (!worker) return null;
+
+  let hubRes = null;
+  try {
+    hubRes = await adminCall(worker, "hub_browser_settings_get");
+  } catch {}
+
+  let wsRes = null;
+  if (cfg) {
+    try {
+      wsRes = await localCall(cfg, "browser_settings_get");
+    } catch {}
+  }
+
+  let hubAuthorityEstablished = false;
+  let hubChatUrl = null;
+
+  // 1. Hub browser migration
+  if (hubRes && !hubRes.error) {
+    if (hubRes.initialized) {
+      hubAuthorityEstablished = true;
+      hubChatUrl = hubRes.chatUrl;
+      if (worker.chatUrl) {
+        worker = stripLegacyWorkerConfigFields({ stripChatUrl: true });
+      }
+    } else {
+      let seedChatUrl = worker.chatUrl || null;
+      let legacySettings = null;
+      if (!seedChatUrl && cfg) {
+        try {
+          legacySettings = await localCall(cfg, "settings_get");
+          if (legacySettings && !legacySettings.error && legacySettings.chatUrl) {
+            seedChatUrl = legacySettings.chatUrl;
+          }
+        } catch {}
+      }
+      if (legacySettings && !legacySettings.error && legacySettings.enterDelayMs && worker.enterDelayMs === undefined) {
+        worker = updateWorkerConfigAtomic((c) => ({ ...c, enterDelayMs: legacySettings.enterDelayMs }));
+      }
+      const setPayload = seedChatUrl ? { chatUrl: seedChatUrl } : {};
+      try {
+        const setRes = await adminCall(worker, "hub_browser_settings_set", setPayload);
+        if (setRes && !setRes.error && setRes.initialized) {
+          hubAuthorityEstablished = true;
+          hubChatUrl = setRes.chatUrl;
+          worker = stripLegacyWorkerConfigFields({ stripChatUrl: true });
+        }
+      } catch {}
+    }
+  }
+
+  if (!hubAuthorityEstablished) {
+    hubChatUrl = worker.chatUrl || null;
+  }
+
+  let wsAuthorityEstablished = false;
+  let override = null;
+  let conversation = null;
+
+  // 2. Workspace browser migration
+  if (cfg) {
+    const wsId = cfg.workspaceId;
+    if (wsRes && !wsRes.error) {
+      if (wsRes.initialized) {
+        wsAuthorityEstablished = true;
+        override = wsRes.chatUrlOverride;
+        conversation = wsRes.conversationUrl;
+        if (worker.chatUrlsByWorkspace?.[wsId] || worker.conversationUrlsByWorkspace?.[wsId]) {
+          worker = stripLegacyWorkerConfigFields({ workspaceIdToStrip: wsId });
+        }
+      } else {
+        const localOverride = worker.chatUrlsByWorkspace?.[wsId] || null;
+        const localConv = worker.conversationUrlsByWorkspace?.[wsId] || null;
+        const effectiveProj = localOverride || hubChatUrl || null;
+        let validConv = null;
+        if (localConv && effectiveProj) {
+          validConv = chatGptConversationUrl(localConv, effectiveProj);
+        }
+        try {
+          const setRes = await localCall(cfg, "browser_settings_set", {
+            chatUrlOverride: localOverride,
+            conversationUrl: validConv,
+          });
+          if (setRes && !setRes.error && setRes.initialized) {
+            wsAuthorityEstablished = true;
+            override = setRes.chatUrlOverride;
+            conversation = setRes.conversationUrl;
+            worker = stripLegacyWorkerConfigFields({ workspaceIdToStrip: wsId });
+          }
+        } catch {}
+      }
+    }
+
+    if (!wsAuthorityEstablished) {
+      override = worker.chatUrlsByWorkspace?.[wsId] || null;
+      conversation = worker.conversationUrlsByWorkspace?.[wsId] || null;
+    }
+  }
+
+  // 3. Owner token migration (hub)
+  if (worker.hubGptToken && hubRes && !hubRes.error) {
+    try {
+      const tokenRes = await adminCall(worker, "hub_owner_token_get");
+      if (tokenRes && !tokenRes.error && tokenRes.gptToken) {
+        worker = stripLegacyWorkerConfigFields({ stripHubGptToken: true });
+      }
+    } catch {}
+  }
+
+  // 4. Owner token migration (workspace)
+  if (cfg && cfg.workspacePath) {
+    const tokens = readTokens(cfg.workspacePath);
+    if (tokens && tokens.gptToken) {
+      try {
+        const tokenRes = await adminCall(worker, "owner_token_get", { workspace_id: cfg.workspaceId });
+        if (tokenRes && !tokenRes.error && tokenRes.gptToken) {
+          stripLegacyWorkspaceGptToken(cfg.workspacePath);
+        }
+      } catch {}
+    }
+  }
+
+  const effectiveProj = override || hubChatUrl;
+  let validConv = null;
+  if (conversation && effectiveProj) {
+    validConv = chatGptConversationUrl(conversation, effectiveProj);
+  }
+
+  return {
+    ...worker,
+    chatUrl: hubChatUrl,
+    ...(cfg
+      ? {
+          chatUrlsByWorkspace: {
+            ...(worker.chatUrlsByWorkspace || {}),
+            [cfg.workspaceId]: override,
+          },
+          conversationUrlsByWorkspace: {
+            ...(worker.conversationUrlsByWorkspace || {}),
+            [cfg.workspaceId]: validConv,
+          },
+        }
+      : {}),
+  };
+}
+
+export async function sharedChatSettings(cfg) {
+  return loadChatSettings(cfg);
 }
 
 /** Import the pre-Worker-source-of-truth checkpoint once, then remove it.
@@ -224,6 +355,7 @@ async function cmdInit(args) {
   if (worker && existingTokens && !args.force) {
     worker = await ensureSharedConnector(worker);
     await registerSharedWorkspace(worker, existingTokens, root);
+    await loadChatSettings({ workerUrl: worker.workerUrl, adminToken: worker.adminToken, ...existingTokens, workspacePath: root });
     console.log(`Already provisioned for this workspace.`);
     console.log(`OAuth Server URL: ${worker.workerUrl}/mcp`);
     console.log("(Also available any time via: gpt-worker url -w " + root + ")");
@@ -283,7 +415,7 @@ async function cmdInit(args) {
     console.error(`Failed to provision workspace: ${result.error}`);
     process.exit(1);
   }
-  const tokens = { workspaceId, gptToken: result.gptToken, linkToken: result.linkToken, cliToken: result.cliToken, workspacePath: root };
+  const tokens = { workspaceId, linkToken: result.linkToken, cliToken: result.cliToken, workspacePath: root };
   writeTokensAtomic(root, tokens);
   await registerSharedWorkspace(worker, tokens, root);
 
@@ -309,9 +441,9 @@ need another ChatGPT URL, connector, or Project.
 `);
 }
 
-function cmdUrl(args) {
+async function cmdUrl(args) {
   const worker = readWorkerConfig();
-  if (!worker || !worker.hubGptToken) {
+  if (!worker) {
     console.error("Shared connector is not initialized. Run: gpt-worker init -w <workspace>");
     process.exit(1);
   }
@@ -329,14 +461,37 @@ function cmdUrl(args) {
       console.error(`This workspace isn't provisioned yet. Run: gpt-worker init -w ${root}`);
       process.exit(1);
     }
+    let gptToken = null;
+    const res = await adminCall(worker, "owner_token_get", { workspace_id: tokens.workspaceId });
+    if (!res.error && res.gptToken) {
+      gptToken = res.gptToken;
+      stripLegacyWorkspaceGptToken(root);
+    } else if (tokens.gptToken) {
+      gptToken = tokens.gptToken;
+    } else {
+      console.error(`Failed to retrieve owner token: ${res.error || "not provisioned"}`);
+      process.exit(1);
+    }
     console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp/${tokens.workspaceId}
-OAuth owner token: ${tokens.gptToken}
+OAuth owner token: ${gptToken}
 Rotate the owner token with: gpt-worker rotate --gpt -w ${root}`);
     return;
   }
 
+  let hubGptToken = null;
+  const res = await adminCall(worker, "hub_owner_token_get");
+  if (!res.error && res.gptToken) {
+    hubGptToken = res.gptToken;
+    stripLegacyWorkerConfigFields({ stripHubGptToken: true });
+  } else if (worker.hubGptToken) {
+    hubGptToken = worker.hubGptToken;
+  } else {
+    console.error("Shared connector is not initialized. Run: gpt-worker init -w <workspace>");
+    process.exit(1);
+  }
+
   console.log(`OAuth Server URL:  ${worker.workerUrl}/mcp
-OAuth owner token: ${worker.hubGptToken}
+OAuth owner token: ${hubGptToken}
 Rotate the owner token with: gpt-worker rotate --hub`);
 }
 
@@ -379,7 +534,7 @@ function printBrowserConfig(config) {
   }
 }
 
-function cmdShowConfig(args) {
+async function cmdShowConfig(args) {
   const worker = readWorkerConfig();
   if (!worker) {
     console.error("Not initialized. Run: gpt-worker init -w <workspace>");
@@ -387,15 +542,60 @@ function cmdShowConfig(args) {
   }
   let workspaceId = null;
   let workspaces = listProvisionedWorkspaces();
+  let targetCfg = null;
   if (args.workspace) {
     const root = workspaceRoot(args);
-    const cfg = requireWorkspaceConfig(root);
-    workspaceId = cfg.workspaceId;
+    targetCfg = requireWorkspaceConfig(root);
+    workspaceId = targetCfg.workspaceId;
     if (!workspaces.some((workspace) => workspace.workspaceId === workspaceId)) {
       workspaces = [...workspaces, { workspaceId, workspacePath: root }];
     }
   }
-  printBrowserConfig(safeBrowserConfig(worker, workspaces, workspaceId));
+  let chatSettings = await loadChatSettings(targetCfg);
+  for (const ws of workspaces) {
+    if (
+      ws.workspaceId &&
+      (!chatSettings.chatUrlsByWorkspace?.[ws.workspaceId] || !chatSettings.conversationUrlsByWorkspace?.[ws.workspaceId])
+    ) {
+      if (ws.workspacePath) {
+        const tokens = readTokens(ws.workspacePath);
+        if (tokens?.cliToken) {
+          try {
+            const wsRes = await localCall(
+              { workerUrl: worker.workerUrl, workspaceId: ws.workspaceId, cliToken: tokens.cliToken },
+              "browser_settings_get"
+            );
+            if (wsRes && !wsRes.error) {
+              if (wsRes.chatUrlOverride) {
+                chatSettings.chatUrlsByWorkspace = {
+                  ...chatSettings.chatUrlsByWorkspace,
+                  [ws.workspaceId]: wsRes.chatUrlOverride,
+                };
+              }
+              if (wsRes.conversationUrl) {
+                chatSettings.conversationUrlsByWorkspace = {
+                  ...chatSettings.conversationUrlsByWorkspace,
+                  [ws.workspaceId]: wsRes.conversationUrl,
+                };
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+  }
+  printBrowserConfig(safeBrowserConfig(chatSettings, workspaces, workspaceId));
+}
+
+export async function ensureRemoteSettingsBeforeKeepRemote(worker, cfg) {
+  if (worker.chatUrlsByWorkspace?.[cfg.workspaceId] || worker.conversationUrlsByWorkspace?.[cfg.workspaceId]) {
+    await loadChatSettings(cfg);
+    const wsCheck = await localCall(cfg, "browser_settings_get").catch(() => null);
+    if (!wsCheck || wsCheck.error || !wsCheck.initialized) {
+      return { ok: false, error: "could not migrate workspace browser settings to Cloudflare before --keep-remote removal" };
+    }
+  }
+  return { ok: true };
 }
 
 /** Deregisters a workspace. Destructive and, on the remote side, permanent
@@ -449,6 +649,17 @@ async function cmdRemove(args) {
         console.log(`Wiped workspace_id=${tokens.workspaceId} on the Worker.`);
       }
     }
+  } else if (worker) {
+    const check = await ensureRemoteSettingsBeforeKeepRemote(worker, {
+      workerUrl: worker.workerUrl,
+      adminToken: worker.adminToken,
+      ...tokens,
+      workspacePath: root,
+    });
+    if (!check.ok) {
+      console.error(`Error: ${check.error}. Aborting.`);
+      process.exit(1);
+    }
   }
   if (worker) {
     const unregistered = await adminCall(worker, "unregister_workspace", { workspace_id: tokens.workspaceId });
@@ -478,8 +689,13 @@ async function cmdRemove(args) {
 async function handleDashboardTaskCreated(root, cfg, params) {
   const taskId = params && params.taskId;
   try {
-    const settings = await sharedChatSettings(cfg);
-    nudgeChatGpt(settings, taskId, cfg.workspaceId, { log: (line) => appendLog(root, `dashboard nudge: ${line}`) });
+    const settings = await loadChatSettings(cfg);
+    await nudgeChatGpt(settings, taskId, cfg.workspaceId, {
+      log: (line) => appendLog(root, `dashboard nudge: ${line}`),
+      onConversationDiscovered: async (url) => {
+        await localCall(cfg, "browser_settings_set", { conversationUrl: url });
+      },
+    });
   } catch (err) {
     appendLog(root, `dashboard nudge failed: ${String((err && err.message) || err)}`);
   }
@@ -591,8 +807,8 @@ async function cmdStatus(args) {
   }
 }
 
-async function cmdChatUrl(args) {
-  const worker = readWorkerConfig();
+export async function cmdChatUrl(args) {
+  let worker = readWorkerConfig();
   if (!worker) {
     console.error("Not initialized. Run: gpt-worker init -w <workspace>");
     process.exit(1);
@@ -600,8 +816,6 @@ async function cmdChatUrl(args) {
   const workspaceCfg = args.workspace ? requireWorkspaceConfig(workspaceRoot(args)) : null;
   const workspaceId = workspaceCfg?.workspaceId;
   const url = args._[0];
-  const current = worker;
-  const next = {};
   let flagsChanged = false;
 
   if (args.clear && !workspaceId) {
@@ -614,23 +828,34 @@ async function cmdChatUrl(args) {
   }
 
   if (args["enter-delay"] !== undefined) {
-    next.enterDelayMs = Number(args["enter-delay"]);
+    const nextDelay = Number(args["enter-delay"]);
+    worker = updateWorkerConfigAtomic((current) => ({ ...(current || worker), enterDelayMs: nextDelay }));
     flagsChanged = true;
   }
 
   if (args.clear) {
-    const saved = updateWorkerConfigAtomic((config) => ({ ...withoutWorkspaceChatUrl(config || worker, workspaceId), ...next }));
-    console.log(`Cleared this workspace's Project URL override. Effective URL: ${effectiveChatUrl(saved, workspaceId) || "(none; set the shared default with: gpt-worker chat-url <url>)"}`);
-    if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
+    const res = await localCall(workspaceCfg, "browser_settings_set", { chatUrlOverride: "" });
+    if (res.error) {
+      console.error(`Failed to clear workspace override: ${res.error}`);
+      process.exit(1);
+    }
+    updateWorkerConfigAtomic((config) => withoutWorkspaceChromeTab(withoutWorkspaceChatSettings(config || worker, workspaceId), workspaceId));
+    const current = await loadChatSettings(workspaceCfg);
+    console.log(
+      `Cleared this workspace's Project URL override. Effective URL: ${
+        effectiveChatUrl(current, workspaceId) || "(none; set the shared default with: gpt-worker chat-url <url>)"
+      }`
+    );
+    if (flagsChanged) console.log(`enterDelayMs=${worker.enterDelayMs} (machine-wide)`);
     return;
   }
 
   if (!url) {
     if (flagsChanged) {
-      const saved = updateWorkerConfigAtomic((current) => ({ ...(current || worker), ...next }));
-      console.log(`Saved. enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
+      console.log(`Saved. enterDelayMs=${worker.enterDelayMs} (machine-wide)`);
       return;
     }
+    const current = await loadChatSettings(workspaceCfg);
     if (workspaceId) {
       const override = workspaceChatUrl(current, workspaceId);
       console.log(`workspace override: ${override || "(none; using the shared default)"}`);
@@ -647,19 +872,84 @@ async function cmdChatUrl(args) {
     process.exit(1);
   }
   if (workspaceId) {
-    const saved = updateWorkerConfigAtomic((config) => ({ ...withWorkspaceChatUrl(config || worker, workspaceId, url), ...next }));
-    console.log(`Saved this workspace's ChatGPT Project URL override. 'gpt-worker task' / 'gpt-worker report' will use it for this workspace.`);
-    if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
+    const res = await localCall(workspaceCfg, "browser_settings_set", { chatUrlOverride: url });
+    if (res.error) {
+      console.error(`Failed to set workspace override: ${res.error}`);
+      process.exit(1);
+    }
+    updateWorkerConfigAtomic((config) => withoutWorkspaceChromeTab(withoutWorkspaceChatSettings(config || worker, workspaceId), workspaceId));
+    console.log(
+      `Saved this workspace's ChatGPT Project URL override. 'gpt-worker task' / 'gpt-worker report' will use it for this workspace.`
+    );
+    if (flagsChanged) console.log(`enterDelayMs=${worker.enterDelayMs} (machine-wide)`);
     return;
   }
 
-  next.chatUrl = url;
-  const saved = updateWorkerConfigAtomic((config) => ({ ...withChatUrl(config || worker, url), ...next }));
+  let previousChatUrl = worker.chatUrl || null;
+  try {
+    const currentHub = await adminCall(worker, "hub_browser_settings_get");
+    if (currentHub && !currentHub.error && currentHub.chatUrl) {
+      previousChatUrl = currentHub.chatUrl;
+    }
+  } catch {}
+
+  const res = await adminCall(worker, "hub_browser_settings_set", { chatUrl: url });
+  if (res.error) {
+    console.error(`Failed to set shared default: ${res.error}`);
+    process.exit(1);
+  }
+
+  const tabs = worker.chromeTabsByWorkspace;
+  const overrides = {};
+  if (tabs && typeof tabs === "object" && Object.keys(tabs).length > 0) {
+    const workspaces = listProvisionedWorkspaces();
+    for (const ws of workspaces) {
+      if (ws.workspaceId && ws.cliToken && tabs[ws.workspaceId]) {
+        try {
+          const wsRes = await localCall(
+            { workerUrl: worker.workerUrl, workspaceId: ws.workspaceId, cliToken: ws.cliToken },
+            "browser_settings_get"
+          );
+          if (wsRes && !wsRes.error && wsRes.chatUrlOverride) {
+            overrides[ws.workspaceId] = wsRes.chatUrlOverride;
+          }
+        } catch {}
+      }
+    }
+  }
+
+  updateWorkerConfigAtomic((config) => {
+    const current = config || worker;
+    const settingsWithOverrides = {
+      ...current,
+      chatUrl: previousChatUrl,
+      chatUrlsByWorkspace: {
+        ...(current.chatUrlsByWorkspace || {}),
+        ...overrides,
+      },
+    };
+    const nextWithChat = withChatUrl(settingsWithOverrides, url);
+    const next = { ...current };
+    if (nextWithChat.chromeTabsByWorkspace) {
+      next.chromeTabsByWorkspace = nextWithChat.chromeTabsByWorkspace;
+    } else {
+      delete next.chromeTabsByWorkspace;
+    }
+    if (current.conversationUrlsByWorkspace) {
+      if (nextWithChat.conversationUrlsByWorkspace) {
+        next.conversationUrlsByWorkspace = nextWithChat.conversationUrlsByWorkspace;
+      } else {
+        delete next.conversationUrlsByWorkspace;
+      }
+    }
+    delete next.chatUrl;
+    return next;
+  });
   console.log(`Saved the shared default. Workspaces without an override will use this ChatGPT Project automatically.`);
-  if (flagsChanged) console.log(`enterDelayMs=${saved.enterDelayMs} (machine-wide)`);
+  if (flagsChanged) console.log(`enterDelayMs=${worker.enterDelayMs} (machine-wide)`);
 }
 
-function cmdChat(args) {
+async function cmdChat(args) {
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
   const worker = readWorkerConfig();
@@ -672,14 +962,19 @@ function cmdChat(args) {
     console.error("Usage: gpt-worker chat <new|attach|status> [conversation-url] -w <workspace>");
     process.exit(1);
   }
-  const projectUrl = effectiveChatUrl(worker, cfg.workspaceId);
+  const chatSettings = await loadChatSettings(cfg);
+  const projectUrl = effectiveChatUrl(chatSettings, cfg.workspaceId);
   if (!projectUrl) {
     console.error("No ChatGPT Project URL is configured. Set one with: gpt-worker chat-url <project-url>");
     process.exit(1);
   }
   if (action === "status") {
     console.log(`project      : ${projectUrl}`);
-    console.log(`conversation : ${workspaceConversationUrl(worker, cfg.workspaceId, projectUrl) || "(none; the next handoff starts a new chat)"}`);
+    console.log(
+      `conversation : ${
+        workspaceConversationUrl(chatSettings, cfg.workspaceId, projectUrl) || "(none; the next handoff starts a new chat)"
+      }`
+    );
     return;
   }
   if (action === "new") {
@@ -687,8 +982,17 @@ function cmdChat(args) {
       console.error("Usage: gpt-worker chat new -w <workspace>");
       process.exit(1);
     }
-    updateWorkerConfigAtomic((current) => withoutWorkspaceChatConversation(current || worker, cfg.workspaceId));
-    console.log("Started a fresh ChatGPT conversation for this workspace. The next task or report will not reuse the previous conversation.");
+    const res = await localCall(cfg, "browser_settings_set", { conversationUrl: "" });
+    if (res.error) {
+      console.error(`Failed to start fresh conversation: ${res.error}`);
+      process.exit(1);
+    }
+    updateWorkerConfigAtomic((current) =>
+      withoutWorkspaceChromeTab(withoutWorkspaceChatConversation(current || worker, cfg.workspaceId), cfg.workspaceId)
+    );
+    console.log(
+      "Started a fresh ChatGPT conversation for this workspace. The next task or report will not reuse the previous conversation."
+    );
     return;
   }
   const conversationUrl = chatGptConversationUrl(args._[1], projectUrl);
@@ -696,7 +1000,14 @@ function cmdChat(args) {
     console.error("Expected a same-Project ChatGPT conversation URL (https://chatgpt.com/g/.../c/...).");
     process.exit(1);
   }
-  updateWorkerConfigAtomic((current) => withWorkspaceConversationUrl(current || worker, cfg.workspaceId, conversationUrl));
+  const res = await localCall(cfg, "browser_settings_set", { conversationUrl });
+  if (res.error) {
+    console.error(`Failed to attach conversation: ${res.error}`);
+    process.exit(1);
+  }
+  updateWorkerConfigAtomic((current) =>
+    withoutWorkspaceChromeTab(withoutWorkspaceChatConversation(current || worker, cfg.workspaceId), cfg.workspaceId)
+  );
   console.log("Attached this workspace to the ChatGPT conversation. Its tab will be rediscovered by URL when possible.");
 }
 
@@ -885,7 +1196,12 @@ async function cmdTask(args) {
   }
 
   console.log(`Task ${taskId} queued.`);
-  nudgeChatGpt(await sharedChatSettings(cfg), taskId, cfg.workspaceId);
+  const chatSettings = await loadChatSettings(cfg);
+  await nudgeChatGpt(chatSettings, taskId, cfg.workspaceId, {
+    onConversationDiscovered: async (url) => {
+      await localCall(cfg, "browser_settings_set", { conversationUrl: url });
+    },
+  });
   console.log("Then run: gpt-worker wait");
 }
 
@@ -1116,7 +1432,12 @@ async function reportRound(args, handoff) {
   }
 
   console.log(`Reported iteration ${newIteration}.`);
-  nudgeChatGpt(await sharedChatSettings(cfg), task.taskId, cfg.workspaceId);
+  const chatSettings = await loadChatSettings(cfg);
+  await nudgeChatGpt(chatSettings, task.taskId, cfg.workspaceId, {
+    onConversationDiscovered: async (url) => {
+      await localCall(cfg, "browser_settings_set", { conversationUrl: url });
+    },
+  });
   if (handoff) {
     // This CLI has no way to know whether the caller is the one stopping or
     // the one claiming an abandoned round — `report_task` doesn't ask, and
@@ -1161,7 +1482,7 @@ async function cmdState(args) {
  *  so this doesn't take -w. */
 async function cmdRotateHub() {
   const worker = readWorkerConfig();
-  if (!worker || !worker.hubGptToken) {
+  if (!worker) {
     console.error("Shared connector is not initialized. Run: gpt-worker init -w <workspace>");
     process.exit(1);
   }
@@ -1170,9 +1491,10 @@ async function cmdRotateHub() {
     console.error(`Rotate failed: ${result.error}`);
     process.exit(1);
   }
-  writeWorkerConfigAtomic({ ...worker, hubGptToken: result.value });
+  stripLegacyWorkerConfigFields({ stripHubGptToken: true });
   console.log("Rotated hub_gpt_token.");
   console.log(`The connector Server URL remains:\n  ${worker.workerUrl}/mcp`);
+  console.log(`New owner token:\n  ${result.value}`);
   console.log("Re-authorize it with the new owner token from: gpt-worker url");
 }
 
@@ -1197,14 +1519,21 @@ async function cmdRotate(args) {
     console.error(`Rotate failed: ${result.error}`);
     process.exit(1);
   }
-  const tokens = readTokens(root);
-  if (which === "gpt_token") tokens.gptToken = result.value;
-  if (which === "link_token") tokens.linkToken = result.value;
-  if (which === "cli_token") tokens.cliToken = result.value;
-  writeTokensAtomic(root, tokens);
+  if (which === "gpt_token") {
+    stripLegacyWorkspaceGptToken(root);
+  } else {
+    updateTokensAtomic(root, (tokens) => {
+      if (!tokens) return tokens;
+      const next = { ...tokens };
+      if (which === "link_token") next.linkToken = result.value;
+      if (which === "cli_token") next.cliToken = result.value;
+      return next;
+    });
+  }
   console.log(`Rotated ${which}.`);
   if (which === "gpt_token") {
     console.log(`The workspace OAuth resource remains:\n  ${cfg.workerUrl}/mcp/${cfg.workspaceId}`);
+    console.log(`New owner token:\n  ${result.value}`);
     console.log(`Re-authorize it with the new owner token from: gpt-worker url -w ${root}`);
   }
   if (which === "link_token") {

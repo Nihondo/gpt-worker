@@ -202,6 +202,85 @@ export function writeTokensAtomic(workspaceRoot, data) {
   atomicWrite(tokensFilePath(workspaceRoot), JSON.stringify(data, null, 2) + "\n");
 }
 
+function tokensLockPath(workspaceRoot) {
+  return `${tokensFilePath(workspaceRoot)}.lock`;
+}
+
+export function updateTokensAtomic(workspaceRoot, update) {
+  const deadline = Date.now() + 5_000;
+  const lockFile = tokensLockPath(workspaceRoot);
+  ensurePrivateDir(path.dirname(lockFile));
+  let lockFd;
+  while (lockFd === undefined) {
+    try {
+      lockFd = fs.openSync(lockFile, "wx", 0o600);
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      if (Date.now() >= deadline) throw new Error("Timed out acquiring the gpt-worker tokens lock.");
+      sleepSync(10);
+    }
+  }
+
+  try {
+    const current = readTokens(workspaceRoot);
+    const next = update(current);
+    if (next && next !== current) writeTokensAtomic(workspaceRoot, next);
+    return next;
+  } finally {
+    try {
+      fs.closeSync(lockFd);
+    } finally {
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {
+        /* lock already cleaned up */
+      }
+    }
+  }
+}
+
+export function stripLegacyWorkerConfigFields({ stripHubGptToken = false, stripChatUrl = false, workspaceIdToStrip = null } = {}) {
+  return updateWorkerConfigAtomic((current) => {
+    if (!current) return current;
+    let changed = false;
+    const next = { ...current };
+    if (stripHubGptToken && "hubGptToken" in next) {
+      delete next.hubGptToken;
+      changed = true;
+    }
+    if (stripChatUrl && "chatUrl" in next) {
+      delete next.chatUrl;
+      changed = true;
+    }
+    if (workspaceIdToStrip) {
+      if (next.chatUrlsByWorkspace && workspaceIdToStrip in next.chatUrlsByWorkspace) {
+        const nextUrls = { ...next.chatUrlsByWorkspace };
+        delete nextUrls[workspaceIdToStrip];
+        if (Object.keys(nextUrls).length === 0) delete next.chatUrlsByWorkspace;
+        else next.chatUrlsByWorkspace = nextUrls;
+        changed = true;
+      }
+      if (next.conversationUrlsByWorkspace && workspaceIdToStrip in next.conversationUrlsByWorkspace) {
+        const nextConvs = { ...next.conversationUrlsByWorkspace };
+        delete nextConvs[workspaceIdToStrip];
+        if (Object.keys(nextConvs).length === 0) delete next.conversationUrlsByWorkspace;
+        else next.conversationUrlsByWorkspace = nextConvs;
+        changed = true;
+      }
+    }
+    return changed ? next : current;
+  });
+}
+
+export function stripLegacyWorkspaceGptToken(workspaceRoot) {
+  return updateTokensAtomic(workspaceRoot, (tokens) => {
+    if (!tokens || !tokens.gptToken) return tokens;
+    const next = { ...tokens };
+    delete next.gptToken;
+    return next;
+  });
+}
+
 function guidanceFilePath(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), "guidance.md");
 }

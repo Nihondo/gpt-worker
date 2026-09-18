@@ -830,3 +830,59 @@ describe("WAITING_LOCAL and LOCAL_DECISION lifecycle", () => {
     assert.equal(doo.getTask("t-discard").protocol_state, "BLOCKED");
   });
 });
+
+describe("localBrowserSettings", () => {
+  test("refuses on unprovisioned workspace", () => {
+    const doo = makeDO();
+    assert.equal(doo.localBrowserSettingsGet().error, "NOT_PROVISIONED");
+    assert.equal(doo.localBrowserSettingsSet({}).error, "NOT_PROVISIONED");
+  });
+
+  test("fresh provision initializes browser settings with null values", () => {
+    const doo = makeDO();
+    doo.provision();
+    const settings = doo.localBrowserSettingsGet();
+    assert.equal(settings.initialized, true);
+    assert.equal(settings.chatUrlOverride, null);
+    assert.equal(settings.conversationUrl, null);
+  });
+
+  test("validates and canonicalizes URLs, clears conversation on override change", () => {
+    const doo = makeDO();
+    doo.provision();
+
+    // Negative override URLs: non-https, non-chatgpt domain
+    assert.equal(doo.localBrowserSettingsSet({ chatUrlOverride: "http://chatgpt.com/g/g-p-11112222333344445555666677778888/project" }).error, "INVALID_ARGS");
+    assert.equal(doo.localBrowserSettingsSet({ chatUrlOverride: "https://example.com/g/g-p-11112222333344445555666677778888/project" }).error, "INVALID_ARGS");
+
+    // Negative conversation URLs: non-https, arbitrary origin
+    assert.equal(doo.localBrowserSettingsSet({ conversationUrl: "http://chatgpt.com/g/g-p-11112222333344445555666677778888/c/c-12345" }).error, "INVALID_ARGS");
+    assert.equal(doo.localBrowserSettingsSet({ conversationUrl: "https://evil.com/g/g-p-11112222333344445555666677778888/c/c-12345" }).error, "INVALID_ARGS");
+
+    // Valid override + matching conversation
+    const proj = "https://chatgpt.com/g/g-p-11112222333344445555666677778888-myproj/project?prompt=test";
+    const conv = "https://chatgpt.com/g/g-p-11112222333344445555666677778888-myproj/c/c-12345?query=ignored#hash";
+    const saved = doo.localBrowserSettingsSet({
+      chatUrlOverride: proj,
+      conversationUrl: conv,
+    });
+    assert.equal(saved.initialized, true);
+    assert.equal(saved.chatUrlOverride, "https://chatgpt.com/g/g-p-11112222333344445555666677778888-myproj/project?prompt=test");
+    assert.equal(saved.conversationUrl, "https://chatgpt.com/g/g-p-11112222333344445555666677778888-myproj/c/c-12345");
+
+    // Conversation from different project rejected
+    const differentConv = "https://chatgpt.com/g/g-p-99999999999999999999999999999999/c/c-99999";
+    const mismatch = doo.localBrowserSettingsSet({ conversationUrl: differentConv });
+    assert.equal(mismatch.error, "INVALID_ARGS");
+
+    // Changing override without specifying conversation clears conversation
+    const newProj = "https://chatgpt.com/g/g-p-22222222222222222222222222222222/project";
+    const changed = doo.localBrowserSettingsSet({ chatUrlOverride: newProj });
+    assert.equal(changed.chatUrlOverride, newProj);
+    assert.equal(changed.conversationUrl, null);
+
+    // Has no side-effect on tasks or queue
+    assert.equal(doo.activeTask(), null);
+    assert.equal(doo.localList({}).messages.length, 0);
+  });
+});

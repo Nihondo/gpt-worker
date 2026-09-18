@@ -224,7 +224,12 @@ export function withChatUrl(settings, chatUrl) {
  *  daemon's dashboard_task_created handler passes an appendLog()-backed
  *  logger instead, since a detached daemon's stdout is discarded (see this
  *  module's header comment). */
-export function nudgeChatGpt(settings, taskId, workspaceId, { log = console.log } = {}) {
+export async function nudgeChatGpt(
+  settings,
+  taskId,
+  workspaceId,
+  { log = console.log, onConversationDiscovered = null, _openInChrome = null } = {}
+) {
   const chatUrl = effectiveChatUrl(settings, workspaceId);
   if (!chatUrl) {
     log('Ask the user to tell ChatGPT "continue" in the gpt-worker project (set a one-click link with: gpt-worker chat-url <url>).');
@@ -233,7 +238,13 @@ export function nudgeChatGpt(settings, taskId, workspaceId, { log = console.log 
   const conversationUrl = workspaceConversationUrl(settings, workspaceId, chatUrl);
   const url = buildChatOpenUrl(conversationUrl || chatUrl, taskId);
 
-  const chromeResult = isChromeAutomationAvailable()
+  const chromeResult = _openInChrome
+    ? _openInChrome(url, chatUrl, {
+        enterDelayMs: settings.enterDelayMs,
+        tabId: workspaceChromeTabId(settings, workspaceId),
+        conversationUrl,
+      })
+    : isChromeAutomationAvailable()
     ? openInChromeAndSubmit(url, chatUrl, {
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
@@ -242,11 +253,16 @@ export function nudgeChatGpt(settings, taskId, workspaceId, { log = console.log 
     : false;
   if (chromeResult) {
     updateWorkerConfigAtomic((current) => {
-      if (!current || effectiveChatUrl(current, workspaceId) !== chatUrl) return current;
-      let next = withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
-      if (chromeResult.conversationUrl) next = withWorkspaceConversationUrl(next, workspaceId, chromeResult.conversationUrl, { clearTab: false });
-      return next;
+      if (!current) return current;
+      return withWorkspaceChromeTab(current, workspaceId, chromeResult.tabId);
     });
+    if (chromeResult.conversationUrl && onConversationDiscovered) {
+      try {
+        await onConversationDiscovered(chromeResult.conversationUrl);
+      } catch {
+        /* best-effort remote persist */
+      }
+    }
     // A reused tab never changes window focus; a first-run/replacement tab
     // opens a new Chrome window, which comes to the front like any new
     // window would — regardless of whether auto-submit also succeeded. Say

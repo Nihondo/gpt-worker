@@ -4,26 +4,28 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { BridgeDO } from "../worker/src/index.js";
+import worker, { BridgeDO } from "../worker/src/index.js";
 import { makeFakeCtx, makeFakeEnv } from "./helpers/fake-do-ctx.mjs";
 
 function makeDO() {
   return new BridgeDO(makeFakeCtx(), makeFakeEnv());
 }
 
-function makeHubAndWorkspaceEnv() {
+function makeHubAndWorkspaceEnv(extraEnv = {}) {
   const instances = new Map();
   const env = {
+    ADMIN_TOKEN: "admin-secret-token",
     BRIDGE_DO: {
       idFromName: (name) => name,
       get: (name) => ({ fetch: (request) => instanceFor(name).fetch(request) }),
     },
+    ...extraEnv,
   };
   function instanceFor(name) {
     if (!instances.has(name)) instances.set(name, new BridgeDO(makeFakeCtx(), env));
     return instances.get(name);
   }
-  return { hub: instanceFor("gpt-worker-hub"), instanceFor };
+  return { hub: instanceFor("gpt-worker-hub"), instanceFor, env };
 }
 
 describe("provision", () => {
@@ -245,5 +247,205 @@ describe("checkToken", () => {
     assert.equal(doo.checkToken("link_token", linkToken), true);
     assert.equal(doo.checkToken("cli_token", cliToken), true);
     assert.equal(doo.checkToken("gpt_token", gptToken + "x"), false);
+  });
+});
+
+describe("hubBrowserSettings and owner tokens", () => {
+  test("hub settings refuse on unprovisioned hub", () => {
+    const doo = makeDO();
+    assert.equal(doo.hubBrowserSettingsGet().error, "NOT_PROVISIONED");
+    assert.equal(doo.hubBrowserSettingsSet({ chatUrl: "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project" }).error, "NOT_PROVISIONED");
+    assert.equal(doo.hubOwnerTokenGet().error, "NOT_PROVISIONED");
+  });
+
+  test("fresh provisionHub leaves browser settings uninitialized until explicit set", () => {
+    const doo = makeDO();
+    doo.provisionHub();
+    const settings = doo.hubBrowserSettingsGet();
+    assert.equal(settings.initialized, false);
+    assert.equal(settings.chatUrl, null);
+
+    doo.hubBrowserSettingsSet({});
+    const after = doo.hubBrowserSettingsGet();
+    assert.equal(after.initialized, true);
+    assert.equal(after.chatUrl, null);
+  });
+
+  test("hubBrowserSettingsSet validates and canonicalizes Project URL", () => {
+    const doo = makeDO();
+    doo.provisionHub();
+
+    // Negative URLs: non-https, non-chatgpt domain, auth credentials, invalid path
+    assert.equal(doo.hubBrowserSettingsSet({ chatUrl: "http://chatgpt.com/g/g-p-12345678901234567890123456789012/project" }).error, "INVALID_ARGS");
+    assert.equal(doo.hubBrowserSettingsSet({ chatUrl: "https://example.com/g/g-p-12345678901234567890123456789012/project" }).error, "INVALID_ARGS");
+    assert.equal(doo.hubBrowserSettingsSet({ chatUrl: "https://user:pass@chatgpt.com/g/g-p-12345678901234567890123456789012/project" }).error, "INVALID_ARGS");
+    assert.equal(doo.hubBrowserSettingsSet({ chatUrl: "https://chatgpt.com/not-a-project" }).error, "INVALID_ARGS");
+
+    // Valid URL
+    const valid = doo.hubBrowserSettingsSet({
+      chatUrl: "https://chatgpt.com/g/g-p-12345678901234567890123456789012-slug/project?prompt=test",
+    });
+    assert.equal(valid.initialized, true);
+    assert.equal(valid.chatUrl, "https://chatgpt.com/g/g-p-12345678901234567890123456789012-slug/project?prompt=test");
+
+    // Clear URL
+    const cleared = doo.hubBrowserSettingsSet({ chatUrl: "" });
+    assert.equal(cleared.initialized, true);
+    assert.equal(cleared.chatUrl, null);
+  });
+
+  test("owner token getters return only gptToken", () => {
+    const hub = makeDO();
+    const hubProv = hub.provisionHub();
+    const hubTokenRes = hub.hubOwnerTokenGet();
+    assert.equal(hubTokenRes.gptToken, hubProv.gptToken);
+    assert.equal(Object.keys(hubTokenRes).length, 1);
+
+    const ws = makeDO();
+    const wsProv = ws.provision();
+    const wsTokenRes = ws.ownerTokenGet();
+    assert.equal(wsTokenRes.gptToken, wsProv.gptToken);
+    assert.equal(Object.keys(wsTokenRes).length, 1);
+
+    // After rotation, ownerTokenGet returns updated token
+    const rotated = ws.rotateSecret("gpt_token");
+    assert.equal(ws.ownerTokenGet().gptToken, rotated.value);
+  });
+
+  test("deprovision clears workspace browser settings", () => {
+    const ws = makeDO();
+    ws.provision();
+    ws.localBrowserSettingsSet({
+      chatUrlOverride: "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project",
+    });
+    const before = ws.localBrowserSettingsGet();
+    assert.equal(before.initialized, true);
+    assert.equal(before.chatUrlOverride, "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project");
+
+    ws.deprovision();
+    assert.equal(ws.localBrowserSettingsGet().error, "NOT_PROVISIONED");
+  });
+});
+
+describe("handleAdminRoute routing", () => {
+  test("enforces ADMIN_TOKEN, origin gating, and POST method", async () => {
+    const { env } = makeHubAndWorkspaceEnv();
+    const validToken = env.ADMIN_TOKEN;
+
+    // 1. Missing / wrong ADMIN_TOKEN -> 404
+    const reqWrongToken = new Request("https://worker.example/admin/wrong-token", {
+      method: "POST",
+      body: JSON.stringify({ op: "hub_browser_settings_get" }),
+    });
+    const resWrongToken = await worker.fetch(reqWrongToken, env);
+    assert.equal(resWrongToken.status, 404);
+
+    // 2. Disallowed Origin header -> 403
+    const reqBadOrigin = new Request(`https://worker.example/admin/${validToken}`, {
+      method: "POST",
+      headers: { Origin: "https://evil.com" },
+      body: JSON.stringify({ op: "hub_browser_settings_get" }),
+    });
+    const resBadOrigin = await worker.fetch(reqBadOrigin, env);
+    assert.equal(resBadOrigin.status, 403);
+
+    // 3. Non-POST method -> 405
+    const reqGet = new Request(`https://worker.example/admin/${validToken}`, {
+      method: "GET",
+    });
+    const resGet = await worker.fetch(reqGet, env);
+    assert.equal(resGet.status, 405);
+  });
+
+  test("routes hub browser settings and hub owner token to hub DO", async () => {
+    const { hub, env } = makeHubAndWorkspaceEnv();
+    const token = env.ADMIN_TOKEN;
+    hub.provisionHub();
+
+    // Set shared chatUrl
+    const setReq = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({
+        op: "hub_browser_settings_set",
+        chatUrl: "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project",
+      }),
+    });
+    const setRes = await worker.fetch(setReq, env);
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.initialized, true);
+    assert.equal(setBody.chatUrl, "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project");
+
+    // Get shared chatUrl
+    const getReq = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "hub_browser_settings_get" }),
+    });
+    const getRes = await worker.fetch(getReq, env);
+    assert.equal(getRes.status, 200);
+    const getBody = await getRes.json();
+    assert.equal(getBody.initialized, true);
+    assert.equal(getBody.chatUrl, "https://chatgpt.com/g/g-p-12345678901234567890123456789012/project");
+
+    // Hub owner token
+    const tokenReq = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "hub_owner_token_get" }),
+    });
+    const tokenRes = await worker.fetch(tokenReq, env);
+    assert.equal(tokenRes.status, 200);
+    const tokenBody = await tokenRes.json();
+    assert.equal(typeof tokenBody.gptToken, "string");
+    assert.equal(Object.keys(tokenBody).length, 1);
+  });
+
+  test("routes owner_token_get to designated workspace DO and enforces isolation", async () => {
+    const { instanceFor, env } = makeHubAndWorkspaceEnv();
+    const token = env.ADMIN_TOKEN;
+    const wsA = "1111111111111111";
+    const wsB = "2222222222222222";
+    const instA = instanceFor(wsA);
+    const instB = instanceFor(wsB);
+    const provA = instA.provision();
+    const provB = instB.provision();
+
+    // Query A
+    const reqA = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "owner_token_get", workspace_id: wsA }),
+    });
+    const resA = await worker.fetch(reqA, env);
+    assert.equal(resA.status, 200);
+    const bodyA = await resA.json();
+    assert.equal(bodyA.gptToken, provA.gptToken);
+    assert.notEqual(bodyA.gptToken, provB.gptToken);
+    assert.equal(Object.keys(bodyA).length, 1);
+
+    // Query B
+    const reqB = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "owner_token_get", workspace_id: wsB }),
+    });
+    const resB = await worker.fetch(reqB, env);
+    assert.equal(resB.status, 200);
+    const bodyB = await resB.json();
+    assert.equal(bodyB.gptToken, provB.gptToken);
+    assert.equal(Object.keys(bodyB).length, 1);
+
+    // Bad workspace_id -> 400
+    const reqBad = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "owner_token_get", workspace_id: "not-a-valid-id" }),
+    });
+    const resBad = await worker.fetch(reqBad, env);
+    assert.equal(resBad.status, 400);
+
+    // Missing workspace_id for workspace-targeted op -> 400
+    const reqMissing = new Request(`https://worker.example/admin/${token}`, {
+      method: "POST",
+      body: JSON.stringify({ op: "owner_token_get" }),
+    });
+    const resMissing = await worker.fetch(reqMissing, env);
+    assert.equal(resMissing.status, 400);
   });
 });
