@@ -95,7 +95,7 @@ describe("dashboard: top-level routing", () => {
     assert.equal(res.status, 200);
     const html = await res.text();
     assert.match(html, /login-form/);
-    assert.doesNotMatch(html, /overview/);
+    assert.doesNotMatch(html, /id="overview"/);
   });
 
   test("unknown method on the shell is 405", async () => {
@@ -1110,7 +1110,7 @@ describe("dashboard: Text-module asset extraction", () => {
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
     const html = await res.text();
-    assert.match(html, new RegExp(`Workspace: <strong>${workspaceId}</strong>`));
+    assert.match(html, new RegExp(`<h2>${workspaceId}</h2>`));
     assert.match(html, new RegExp(`<script src="/dashboard/${workspaceId}/app\\.js"></script>`));
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
@@ -1151,8 +1151,8 @@ function tagWithId(html, id) {
   return m ? m[0] : null;
 }
 
-describe("dashboard: 3-pane UX redesign (sidebar + list/detail panes, truncation, stage indicator)", () => {
-  test("workspace shell exposes top-level Tasks/Messages tabs, a sidebar, and list+detail pane containers", async () => {
+describe("dashboard: graphical workspace layout (workspace navigation + context controls + list/detail panes)", () => {
+  test("workspace shell exposes context controls above Tasks/Messages and the list+detail pane containers", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
@@ -1167,8 +1167,9 @@ describe("dashboard: 3-pane UX redesign (sidebar + list/detail panes, truncation
     assert.match(html, /id="tasks-detail"/);
     assert.match(html, /id="messages-list"/);
     assert.match(html, /id="messages-detail"/);
+    assert.match(html, /class="workspace-context"/);
+    assert.match(html, /class="settings-disclosure"/);
     assert.match(html, /class="three-pane"/);
-    assert.match(html, /class="side-pane"/);
   });
 
   test("hub shell exposes the same top-level Tasks/Messages tabs and list+detail pane containers", async () => {
@@ -1184,49 +1185,53 @@ describe("dashboard: 3-pane UX redesign (sidebar + list/detail panes, truncation
     });
     assert.match(html, /id="tasks-detail"/);
     assert.match(html, /id="messages-detail"/);
-    assert.match(html, /class="three-pane"/);
-    assert.match(html, /class="side-pane"/);
+    assert.match(html, /class="dashboard-layout wide"/);
+    assert.match(html, /class="workspace-sidebar"/);
+    assert.match(html, /class="workspace-context"/);
+    assert.match(html, /class="three-pane hub-gated"/);
   });
 
-  // Workspace selection, "Start a new task", and Settings (guidance/limits)
-  // are bundled together in the sidebar (not the Tasks/Messages list/detail
-  // area), per docs/plans/dashboard-ux-redesign.md's 3-pane layout — this is
-  // the string-level stand-in for "these live in the sidebar pane" since
-  // this suite has no DOM/browser harness. The sidebar spans from the
-  // `.side-pane` opening tag to the first list/detail column that follows it.
-  function sidebarSection(html) {
-    const sideStart = html.indexOf('class="side-pane"');
-    assert.ok(sideStart >= 0, "side-pane must exist");
-    const afterSide = html.indexOf('id="tasks-list-col"', sideStart);
-    assert.ok(afterSide > sideStart, "tasks-list-col must follow side-pane");
-    return html.slice(sideStart, afterSide);
+  // Settings and task creation belong in the compact context region above
+  // the activity tabs. In the hub, the left sidebar is intentionally limited
+  // to workspace navigation, so the controls never compete with that list.
+  function contextSection(html) {
+    const start = html.indexOf('class="workspace-context"');
+    assert.ok(start >= 0, "workspace context must exist");
+    const after = html.indexOf('class="tabs', start);
+    assert.ok(after > start, "activity tabs must follow workspace context");
+    return html.slice(start, after);
   }
 
-  test("workspace shell: start-task/guidance/limits controls live in the sidebar, not in the list/detail columns", async () => {
+  test("workspace shell: start-task/guidance/limits controls are collapsed in the context region above activity", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
     const html = await res.text();
-    const sidebar = sidebarSection(html);
+    const context = contextSection(html);
     ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
-      assert.match(sidebar, new RegExp(`id="${id}"`), id + " must be inside the sidebar");
+      assert.match(context, new RegExp(`id="${id}"`), id + " must be inside workspace context");
     });
-    const afterSidebar = html.slice(html.indexOf('id="tasks-list-col"'));
+    assert.match(context, /<details class="settings-disclosure">/);
+    const afterContext = html.slice(html.indexOf('class="tabs'));
     ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
-      assert.doesNotMatch(afterSidebar, new RegExp(`id="${id}"`), id + " must not also appear in the list/detail columns");
+      assert.doesNotMatch(afterContext, new RegExp(`id="${id}"`), id + " must not also appear in the activity panes");
     });
   });
 
-  test("hub shell: workspace picker, start-task, and guidance/limits controls all live in the sidebar", async () => {
+  test("hub shell: workspace picker stays in the sidebar while selected-workspace controls live in context", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { hubGptToken } = makeHub(env, instanceFor);
     const cookie = await loginHubAndGetCookie(env, hubGptToken);
     const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
     const html = await res.text();
-    const sidebar = sidebarSection(html);
-    ["workspace-list", "new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
-      assert.match(sidebar, new RegExp(`id="${id}"`), id + " must be inside the sidebar");
+    const sidebarStart = html.indexOf('class="workspace-sidebar"');
+    const contextStart = html.indexOf('class="workspace-context"');
+    const sidebar = html.slice(sidebarStart, contextStart);
+    assert.match(sidebar, /id="workspace-list"/);
+    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+      assert.doesNotMatch(sidebar, new RegExp(`id="${id}"`), id + " must not be inside the workspace sidebar");
+      assert.match(contextSection(html), new RegExp(`id="${id}"`), id + " must be inside selected workspace context");
     });
   });
 
@@ -1247,7 +1252,7 @@ describe("dashboard: 3-pane UX redesign (sidebar + list/detail panes, truncation
       // wrapping tabs block directly instead.
       assert.ok(tag);
     });
-    const tabsBlockMatch = html.match(/<div class="tabs wide hub-gated" role="tablist"[^>]*>/);
+    const tabsBlockMatch = html.match(/<div class="tabs hub-gated" role="tablist"[^>]*>/);
     assert.ok(tabsBlockMatch, "the Tasks/Messages tabs wrapper must exist");
     assert.match(tabsBlockMatch[0], /hidden/, "the tabs wrapper must start hidden before a workspace is selected");
     assert.match(tagWithId(html, "tasks-list-col"), /hidden/, "tasks-list-col must start hidden");

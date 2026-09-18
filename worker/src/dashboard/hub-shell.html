@@ -7,76 +7,67 @@
 <style>{{DASHBOARD_STYLE}}</style>
 </head>
 <body>
-<div class="card">
+<header class="dashboard-header wide">
   <div class="row">
-    <h1>gpt-worker dashboard — shared hub</h1>
+    <div class="brand-lockup"><span class="brand-mark" aria-hidden="true">↗</span><h1>gpt-worker <span>shared hub</span></h1></div>
     <button type="button" class="secondary" id="logout-btn">Log out</button>
   </div>
-</div>
+</header>
 
-<div class="tabs wide hub-gated" role="tablist" aria-label="View" hidden>
-  <button type="button" class="tab" role="tab" id="tab-tasks" aria-selected="true" aria-controls="tasks-list-col tasks-detail">Tasks</button>
-  <button type="button" class="tab" role="tab" id="tab-messages" aria-selected="false" aria-controls="messages-list-col messages-detail">Messages</button>
-</div>
-<p class="note wide hub-gated" hidden>Only DONE/BLOCKED tasks older than 30 days, and acked messages older than 7 days, are purged — everything else stays until then.</p>
+<div class="dashboard-layout wide">
+  <aside class="workspace-sidebar" aria-label="Workspaces">
+    <div class="sidebar-heading"><span class="eyebrow">Navigator</span><h2>Workspaces</h2></div>
+    <p class="meta">Registered with this shared connector.</p>
+    <div id="workspace-list">Loading…</div>
+  </aside>
 
-<div class="three-pane">
-  <div class="side-pane">
-    <div class="card">
-      <h2>Workspaces</h2>
-      <p class="meta">Every workspace registered with this shared connector (<code>gpt-worker init</code>).</p>
-      <div id="workspace-list">Loading…</div>
+  <main class="workspace-main" id="workspace-detail" hidden>
+    <section class="workspace-context" aria-labelledby="detail-title">
+      <div class="context-heading"><span class="eyebrow">Selected workspace</span><h2 id="detail-title"></h2></div>
+      <div id="overview" class="overview-strip">Loading…</div>
+      <details class="settings-disclosure">
+        <summary>Workspace controls &amp; settings</summary>
+        <div class="workspace-controls">
+          <section class="control-section">
+            <h3>Start a new task</h3>
+            <label for="new-task-goal">Goal</label>
+            <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
+            <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
+            <div><button type="button" id="new-task-submit">Start task</button></div>
+            <p class="note" id="new-task-status"></p>
+          </section>
+          <section class="control-section settings-section">
+            <h3>Workspace guidance</h3>
+            <textarea id="guidance-text" placeholder="(none set)"></textarea>
+            <div><button type="button" id="guidance-save">Save</button><button type="button" class="secondary" id="guidance-clear">Clear</button></div>
+            <h3>Message body limit</h3>
+            <label for="limits-value">Bytes</label>
+            <input type="number" id="limits-value">
+            <div><button type="button" id="limits-save">Save</button><button type="button" class="secondary" id="limits-reset">Reset to default</button></div>
+          </section>
+        </div>
+      </details>
+    </section>
+
+    <div class="tabs hub-gated" role="tablist" aria-label="Activity view" hidden>
+      <button type="button" class="tab" role="tab" id="tab-tasks" aria-selected="true" aria-controls="tasks-list-col tasks-detail">Tasks</button>
+      <button type="button" class="tab" role="tab" id="tab-messages" aria-selected="false" aria-controls="messages-list-col messages-detail">Messages</button>
     </div>
+    <p class="note retention-note hub-gated" hidden>DONE/BLOCKED tasks older than 30 days and acked messages older than 7 days are purged.</p>
 
-    <div id="workspace-detail" hidden>
-      <div class="card">
-        <h2 id="detail-title"></h2>
-        <div id="overview">Loading…</div>
+    <div class="three-pane hub-gated" hidden>
+      <div class="list-col" id="tasks-list-col" hidden>
+        <div class="list-pane" id="tasks-list" role="listbox" aria-label="Tasks"></div>
+        <button type="button" class="secondary" id="tasks-load-more" hidden>Load more</button>
       </div>
-
-      <div class="card">
-        <h2>Start a new task</h2>
-        <label for="new-task-goal">Goal</label>
-        <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
-        <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
-        <div>
-          <button type="button" id="new-task-submit">Start task</button>
-        </div>
-        <p class="note" id="new-task-status"></p>
+      <div class="detail-pane" id="tasks-detail" hidden><p class="note detail-empty">Select a task to see details.</p></div>
+      <div class="list-col" id="messages-list-col" hidden>
+        <div class="list-pane" id="messages-list" role="listbox" aria-label="Messages"></div>
+        <button type="button" class="secondary" id="messages-load-more" hidden>Load more</button>
       </div>
-
-      <div class="card">
-        <h2>Workspace guidance</h2>
-        <textarea id="guidance-text" placeholder="(none set)"></textarea>
-        <div>
-          <button type="button" id="guidance-save">Save</button>
-          <button type="button" class="secondary" id="guidance-clear">Clear</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>Message body limit</h2>
-        <label for="limits-value">Bytes</label>
-        <input type="number" id="limits-value">
-        <div>
-          <button type="button" id="limits-save">Save</button>
-          <button type="button" class="secondary" id="limits-reset">Reset to default</button>
-        </div>
-      </div>
+      <div class="detail-pane" id="messages-detail" hidden><p class="note detail-empty">Select a message to see details.</p></div>
     </div>
-  </div>
-
-  <div class="list-col hub-gated" id="tasks-list-col" hidden>
-    <div class="list-pane" id="tasks-list" role="listbox" aria-label="Tasks"></div>
-    <button type="button" class="secondary" id="tasks-load-more" hidden>Load more</button>
-  </div>
-  <div class="detail-pane hub-gated" id="tasks-detail" hidden><p class="note detail-empty">Select a task to see details.</p></div>
-
-  <div class="list-col" id="messages-list-col" hidden>
-    <div class="list-pane" id="messages-list" role="listbox" aria-label="Messages"></div>
-    <button type="button" class="secondary" id="messages-load-more" hidden>Load more</button>
-  </div>
-  <div class="detail-pane" id="messages-detail" hidden><p class="note detail-empty">Select a message to see details.</p></div>
+  </main>
 </div>
 
 <script src="/dashboard/hub/app.js"></script>
