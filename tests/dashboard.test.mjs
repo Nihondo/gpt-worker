@@ -415,6 +415,39 @@ describe("dashboard: message/task history pagination and retention framing", () 
     const res = await worker.fetch(req(`/dashboard/${workspaceId}/api/tasks`, { headers: { cookie } }), env);
     assert.equal((await res.json()).tasks[0].title, null);
   });
+
+  test("tasks page newest-first, with a stable (updated_at, task_id) tie-break cursor", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    // Same updated_at for several rows exercises the tie-breaker id half of
+    // the keyset cursor (mirrors the message pagination test above) rather
+    // than only the timestamp half.
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      doo.sql.exec(
+        `INSERT INTO tasks (task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary) VALUES (?, ?, NULL, 0, 'WAITING_PLAN', 'WEB', ?, ?, NULL)`,
+        `task-${i}`,
+        `goal-${i}`,
+        now,
+        now,
+      );
+    }
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const page1 = await worker.fetch(req(`/dashboard/${workspaceId}/api/tasks?limit=2`, { headers: { cookie } }), env);
+    const body1 = await page1.json();
+    assert.equal(body1.tasks.length, 2);
+    assert.ok(body1.nextCursor);
+
+    const page2 = await worker.fetch(
+      req(`/dashboard/${workspaceId}/api/tasks?limit=2&cursor=${encodeURIComponent(body1.nextCursor)}`, { headers: { cookie } }),
+      env,
+    );
+    const body2 = await page2.json();
+    assert.equal(body2.tasks.length, 2);
+
+    const seenIds = new Set([...body1.tasks, ...body2.tasks].map((t) => t.taskId));
+    assert.equal(seenIds.size, 4, "no row skipped or duplicated across pages despite identical timestamps");
+  });
 });
 
 describe("dashboard: ack / discard / discard-task constraints", () => {
@@ -1165,7 +1198,7 @@ describe("hub dashboard: untrusted content and app.js safety", () => {
     // arrives, not merely swap the state.workspaceId pointer.
     const selectIndex = js.indexOf("function selectWorkspace(id, name)");
     assert.ok(selectIndex >= 0);
-    const selectBody = js.slice(selectIndex, selectIndex + 900);
+    const selectBody = js.slice(selectIndex, selectIndex + 1000);
     assert.match(selectBody, /selectionGen \+= 1/);
     assert.match(selectBody, /clearEl\(document\.getElementById\("messages-list"\)\)/);
     assert.match(selectBody, /clearEl\(document\.getElementById\("tasks-list"\)\)/);
@@ -1198,6 +1231,98 @@ describe("dashboard: app.js ack callback regression (loadMessages(more) argument
     const ackCallIndex = js.indexOf('api("/api/ack"');
     const nextChunk = js.slice(ackCallIndex, ackCallIndex + 400);
     assert.match(nextChunk, /loadMessages\(false\)/, "the ack handler must explicitly refresh the first page");
+  });
+});
+
+// Pins the exact cursor half of the fix: `state.<cursorField> =
+// res.body.nextCursor;` must appear in a load*(more)/load*(id, gen, more)
+// function body in exactly two places — the Load-more branch and the plain
+// (not-yet-expanded) first-page branch — and never inside the expanded-poll
+// merge branch. If that branch's `if (res.body.nextCursor) { ... merge ... }`
+// were changed to also reassign the state cursor, the deepest boundary from
+// Load more would be lost on the very next 10s poll, reintroducing the
+// reported bug even though the row-merging assertions above would still
+// pass. Also pins that the collapse sub-branch (first page now covers
+// everything) resets to cursor=null/expanded=false, and that the Load more
+// button's visibility reads the retained state cursor, not the raw response.
+function assertExpandedPollNeverOverwritesDeepestCursor(fnBody, cursorField, expandedField) {
+  const assignPattern = new RegExp("state\\." + cursorField + " = res\\.body\\.nextCursor;", "g");
+  const assignCount = (fnBody.match(assignPattern) || []).length;
+  assert.equal(
+    assignCount,
+    2,
+    "state." + cursorField + " = res.body.nextCursor must be assigned by exactly the Load-more branch and the non-expanded first-page branch, never by the expanded-poll merge branch"
+  );
+  assert.match(
+    fnBody,
+    new RegExp("state\\." + cursorField + " = null;\\s*\\n\\s*state\\." + expandedField + " = false;"),
+    "the expanded-poll collapse branch must reset both the cursor and the expanded flag once the first page covers the whole retained dataset"
+  );
+  assert.match(fnBody, new RegExp("loadMoreBtn\\.hidden = !state\\." + cursorField + ";"), "Load more visibility must read the retained state cursor");
+  assert.doesNotMatch(fnBody, /loadMoreBtn\.hidden = !res\.body\.nextCursor;/, "Load more visibility must not read the raw response cursor directly");
+}
+
+describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesExpanded contract)", () => {
+  // Regression coverage for the reported bug: Load more appended rows past
+  // the first page, but the 10s poll (loadTasks(false)/loadMessages(false))
+  // unconditionally replaced state.tasks/state.messages with a fresh first
+  // page and unconditionally overwrote the cursor with the first page's
+  // nextCursor, silently dropping every row loaded past page 1 and resetting
+  // the "load more" boundary. Source-level regression check, not a
+  // browser/DOM test, same rationale as the ack-callback checks above.
+  test("workspace app.js tracks expansion state and merges (not replaces) the list once Load more has been used", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    const js = await res.text();
+
+    assert.match(js, /tasksExpanded: false, messagesExpanded: false/, "state must track whether Load more has expanded each list");
+
+    const loadTasksIndex = js.indexOf("function loadTasks(more)");
+    assert.ok(loadTasksIndex >= 0);
+    const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
+    assert.match(loadTasksBody, /state\.tasksExpanded = true/, "Load more must mark the list expanded");
+    assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/, "an expanded poll response must be merged into the retained cache, not replace it");
+    assert.doesNotMatch(loadTasksBody, /if \(!more\) \{\s*state\.tasks = rows;/, "must not unconditionally replace the list on every non-Load-more fetch regardless of expansion state");
+
+    const loadMessagesIndex = js.indexOf("function loadMessages(more)");
+    assert.ok(loadMessagesIndex >= 0);
+    const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
+    assert.match(loadMessagesBody, /state\.messagesExpanded = true/, "Load more must mark the list expanded");
+    assert.match(loadMessagesBody, /mergeRows\(state\.messages, rows, "messageId", messageComparator\)/, "an expanded poll response must be merged into the retained cache, not replace it");
+    assert.doesNotMatch(loadMessagesBody, /if \(!more\) \{\s*state\.messages = rows;/, "must not unconditionally replace the list on every non-Load-more fetch regardless of expansion state");
+
+    assertExpandedPollNeverOverwritesDeepestCursor(loadTasksBody, "tasksCursor", "tasksExpanded");
+    assertExpandedPollNeverOverwritesDeepestCursor(loadMessagesBody, "messagesCursor", "messagesExpanded");
+  });
+
+  test("hub app.js has the same Load-more-survives-polling contract, and resets it when switching workspaces", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
+    const js = await res.text();
+
+    assert.match(js, /tasksExpanded: false, messagesExpanded: false/, "state must track whether Load more has expanded each list");
+
+    const selectIndex = js.indexOf("function selectWorkspace(id, name)");
+    assert.ok(selectIndex >= 0);
+    const selectBody = js.slice(selectIndex, selectIndex + 1000);
+    assert.match(selectBody, /state\.tasksExpanded = false/, "switching workspaces must reset the previous workspace's expansion state");
+    assert.match(selectBody, /state\.messagesExpanded = false/, "switching workspaces must reset the previous workspace's expansion state");
+
+    const loadTasksIndex = js.indexOf("function loadTasks(id, gen, more)");
+    assert.ok(loadTasksIndex >= 0);
+    const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
+    assert.match(loadTasksBody, /state\.tasksExpanded = true/);
+    assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/);
+
+    const loadMessagesIndex = js.indexOf("function loadMessages(id, gen, more)");
+    assert.ok(loadMessagesIndex >= 0);
+    const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
+    assert.match(loadMessagesBody, /state\.messagesExpanded = true/);
+    assert.match(loadMessagesBody, /mergeRows\(state\.messages, rows, "messageId", messageComparator\)/);
+
+    assertExpandedPollNeverOverwritesDeepestCursor(loadTasksBody, "tasksCursor", "tasksExpanded");
+    assertExpandedPollNeverOverwritesDeepestCursor(loadMessagesBody, "messagesCursor", "messagesExpanded");
   });
 });
 

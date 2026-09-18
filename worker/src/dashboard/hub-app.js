@@ -158,6 +158,11 @@
   var state = {
     workspaceId: null, selectionGen: 0, activeTaskId: null,
     messagesCursor: null, tasksCursor: null,
+    // Set once Load more has fetched past the first page — see loadTasks()/
+    // loadMessages() below for why polling must branch on this instead of
+    // always replacing the list with a fresh first page. Reset by
+    // selectWorkspace() along with the rest of the per-workspace cache.
+    tasksExpanded: false, messagesExpanded: false,
     tasks: [], messages: [],
     selectedTaskId: null, selectedMessageId: null,
     selectedTask: null, selectedMessage: null,
@@ -238,6 +243,8 @@
     state.activeTaskId = null;
     state.messagesCursor = null;
     state.tasksCursor = null;
+    state.tasksExpanded = false;
+    state.messagesExpanded = false;
     state.tasks = [];
     state.messages = [];
     state.selectedTaskId = null;
@@ -493,6 +500,35 @@
     loadPage(null);
   }
 
+  // ---- list merge/sort helpers (Load more + 10s polling) ----
+  // Polling (loadTasks(id, gen, false)/loadMessages(id, gen, false)) always
+  // re-fetches only the first page. Once Load more has expanded the list
+  // past that page, a plain poll response must not replace the whole list
+  // wholesale — that would silently drop every row loaded past page 1.
+  // Instead the fresh first page is merged into the retained cache (same id
+  // => overwritten with the fresh row, new id => added) and the combined
+  // list is re-sorted with the same ordering as the backend's own ORDER BY,
+  // so an expanded list never drifts out of sync with server order.
+  // Comparators use plain `<`/`>` on the id (not localeCompare) to match
+  // SQLite's BINARY-collation tie-break in dashboardTasks()/
+  // dashboardMessages() (worker/src/index.js) exactly.
+  function mergeRows(existing, fresh, idKey, comparator) {
+    var byId = {};
+    existing.forEach(function (r) { byId[r[idKey]] = r; });
+    fresh.forEach(function (r) { byId[r[idKey]] = r; });
+    var merged = Object.keys(byId).map(function (k) { return byId[k]; });
+    merged.sort(comparator);
+    return merged;
+  }
+  function taskComparator(a, b) {
+    if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+    return b.taskId > a.taskId ? 1 : b.taskId < a.taskId ? -1 : 0;
+  }
+  function messageComparator(a, b) {
+    if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
+    return b.messageId > a.messageId ? 1 : b.messageId < a.messageId ? -1 : 0;
+  }
+
   // ---- tasks ----
   function renderTaskRow(t, id, gen) {
     var row = el("button", { className: "list-row" });
@@ -577,32 +613,43 @@
     if (!state.tasks.length) listEl2.appendChild(el("p", { className: "note", text: "No tasks yet." }));
   }
 
+  function updateSelectedTaskFromRows(rows, id, gen) {
+    if (!state.selectedTaskId) return;
+    var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
+    if (fresh) {
+      var historyChanged = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt;
+      state.selectedTask = fresh;
+      if (historyChanged) loadTaskHistory(fresh.taskId, id, gen);
+      renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
+    }
+  }
+
   function loadTasks(id, gen, more) {
     var loadMoreBtn = document.getElementById("tasks-load-more");
     var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
     wsApiFor(id, "/tasks" + q).then(function (res) {
       if (!res.ok || gen !== state.selectionGen) return;
       var rows = res.body.tasks || [];
-      if (!more) {
-        state.tasks = rows;
-        if (state.selectedTaskId) {
-          var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
-          if (fresh) {
-            var historyChanged = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt;
-            state.selectedTask = fresh;
-            if (historyChanged) loadTaskHistory(fresh.taskId, id, gen);
-            renderDetailPane("tasks", renderTaskDetail(state.selectedTask, id, gen));
-          }
+      if (more) {
+        state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+        state.tasksCursor = res.body.nextCursor;
+        state.tasksExpanded = true;
+      } else if (state.tasksExpanded) {
+        if (res.body.nextCursor) {
+          state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+        } else {
+          state.tasks = rows;
+          state.tasksCursor = null;
+          state.tasksExpanded = false;
         }
+        updateSelectedTaskFromRows(rows, id, gen);
       } else {
-        var byId = {};
-        state.tasks.forEach(function (t) { byId[t.taskId] = t; });
-        rows.forEach(function (t) { byId[t.taskId] = t; });
-        state.tasks = Object.keys(byId).map(function (k) { return byId[k]; });
+        state.tasks = rows;
+        state.tasksCursor = res.body.nextCursor;
+        updateSelectedTaskFromRows(rows, id, gen);
       }
       renderTasksList(id, gen);
-      state.tasksCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
+      loadMoreBtn.hidden = !state.tasksCursor;
     });
   }
   document.getElementById("tasks-load-more").addEventListener("click", function () {
@@ -683,30 +730,41 @@
     if (!state.messages.length) listEl2.appendChild(el("p", { className: "note", text: "No messages yet." }));
   }
 
+  function updateSelectedMessageFromRows(rows, id, gen) {
+    if (!state.selectedMessageId) return;
+    var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
+    if (fresh) {
+      state.selectedMessage = fresh;
+      renderDetailPane("messages", renderMessageDetail(state.selectedMessage, id, gen));
+    }
+  }
+
   function loadMessages(id, gen, more) {
     var loadMoreBtn = document.getElementById("messages-load-more");
     var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
     wsApiFor(id, "/messages" + q).then(function (res) {
       if (!res.ok || gen !== state.selectionGen) return;
       var rows = res.body.messages || [];
-      if (!more) {
-        state.messages = rows;
-        if (state.selectedMessageId) {
-          var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
-          if (fresh) {
-            state.selectedMessage = fresh;
-            renderDetailPane("messages", renderMessageDetail(state.selectedMessage, id, gen));
-          }
+      if (more) {
+        state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+        state.messagesCursor = res.body.nextCursor;
+        state.messagesExpanded = true;
+      } else if (state.messagesExpanded) {
+        if (res.body.nextCursor) {
+          state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+        } else {
+          state.messages = rows;
+          state.messagesCursor = null;
+          state.messagesExpanded = false;
         }
+        updateSelectedMessageFromRows(rows, id, gen);
       } else {
-        var byId = {};
-        state.messages.forEach(function (m) { byId[m.messageId] = m; });
-        rows.forEach(function (m) { byId[m.messageId] = m; });
-        state.messages = Object.keys(byId).map(function (k) { return byId[k]; });
+        state.messages = rows;
+        state.messagesCursor = res.body.nextCursor;
+        updateSelectedMessageFromRows(rows, id, gen);
       }
       renderMessagesList(id, gen);
-      state.messagesCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
+      loadMoreBtn.hidden = !state.messagesCursor;
     });
   }
   document.getElementById("messages-load-more").addEventListener("click", function () {

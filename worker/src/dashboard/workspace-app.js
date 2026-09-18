@@ -138,6 +138,10 @@
   var state = {
     activeTaskId: null,
     messagesCursor: null, tasksCursor: null,
+    // Set once Load more has fetched past the first page — see loadTasks()/
+    // loadMessages() below for why polling must branch on this instead of
+    // always replacing the list with a fresh first page.
+    tasksExpanded: false, messagesExpanded: false,
     tasks: [], messages: [],
     selectedTaskId: null, selectedMessageId: null,
     selectedTask: null, selectedMessage: null,
@@ -369,6 +373,34 @@
     loadPage(null);
   }
 
+  // ---- list merge/sort helpers (Load more + 10s polling) ----
+  // Polling (loadTasks(false)/loadMessages(false)) always re-fetches only the
+  // first page. Once Load more has expanded the list past that page, a plain
+  // poll response must not replace the whole list wholesale — that would
+  // silently drop every row loaded past page 1. Instead the fresh first page
+  // is merged into the retained cache (same id => overwritten with the fresh
+  // row, new id => added) and the combined list is re-sorted with the same
+  // ordering as the backend's own ORDER BY, so an expanded list never drifts
+  // out of sync with server order. Comparators use plain `<`/`>` on the id
+  // (not localeCompare) to match SQLite's BINARY-collation tie-break in
+  // dashboardTasks()/dashboardMessages() (worker/src/index.js) exactly.
+  function mergeRows(existing, fresh, idKey, comparator) {
+    var byId = {};
+    existing.forEach(function (r) { byId[r[idKey]] = r; });
+    fresh.forEach(function (r) { byId[r[idKey]] = r; });
+    var merged = Object.keys(byId).map(function (k) { return byId[k]; });
+    merged.sort(comparator);
+    return merged;
+  }
+  function taskComparator(a, b) {
+    if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+    return b.taskId > a.taskId ? 1 : b.taskId < a.taskId ? -1 : 0;
+  }
+  function messageComparator(a, b) {
+    if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
+    return b.messageId > a.messageId ? 1 : b.messageId < a.messageId ? -1 : 0;
+  }
+
   // ---- tasks ----
   function renderTaskRow(t) {
     var row = el("button", { className: "list-row" });
@@ -447,36 +479,56 @@
     if (!state.tasks.length) listEl.appendChild(el("p", { className: "note", text: "No tasks yet." }));
   }
 
+  function updateSelectedTaskFromRows(rows) {
+    if (!state.selectedTaskId) return;
+    var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
+    if (fresh) {
+      // Selected row still present on the refreshed first page: follow its
+      // latest content.
+      var historyChanged = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt;
+      state.selectedTask = fresh;
+      if (historyChanged) loadTaskHistory(fresh.taskId);
+      renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
+    }
+    // else: keep the existing state.selectedTask snapshot untouched — it
+    // fell off the first page, but the detail pane must not blank.
+  }
+
   function loadTasks(more) {
     var loadMoreBtn = document.getElementById("tasks-load-more");
     var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
     api("/api/tasks" + q).then(function (res) {
       if (!res.ok) return;
       var rows = res.body.tasks || [];
-      if (!more) {
-        state.tasks = rows;
-        if (state.selectedTaskId) {
-          var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
-          if (fresh) {
-            // Selected row still present on the refreshed first page: follow
-            // its latest content.
-            var historyChanged = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt;
-            state.selectedTask = fresh;
-            if (historyChanged) loadTaskHistory(fresh.taskId);
-            renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
-          }
-          // else: keep the existing state.selectedTask snapshot untouched —
-          // it fell off the first page, but the detail pane must not blank.
+      if (more) {
+        // Load more: merge the next page onto the retained cache and advance
+        // to its cursor — this becomes the new "deepest" boundary that a
+        // later poll must not lose.
+        state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+        state.tasksCursor = res.body.nextCursor;
+        state.tasksExpanded = true;
+      } else if (state.tasksExpanded) {
+        // Polling while expanded: still only fetches the first page, but
+        // merges it into the retained cache instead of replacing the list —
+        // otherwise every row loaded via Load more would vanish on the next
+        // poll. Keep the deepest cursor from Load more unless the first page
+        // alone now covers the whole retained dataset (nextCursor === null),
+        // in which case it's safe to collapse back to a plain first page.
+        if (res.body.nextCursor) {
+          state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+        } else {
+          state.tasks = rows;
+          state.tasksCursor = null;
+          state.tasksExpanded = false;
         }
+        updateSelectedTaskFromRows(rows);
       } else {
-        var byId = {};
-        state.tasks.forEach(function (t) { byId[t.taskId] = t; });
-        rows.forEach(function (t) { byId[t.taskId] = t; });
-        state.tasks = Object.keys(byId).map(function (k) { return byId[k]; });
+        state.tasks = rows;
+        state.tasksCursor = res.body.nextCursor;
+        updateSelectedTaskFromRows(rows);
       }
       renderTasksList();
-      state.tasksCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
+      loadMoreBtn.hidden = !state.tasksCursor;
     });
   }
   document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
@@ -553,30 +605,41 @@
     if (!state.messages.length) listEl.appendChild(el("p", { className: "note", text: "No messages yet." }));
   }
 
+  function updateSelectedMessageFromRows(rows) {
+    if (!state.selectedMessageId) return;
+    var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
+    if (fresh) {
+      state.selectedMessage = fresh;
+      renderDetailPane("messages", renderMessageDetail(state.selectedMessage));
+    }
+  }
+
   function loadMessages(more) {
     var loadMoreBtn = document.getElementById("messages-load-more");
     var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
     api("/api/messages" + q).then(function (res) {
       if (!res.ok) return;
       var rows = res.body.messages || [];
-      if (!more) {
-        state.messages = rows;
-        if (state.selectedMessageId) {
-          var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
-          if (fresh) {
-            state.selectedMessage = fresh;
-            renderDetailPane("messages", renderMessageDetail(state.selectedMessage));
-          }
+      if (more) {
+        state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+        state.messagesCursor = res.body.nextCursor;
+        state.messagesExpanded = true;
+      } else if (state.messagesExpanded) {
+        if (res.body.nextCursor) {
+          state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+        } else {
+          state.messages = rows;
+          state.messagesCursor = null;
+          state.messagesExpanded = false;
         }
+        updateSelectedMessageFromRows(rows);
       } else {
-        var byId = {};
-        state.messages.forEach(function (m) { byId[m.messageId] = m; });
-        rows.forEach(function (m) { byId[m.messageId] = m; });
-        state.messages = Object.keys(byId).map(function (k) { return byId[k]; });
+        state.messages = rows;
+        state.messagesCursor = res.body.nextCursor;
+        updateSelectedMessageFromRows(rows);
       }
       renderMessagesList();
-      state.messagesCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
+      loadMoreBtn.hidden = !state.messagesCursor;
     });
   }
   document.getElementById("messages-load-more").addEventListener("click", function () { loadMessages(true); });
