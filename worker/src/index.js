@@ -104,6 +104,16 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ALARM_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+// docs/plans/queue-dashboard.md: workspace-owner-only Web dashboard.
+// Session lifecycle (§"dashboard session のライフサイクル"): 24h TTL, hashed
+// storage (never the raw token), swept by alarm(), revoked wholesale on
+// gpt_token rotation and on deprovision. Cookie is Path-scoped per workspace
+// (see dashboardSessionCookie) so two workspaces' dashboards never collide in
+// the same browser even though they share this one cookie name.
+const DASHBOARD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const DASHBOARD_COOKIE_NAME = "gw_dash_session";
+const DASHBOARD_HISTORY_DEFAULT_LIMIT = 50;
+const DASHBOARD_HISTORY_MAX_LIMIT = 100;
 const WORKSPACE_ID_RE = /^[0-9a-f]{16}$/;
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // authorization code: 5 min
 const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000; // access token: 1 hour
@@ -161,6 +171,28 @@ export default {
     // OAuth resource URL, per-workspace: "/mcp/<workspace_id>".
     if (parts.length === 2 && parts[0] === "mcp" && isValidWorkspaceId(parts[1])) {
       return handleOAuthMcpResource(request, env, parts[1]);
+    }
+
+    // Workspace-owner Web dashboard: "/dashboard/<workspace_id>[/...]"
+    // (docs/plans/queue-dashboard.md). This top-level layer only validates
+    // workspace_id's shape and forwards — session/login verification happens
+    // entirely inside the target DO (see BridgeDO.handleDashboard), same
+    // division of responsibility as every other route here.
+    if (parts[0] === "dashboard") {
+      if (parts.length < 2 || !isValidWorkspaceId(parts[1])) return new Response("not found", { status: 404 });
+      const workspaceId = parts[1];
+      const doId = env.BRIDGE_DO.idFromName(workspaceId);
+      const stub = env.BRIDGE_DO.get(doId);
+      const forwardUrl = new URL(request.url);
+      // workspace_id travels *into* the internal path (unlike /link,/local,
+      // which drop it once it has selected the DO instance) because the DO
+      // needs it verbatim to scope the session cookie's Path — see
+      // dashboardSessionCookie(). It carries no extra authority: the DO
+      // instance was already selected by idFromName above, and every
+      // dashboard session is validated against that same instance's own
+      // dashboard_sessions table regardless of what this segment says.
+      forwardUrl.pathname = `/dashboard/${workspaceId}${parts.length > 2 ? "/" + parts.slice(2).join("/") : ""}`;
+      return stub.fetch(new Request(forwardUrl, request));
     }
 
     if (parts.length !== 3) return new Response("not found", { status: 404 });
@@ -510,6 +542,107 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
+// ---------------------------------------------------------------------------
+// Dashboard support helpers (docs/plans/queue-dashboard.md): cookies, opaque
+// keyset-pagination cursors, and the fixed header sets its responses share.
+// ---------------------------------------------------------------------------
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** HttpOnly + Secure + SameSite=Strict, scoped to this one workspace's
+ *  dashboard path (see the routing comment above) so two workspaces' sessions
+ *  can never collide in the same browser even though the cookie name is
+ *  shared. `value: ""` + `maxAgeSeconds: 0` clears it (logout). */
+function dashboardSessionCookie(workspaceId, value, maxAgeSeconds) {
+  return [
+    `${DASHBOARD_COOKIE_NAME}=${value}`,
+    `Path=/dashboard/${workspaceId}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+    `Max-Age=${maxAgeSeconds}`,
+  ].join("; ");
+}
+
+/** Strict same-origin check for dashboard mutations (§"状態変更 API の CSRF
+ *  対策"). Deliberately not the existing checkOrigin(): that one treats a
+ *  missing Origin header as "allow" (fine for server-to-server callers with
+ *  no ambient credential — see its own comment), but the dashboard's
+ *  session cookie *is* ambient browser-sent authority, so a missing Origin
+ *  here must fail closed instead. */
+function checkDashboardOrigin(request) {
+  const origin = request.headers.get("origin");
+  if (!origin) return false;
+  try {
+    return origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+}
+
+function dashboardHtmlHeaders() {
+  return {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    // script-src 'self' (not the OAuth consent page's script-less CSP,
+    // which can't run the dashboard's polling/kanban JS) — see
+    // handleDashboardAppJs, served same-origin at .../app.js.
+    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  };
+}
+
+function dashboardJsHeaders() {
+  return { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
+}
+
+function dashboardApiHeaders() {
+  return { "cache-control": "no-store", "referrer-policy": "no-referrer" };
+}
+
+function base64UrlDecode(str) {
+  const normalized = String(str).replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/** Opaque keyset-pagination cursor (§"pagination の API 契約", U4): encodes
+ *  the (timestamp, tie-breaker id) of the last row on a page. Callers pass it
+ *  straight back; nothing outside this file interprets its contents. */
+function encodeDashboardCursor(t, id) {
+  return base64UrlEncode(new TextEncoder().encode(JSON.stringify({ t, id })));
+}
+
+function decodeDashboardCursor(raw) {
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(raw)));
+    if (!parsed || !Number.isFinite(parsed.t) || typeof parsed.id !== "string" || !parsed.id) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 /** The GET /oauth/authorize consent form (see
  *  BridgeDO.renderOAuthAuthorizeForm): a plain, dependency-free HTML page —
  *  no framework, no external script/style. Every already-validated OAuth
@@ -633,6 +766,437 @@ ${hiddenFields}
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// Dashboard HTML shell + same-origin script (docs/plans/queue-dashboard.md).
+// Shares renderOAuthConsentHtml's plain, dependency-free look; unlike that
+// page this one needs real JS (polling, mutations), so its CSP allows
+// `script-src 'self'` and the script itself lives at a same-origin
+// .../app.js response (handleDashboardAppJs) rather than inline.
+// ---------------------------------------------------------------------------
+
+const DASHBOARD_STYLE = `
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    padding: 24px;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .card {
+    max-width: 960px;
+    margin: 0 auto 20px;
+    background: #fff;
+    border: 1px solid #e5e5e7;
+    border-radius: 14px;
+    padding: 20px 24px;
+  }
+  .login-card { max-width: 420px; margin-top: 10vh; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  h2 { font-size: 15px; margin: 0 0 12px; }
+  .meta { font-size: 13px; color: #6e6e73; line-height: 1.5; margin: 0 0 8px; word-break: break-all; }
+  label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+  input, textarea {
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 14px;
+    border: 1px solid #d2d2d7;
+    border-radius: 8px;
+    background: #fff;
+    color: inherit;
+    font-family: inherit;
+  }
+  textarea { min-height: 70px; resize: vertical; }
+  button {
+    margin-top: 10px;
+    margin-right: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: #0071e3;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button.secondary { background: #6e6e73; }
+  button.danger { background: #c0392b; }
+  button:hover { opacity: 0.9; }
+  .row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .item { border-top: 1px solid #e5e5e7; padding: 10px 0; }
+  .item:first-child { border-top: none; }
+  .item pre { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #f5f5f7; padding: 8px; border-radius: 6px; max-height: 200px; overflow: auto; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: #eee; margin-right: 6px; }
+  .error { color: #c0392b; font-size: 13px; margin-top: 8px; }
+  .note { font-size: 12px; color: #86868b; margin-top: 12px; line-height: 1.4; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1c1e; color: #f5f5f7; }
+    .card { background: #2c2c2e; border-color: #3a3a3c; }
+    input, textarea { background: #1c1c1e; border-color: #48484a; color: #f5f5f7; }
+    .item pre { background: #1c1c1e; }
+    .badge { background: #3a3a3c; }
+  }
+`;
+
+function renderDashboardLoginHtml(workspaceId) {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt-worker dashboard</title>
+<style>${DASHBOARD_STYLE}</style>
+</head>
+<body>
+<div class="card login-card">
+<h1>gpt-worker dashboard</h1>
+<p class="meta">Workspace: <strong>${escapeHtml(workspaceId)}</strong></p>
+<form id="login-form">
+<label for="owner_token">Workspace owner token</label>
+<input type="password" id="owner_token" name="owner_token" autocomplete="off" autofocus required>
+<button type="submit">Log in</button>
+</form>
+<p class="error" id="login-error" hidden></p>
+<p class="note">Get this token with: <code>gpt-worker url -w &lt;workspace&gt;</code> — the <code>gpt_token</code> shown there, not the shared hub token.</p>
+</div>
+<script src="/dashboard/${encodeURIComponent(workspaceId)}/app.js"></script>
+</body>
+</html>
+`;
+  return html;
+}
+
+function renderDashboardShellHtml(workspaceId) {
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt-worker dashboard</title>
+<style>${DASHBOARD_STYLE}</style>
+</head>
+<body>
+<div class="card">
+  <div class="row">
+    <h1>gpt-worker dashboard</h1>
+    <button type="button" class="secondary" id="logout-btn">Log out</button>
+  </div>
+  <p class="meta">Workspace: <strong>${escapeHtml(workspaceId)}</strong></p>
+  <div id="overview">Loading…</div>
+</div>
+
+<div class="card">
+  <h2>Start a new task</h2>
+  <label for="new-task-goal">Goal</label>
+  <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
+  <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
+  <div>
+    <button type="button" id="new-task-submit">Start task</button>
+  </div>
+  <p class="note" id="new-task-status"></p>
+</div>
+
+<div class="card">
+  <h2>Workspace guidance</h2>
+  <textarea id="guidance-text" placeholder="(none set)"></textarea>
+  <div>
+    <button type="button" id="guidance-save">Save</button>
+    <button type="button" class="secondary" id="guidance-clear">Clear</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Message body limit</h2>
+  <label for="limits-value">Bytes</label>
+  <input type="number" id="limits-value">
+  <div>
+    <button type="button" id="limits-save">Save</button>
+    <button type="button" class="secondary" id="limits-reset">Reset to default</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row"><h2>Tasks</h2></div>
+  <p class="note">Only DONE/BLOCKED tasks older than 30 days, and acked messages older than 7 days, are purged — everything else stays until then.</p>
+  <div id="tasks-list"></div>
+  <button type="button" class="secondary" id="tasks-load-more" hidden>Load more</button>
+</div>
+
+<div class="card">
+  <div class="row"><h2>Messages</h2></div>
+  <div id="messages-list"></div>
+  <button type="button" class="secondary" id="messages-load-more" hidden>Load more</button>
+</div>
+
+<script src="/dashboard/${encodeURIComponent(workspaceId)}/app.js"></script>
+</body>
+</html>
+`;
+  return html;
+}
+
+/** Same-origin dashboard script (served at .../app.js, never inline — see
+ *  dashboardHtmlHeaders' CSP). Derives workspaceId from location.pathname
+ *  rather than a server-injected inline value, so this one static asset
+ *  works unmodified for every workspace. Renders every server-supplied
+ *  string (goal/body/terminal_summary/etc — untrusted workspace content,
+ *  never HTML-escaped again client-side) via textContent only; never
+ *  innerHTML with that data — see docs/plans/queue-dashboard.md's
+ *  "表示するデータのサニタイズ". Polling only (no SSE/WebSocket — out of
+ *  scope for v1). */
+const DASHBOARD_APP_JS = `(function () {
+  "use strict";
+  var parts = location.pathname.split("/").filter(Boolean);
+  var workspaceId = parts[1] || "";
+  var base = "/dashboard/" + workspaceId;
+  var POLL_MS = 10000;
+
+  function api(path, options) {
+    return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        return { ok: res.ok, status: res.status, body: body };
+      });
+    });
+  }
+
+  function el(tag, opts) {
+    var e = document.createElement(tag);
+    opts = opts || {};
+    if (opts.className) e.className = opts.className;
+    if (opts.text !== undefined) e.textContent = opts.text;
+    return e;
+  }
+
+  // Never innerHTML, even to clear — every element here is either built
+  // fresh via el()/textContent above or removed one node at a time.
+  function clearEl(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function fmtTime(ms) {
+    if (!ms) return "";
+    try { return new Date(ms).toLocaleString(); } catch (e) { return String(ms); }
+  }
+
+  // ---- login page ----
+  var loginForm = document.getElementById("login-form");
+  if (loginForm) {
+    loginForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var tokenInput = document.getElementById("owner_token");
+      var errorEl = document.getElementById("login-error");
+      errorEl.hidden = true;
+      api("/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ownerToken: tokenInput.value }),
+      }).then(function (res) {
+        if (res.ok) { location.reload(); return; }
+        errorEl.textContent = res.status === 403 ? "Invalid owner token." : "Login failed (" + res.status + ").";
+        errorEl.hidden = false;
+      });
+    });
+    return; // nothing else to do on the login page
+  }
+
+  // ---- dashboard shell ----
+  var overviewEl = document.getElementById("overview");
+  if (!overviewEl) return; // neither page — app.js loaded somewhere unexpected
+
+  var state = { activeTaskId: null, messagesCursor: null, tasksCursor: null };
+
+  document.getElementById("logout-btn").addEventListener("click", function () {
+    api("/logout", { method: "POST" }).then(function () { location.reload(); });
+  });
+
+  function renderOverview(data) {
+    clearEl(overviewEl);
+    var row = el("div", { className: "row" });
+    row.appendChild(el("span", { text: "Bridge: " + (data.connected ? "connected" : "not connected") }));
+    row.appendChild(el("span", { text: "Queued to ChatGPT: " + data.pendingToGpt }));
+    row.appendChild(el("span", { text: "Queued to local: " + data.pendingToLocal }));
+    overviewEl.appendChild(row);
+    var taskLine = el("p", { className: "meta" });
+    if (data.activeTask) {
+      state.activeTaskId = data.activeTask.taskId;
+      taskLine.textContent = "Active task: " + data.activeTask.taskId + " (" + data.activeTask.protocolState + ")";
+    } else {
+      state.activeTaskId = null;
+      taskLine.textContent = "No active task.";
+    }
+    overviewEl.appendChild(taskLine);
+    var settingsLine = el("p", { className: "meta" });
+    settingsLine.textContent = "Guidance set: " + (data.guidanceSet ? "yes" : "no") + " · Body limit: " + data.maxBodyBytes + " bytes";
+    overviewEl.appendChild(settingsLine);
+  }
+
+  function loadOverview() {
+    api("/api/overview").then(function (res) {
+      if (res.ok) renderOverview(res.body);
+    });
+  }
+
+  // ---- guidance ----
+  function loadGuidance() {
+    api("/api/guidance").then(function (res) {
+      if (res.ok) document.getElementById("guidance-text").value = res.body.guidance || "";
+    });
+  }
+  document.getElementById("guidance-save").addEventListener("click", function () {
+    var text = document.getElementById("guidance-text").value;
+    api("/api/guidance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: text }) });
+  });
+  document.getElementById("guidance-clear").addEventListener("click", function () {
+    api("/api/guidance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clear: true }) }).then(function () {
+      document.getElementById("guidance-text").value = "";
+    });
+  });
+
+  // ---- limits ----
+  function loadLimits() {
+    api("/api/limits").then(function (res) {
+      if (res.ok) document.getElementById("limits-value").value = res.body.maxBodyBytes;
+    });
+  }
+  document.getElementById("limits-save").addEventListener("click", function () {
+    var value = Number(document.getElementById("limits-value").value);
+    api("/api/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: value }) }).then(loadLimits);
+  });
+  document.getElementById("limits-reset").addEventListener("click", function () {
+    api("/api/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: null }) }).then(loadLimits);
+  });
+
+  // ---- new task ----
+  document.getElementById("new-task-submit").addEventListener("click", function () {
+    var goal = document.getElementById("new-task-goal").value;
+    var force = document.getElementById("new-task-force").checked;
+    var statusEl = document.getElementById("new-task-status");
+    if (!goal.trim()) { statusEl.textContent = "Goal is required."; return; }
+    if (force && !confirm("This will BLOCK the currently active task. Continue?")) return;
+    statusEl.textContent = "Starting…";
+    api("/api/start-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ goal: goal, force: force }) }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        statusEl.textContent = "Failed: " + (res.body.error || res.status);
+        return;
+      }
+      var nudgeStatus = res.body.nudge && res.body.nudge.status;
+      statusEl.textContent = "Task " + res.body.task.taskId + " queued. Browser notification: " + (nudgeStatus || "unknown") + ".";
+      document.getElementById("new-task-goal").value = "";
+      document.getElementById("new-task-force").checked = false;
+      loadAll();
+    });
+  });
+
+  // ---- messages ----
+  function renderMessage(m) {
+    var item = el("div", { className: "item" });
+    var head = el("div");
+    head.appendChild(el("span", { className: "badge", text: m.dir }));
+    head.appendChild(el("span", { className: "badge", text: m.kind }));
+    head.appendChild(el("span", { className: "badge", text: m.state }));
+    head.appendChild(el("span", { text: " task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
+    item.appendChild(head);
+    var pre = el("pre", { text: m.body });
+    item.appendChild(pre);
+    if (m.dir === "to_local" && m.state !== "acked") {
+      var ackBtn = el("button", { text: "Ack" });
+      ackBtn.addEventListener("click", function () {
+        // Not .then(loadMessages) — that would pass the resolved {ok,status,body}
+        // object through as loadMessages(more), which loadMessages() treats as a
+        // truthy "load more" flag (skips clearing the list, and may fetch the
+        // next cursor page instead of refreshing the first page).
+        api("/api/ack", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId: m.messageId }) }).then(function () {
+          loadMessages(false);
+        });
+      });
+      item.appendChild(ackBtn);
+    }
+    var canDiscardDirectly = m.state !== "acked" && !(m.dir === "to_gpt" && state.activeTaskId === m.taskId);
+    if (canDiscardDirectly) {
+      var discardBtn = el("button", { className: "danger", text: "Discard" });
+      discardBtn.addEventListener("click", function () {
+        if (!confirm("Discard this message?")) return;
+        api("/api/discard", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId: m.messageId }) }).then(function (res) {
+          if (res.body && res.body.error === "USE_DISCARD_TASK") {
+            alert("This message belongs to the active task; discard the task instead.");
+          }
+          loadMessages();
+        });
+      });
+      item.appendChild(discardBtn);
+    } else if (m.dir === "to_gpt" && m.state !== "acked" && state.activeTaskId === m.taskId) {
+      item.appendChild(el("span", { className: "note", text: " (part of the active task — use \\"Discard task\\" below)" }));
+    }
+    return item;
+  }
+
+  function loadMessages(more) {
+    var listEl = document.getElementById("messages-list");
+    var loadMoreBtn = document.getElementById("messages-load-more");
+    var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
+    api("/api/messages" + q).then(function (res) {
+      if (!res.ok) return;
+      if (!more) clearEl(listEl);
+      res.body.messages.forEach(function (m) { listEl.appendChild(renderMessage(m)); });
+      state.messagesCursor = res.body.nextCursor;
+      loadMoreBtn.hidden = !res.body.nextCursor;
+    });
+  }
+  document.getElementById("messages-load-more").addEventListener("click", function () { loadMessages(true); });
+
+  // ---- tasks ----
+  function renderTask(t) {
+    var item = el("div", { className: "item" });
+    var head = el("div");
+    head.appendChild(el("span", { className: "badge", text: t.protocolState }));
+    head.appendChild(el("span", { text: t.taskId + " · updated " + fmtTime(t.updatedAt) }));
+    item.appendChild(head);
+    item.appendChild(el("div", { text: t.goal }));
+    if (t.terminalSummary) item.appendChild(el("pre", { text: t.terminalSummary }));
+    if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
+      var discardBtn = el("button", { className: "danger", text: "Discard task" });
+      discardBtn.addEventListener("click", function () {
+        if (!confirm("Discard task " + t.taskId + "? This marks it BLOCKED and clears its queued messages.")) return;
+        api("/api/discard-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
+      });
+      item.appendChild(discardBtn);
+    }
+    return item;
+  }
+
+  function loadTasks(more) {
+    var listEl = document.getElementById("tasks-list");
+    var loadMoreBtn = document.getElementById("tasks-load-more");
+    var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
+    api("/api/tasks" + q).then(function (res) {
+      if (!res.ok) return;
+      if (!more) clearEl(listEl);
+      res.body.tasks.forEach(function (t) { listEl.appendChild(renderTask(t)); });
+      state.tasksCursor = res.body.nextCursor;
+      loadMoreBtn.hidden = !res.body.nextCursor;
+    });
+  }
+  document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
+
+  function loadAll() {
+    loadOverview();
+    loadGuidance();
+    loadLimits();
+    loadMessages(false);
+    loadTasks(false);
+  }
+
+  loadAll();
+  setInterval(function () {
+    loadOverview();
+    loadMessages(false);
+    loadTasks(false);
+  }, POLL_MS);
+})();
+`;
 
 /** Handles the secret-free OAuth MCP resource routes ("/mcp" and
  *  "/mcp/<workspace_id>"): Bearer-authenticates the request against the
@@ -945,6 +1509,32 @@ export class BridgeDO {
       )
     `);
 
+    // Web dashboard sessions (docs/plans/queue-dashboard.md). Deliberately a
+    // separate table from `secrets`: this holds short-lived, hashed,
+    // revocable session tokens issued *after* a one-time owner-token login
+    // (see checkResourceOwnerToken / createDashboardSession), never the
+    // owner token itself. Swept by alarm() (expired rows), deprovision()
+    // (all rows) and rotateSecret("gpt_token") (all rows, since a leaked
+    // owner token rotation should also cut off dashboard sessions already
+    // issued under the old value).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS dashboard_sessions (
+        session_hash TEXT PRIMARY KEY,
+        expires_at   INTEGER NOT NULL,
+        created_at   INTEGER NOT NULL
+      )
+    `);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expiry ON dashboard_sessions(expires_at)`);
+
+    // Keyset-pagination index for the dashboard's message/task history APIs
+    // (§"pagination の API 契約", U4) — the existing idx_q/idx_tasks_active
+    // indices are shaped for the live queue/active-task lookups, not a
+    // direction-agnostic, all-states history scan ordered by
+    // (created_at/updated_at, tie-breaker id).
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_history ON msgs(created_at DESC, message_id DESC)`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_task_history ON msgs(task_id, created_at DESC, message_id DESC)`);
+    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(updated_at DESC, task_id DESC)`);
+
     ctx.blockConcurrencyWhile(async () => {
       const current = await ctx.storage.getAlarm();
       if (current === null) await ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
@@ -956,6 +1546,11 @@ export class BridgeDO {
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts.length === 1 && parts[0] === "admin") return this.handleAdmin(request);
     if (parts.length === 1 && parts[0] === "hub") return this.handleHubRelay(request);
+    // Web dashboard (docs/plans/queue-dashboard.md): forwarded here as
+    // /dashboard/<workspace_id>[/...] — see the top-level routing comment.
+    // Variable length (root shell, app.js, login/logout, api/*), so this
+    // dispatches by prefix rather than the fixed part-count checks below.
+    if (parts[0] === "dashboard" && parts.length >= 2) return this.handleDashboard(request, parts[1], parts.slice(2));
     // Internal-only OAuth routes: reachable exclusively through a
     // BRIDGE_DO binding call from the top-level Worker (see
     // handleOAuthAuthorizeRoute/handleOAuthTokenRoute/validateAccessToken/
@@ -1027,6 +1622,7 @@ export class BridgeDO {
     this.sql.exec(`DELETE FROM oauth_access_tokens`);
     this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
     this.sql.exec(`DELETE FROM oauth_clients`);
+    this.sql.exec(`DELETE FROM dashboard_sessions`);
     return { ok: true };
   }
 
@@ -1054,7 +1650,15 @@ export class BridgeDO {
     if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
     const value = randomHex(32);
     this.setSecret(key, value);
-    if (key === "gpt_token") this.revokeAllOAuthTokens();
+    if (key === "gpt_token") {
+      this.revokeAllOAuthTokens();
+      // gpt_token doubles as the dashboard login credential (see
+      // checkResourceOwnerToken) — a deliberate rotation must also revoke
+      // sessions already issued under the old value, same reasoning as the
+      // OAuth grants above (docs/plans/queue-dashboard.md's "owner token
+      // rotation" row).
+      this.revokeAllDashboardSessions();
+    }
     return { value };
   }
 
@@ -2014,6 +2618,359 @@ export class BridgeDO {
     return guidance ? { set: true, guidance } : { set: false };
   }
 
+  // ======================= /dashboard : Web dashboard =======================
+  // docs/plans/queue-dashboard.md. Workspace-owner-only: login exchanges the
+  // workspace's own gpt_token (never hub_gpt_token — see
+  // checkResourceOwnerToken's doc comment: a workspace DO never has
+  // hub_gpt_token set, so only gpt_token can ever succeed here) for a
+  // short-lived hashed session (see the dashboard_sessions table comment in
+  // the constructor). Every mutation reuses the same local* methods the CLI
+  // uses, so the two surfaces can never disagree about what's allowed.
+
+  async createDashboardSession() {
+    const raw = randomHex(32);
+    const hash = await sha256Hex(raw);
+    const now = Date.now();
+    this.sql.exec(`INSERT INTO dashboard_sessions (session_hash, expires_at, created_at) VALUES (?, ?, ?)`, hash, now + DASHBOARD_SESSION_TTL_MS, now);
+    return { raw, expiresAt: now + DASHBOARD_SESSION_TTL_MS };
+  }
+
+  /** Also opportunistically deletes an already-expired row it happens to hit,
+   *  rather than waiting for the next alarm() sweep — cheap, and keeps a
+   *  just-expired session from working until the next 24h alarm cycle runs. */
+  async verifyDashboardSession(raw) {
+    if (typeof raw !== "string" || !raw) return false;
+    const hash = await sha256Hex(raw);
+    const rows = this.sql.exec(`SELECT expires_at FROM dashboard_sessions WHERE session_hash = ?`, hash).toArray();
+    if (rows.length === 0) return false;
+    if (rows[0].expires_at < Date.now()) {
+      this.sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+      return false;
+    }
+    return true;
+  }
+
+  async revokeDashboardSession(raw) {
+    if (typeof raw !== "string" || !raw) return;
+    const hash = await sha256Hex(raw);
+    this.sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+  }
+
+  /** Called from rotateSecret("gpt_token") and deprovision() — see their own
+   *  comments for why a leaked-token rotation must also cut off sessions
+   *  already issued under the old value. */
+  revokeAllDashboardSessions() {
+    this.sql.exec(`DELETE FROM dashboard_sessions`);
+  }
+
+  async handleDashboard(request, workspaceId, subParts) {
+    // No shared pre-auth rate-limit bucket here on purpose: an earlier
+    // version gated every dashboard request (public shell, login, and
+    // authenticated API alike) through one "dashboard" bucket before
+    // dispatch, which let an unauthenticated caller — workspace_id is a
+    // routing key, not a secret, so this needs no credential at all —
+    // exhaust the same bucket the legitimate owner's authenticated
+    // polling/mutations depend on. Each route below owns its own bucket
+    // instead (see handleDashboardShell/handleDashboardAppJs/
+    // handleDashboardLogin/handleDashboardLogout/handleDashboardApi), sized
+    // for what it actually guards.
+    if (subParts.length === 0) return this.handleDashboardShell(request, workspaceId);
+    if (subParts.length === 1 && subParts[0] === "app.js") return this.handleDashboardAppJs(request);
+    if (subParts.length === 1 && subParts[0] === "login") return this.handleDashboardLogin(request, workspaceId);
+    if (subParts.length === 1 && subParts[0] === "logout") return this.handleDashboardLogout(request, workspaceId);
+    if (subParts[0] === "api") return this.handleDashboardApi(request, subParts.slice(1));
+    return new Response("not found", { status: 404 });
+  }
+
+  async handleDashboardShell(request, workspaceId) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const cookies = parseCookies(request.headers.get("cookie"));
+    const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    const html = authed ? renderDashboardShellHtml(workspaceId) : renderDashboardLoginHtml(workspaceId);
+    return new Response(html, { status: 200, headers: dashboardHtmlHeaders() });
+  }
+
+  async handleDashboardAppJs(request) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    return new Response(DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
+  }
+
+  async handleDashboardLogin(request, workspaceId) {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    // Its own tight bucket, distinct from dashboard-public/dashboard-api —
+    // this is the credential-guessing surface, so it stays far below the
+    // generous polling caps regardless of what happens to those.
+    if (!this.rateLimit("dashboard-login", 10)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+    if (parsed.parseError || !parsed.value || typeof parsed.value.ownerToken !== "string" || !parsed.value.ownerToken) {
+      return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+    }
+    if (!this.checkResourceOwnerToken(parsed.value.ownerToken)) {
+      return json({ error: "INVALID_CREDENTIAL" }, 403, dashboardApiHeaders());
+    }
+    const session = await this.createDashboardSession();
+    return json({ ok: true }, 200, {
+      ...dashboardApiHeaders(),
+      "set-cookie": dashboardSessionCookie(workspaceId, session.raw, Math.floor(DASHBOARD_SESSION_TTL_MS / 1000)),
+    });
+  }
+
+  async handleDashboardLogout(request, workspaceId) {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    if (!this.rateLimit("dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const cookies = parseCookies(request.headers.get("cookie"));
+    await this.revokeDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    return json({ ok: true }, 200, { ...dashboardApiHeaders(), "set-cookie": dashboardSessionCookie(workspaceId, "", 0) });
+  }
+
+  /** Every /api/* route requires a valid session; every mutating (POST) one
+   *  also requires a strict same-origin Origin (see checkDashboardOrigin) —
+   *  `SameSite=Strict` alone is not treated as sufficient CSRF protection
+   *  (§"状態変更 API の CSRF 対策"). Rate limiting is deliberately two-tier
+   *  and, on purpose, uses **no bucket in common** with the public
+   *  shell/app.js/logout routes (`dashboard-public`) or login
+   *  (`dashboard-login`) — sharing a bucket anywhere on this path would let
+   *  a flood against one of those unauthenticated routes 429 the legitimate
+   *  owner's authenticated calls too, exactly the isolation problem this
+   *  split exists to prevent. Which bucket applies is decided by the
+   *  session check's own outcome, not checked unconditionally up front:
+   *  `dashboard-api-unauth` only ever accounts for a request that just
+   *  failed `verifyDashboardSession()` (bounding the cost of a flood of
+   *  missing/invalid cookies); `dashboard-api` only ever accounts for a
+   *  request whose session just verified. A caller with a currently-valid
+   *  session therefore can never be rate-limited by unauthenticated
+   *  traffic — it only ever competes against its own bucket. */
+  async handleDashboardApi(request, subParts) {
+    const cookies = parseCookies(request.headers.get("cookie"));
+    const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    if (!authed) {
+      if (!this.rateLimit("dashboard-api-unauth", 120)) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+      }
+      return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
+    }
+    if (!this.rateLimit("dashboard-api", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    if (request.method === "POST" && !checkDashboardOrigin(request)) {
+      return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    }
+
+    const name = subParts.join("/");
+    const url = new URL(request.url);
+    if (name === "overview" && request.method === "GET") return json(this.dashboardOverview(), 200, dashboardApiHeaders());
+    if (name === "messages" && request.method === "GET") return json(this.dashboardMessages(url.searchParams), 200, dashboardApiHeaders());
+    if (name === "tasks" && request.method === "GET") return json(this.dashboardTasks(url.searchParams), 200, dashboardApiHeaders());
+    if (name === "guidance" && request.method === "GET") return json(this.workspaceGuidance(), 200, dashboardApiHeaders());
+    if (name === "guidance" && request.method === "POST") return json(await this.dashboardSetGuidance(request), 200, dashboardApiHeaders());
+    if (name === "limits" && request.method === "GET") return json(this.localMaxBodyBytesGet(), 200, dashboardApiHeaders());
+    if (name === "limits" && request.method === "POST") return json(await this.dashboardSetLimits(request), 200, dashboardApiHeaders());
+    if (name === "ack" && request.method === "POST") return json(await this.dashboardAck(request), 200, dashboardApiHeaders());
+    if (name === "discard" && request.method === "POST") return json(await this.dashboardDiscard(request), 200, dashboardApiHeaders());
+    if (name === "discard-task" && request.method === "POST") return json(await this.dashboardDiscardTask(request), 200, dashboardApiHeaders());
+    if (name === "start-task" && request.method === "POST") return json(await this.dashboardStartTask(request), 200, dashboardApiHeaders());
+    return json({ error: "UNKNOWN_ROUTE" }, 404, dashboardApiHeaders());
+  }
+
+  dashboardOverview() {
+    const status = this.localStatus();
+    return {
+      connected: status.connected,
+      pendingToGpt: status.pendingToGpt,
+      pendingToLocal: status.pendingToLocal,
+      activeTask: this.taskView(this.activeTask()),
+      guidanceSet: this.workspaceGuidance().set,
+      maxBodyBytes: this.localMaxBodyBytesGet().maxBodyBytes,
+      retention: { ackedMessagesMs: RETENTION_MS, terminalTasksMs: TASK_RETENTION_MS },
+    };
+  }
+
+  /** Retention-bounded (§"retention 境界"), acked-included message history —
+   *  unlike localList() (unacked only, debug-oriented). Keyset-paginated
+   *  (created_at DESC, message_id DESC) per the U4 API contract. */
+  dashboardMessages(params) {
+    const limit = Math.min(Math.max(Number(params.get("limit")) || DASHBOARD_HISTORY_DEFAULT_LIMIT, 1), DASHBOARD_HISTORY_MAX_LIMIT);
+    const taskId = params.get("task_id") || null;
+    const cursor = decodeDashboardCursor(params.get("cursor"));
+    const conditions = [];
+    const args = [];
+    if (taskId) {
+      conditions.push("task_id = ?");
+      args.push(taskId);
+    }
+    if (cursor) {
+      conditions.push("(created_at < ? OR (created_at = ? AND message_id < ?))");
+      args.push(cursor.t, cursor.t, cursor.id);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.sql
+      .exec(
+        `SELECT message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
+        ...args,
+        limit + 1
+      )
+      .toArray();
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const now = Date.now();
+    return {
+      messages: page.map((r) => ({
+        messageId: r.message_id,
+        dir: r.dir,
+        taskId: r.task_id,
+        iteration: r.iteration,
+        kind: r.kind,
+        body: r.body,
+        // Same leased-but-expired normalization as localList() — see there.
+        state: r.state === "leased" && r.lease_until && r.lease_until < now ? "pending" : r.state,
+        createdAt: r.created_at,
+      })),
+      nextCursor: hasMore ? encodeDashboardCursor(page[page.length - 1].created_at, page[page.length - 1].message_id) : null,
+    };
+  }
+
+  /** Full task history (not just terminal, unlike taskHistory()), keyset-
+   *  paginated (updated_at DESC, task_id DESC). Uses the correctly-named
+   *  `updatedAt` field rather than repeating taskHistory()'s misnamed
+   *  `created_at` (see docs/plans/queue-dashboard.md's "既存 getter の注意
+   *  点"). */
+  dashboardTasks(params) {
+    const limit = Math.min(Math.max(Number(params.get("limit")) || DASHBOARD_HISTORY_DEFAULT_LIMIT, 1), DASHBOARD_HISTORY_MAX_LIMIT);
+    const cursor = decodeDashboardCursor(params.get("cursor"));
+    const conditions = [];
+    const args = [];
+    if (cursor) {
+      conditions.push("(updated_at < ? OR (updated_at = ? AND task_id < ?))");
+      args.push(cursor.t, cursor.t, cursor.id);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.sql
+      .exec(
+        `SELECT task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary FROM tasks ${where} ORDER BY updated_at DESC, task_id DESC LIMIT ?`,
+        ...args,
+        limit + 1
+      )
+      .toArray();
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    return {
+      tasks: page.map((r) => ({
+        taskId: r.task_id,
+        goal: r.goal,
+        iteration: r.iteration,
+        protocolState: r.protocol_state,
+        waitingFor: r.waiting_for,
+        taskStartedAt: r.task_started_at,
+        updatedAt: r.updated_at,
+        terminalSummary: r.terminal_summary || null,
+      })),
+      nextCursor: hasMore ? encodeDashboardCursor(page[page.length - 1].updated_at, page[page.length - 1].task_id) : null,
+    };
+  }
+
+  async dashboardSetGuidance(request) {
+    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value) return { error: "INVALID_ARGS" };
+    if (parsed.value.clear) return this.localGuidanceClear();
+    if (typeof parsed.value.text !== "string") return { error: "INVALID_ARGS" };
+    return this.localGuidanceSet({ text: parsed.value.text });
+  }
+
+  async dashboardSetLimits(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value) return { error: "INVALID_ARGS" };
+    const maxBodyBytes = parsed.value.maxBodyBytes === undefined ? null : parsed.value.maxBodyBytes;
+    return this.localMaxBodyBytesSet({ maxBodyBytes });
+  }
+
+  /** Only `dir='to_local'` messages, same as localAck() itself — matches
+   *  §"詳細救済操作" table: ack has no defined meaning for a to_gpt row. */
+  async dashboardAck(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.messageId !== "string") return { error: "INVALID_ARGS" };
+    const rows = this.sql.exec(`SELECT dir FROM msgs WHERE message_id = ?`, parsed.value.messageId).toArray();
+    if (rows.length === 0) return { error: "NOT_FOUND" };
+    if (rows[0].dir !== "to_local") return { error: "ACK_NOT_ALLOWED", message: "Only to_local messages can be acked." };
+    return this.localAck({ message_id: parsed.value.messageId });
+  }
+
+  /** Refuses a single-message discard of an active (non-terminal) task's
+   *  to_gpt row — the plan's §"UI 制約" constraint: doing so would leave
+   *  `tasks.protocol_state` stuck (activeTask() keeps returning it) with no
+   *  way to recover (localEnqueue's idempotency check would keep finding the
+   *  discarded, acked row instead of inserting a fresh INIT). Callers must
+   *  use discard-task instead, which clears both sides consistently. */
+  async dashboardDiscard(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.messageId !== "string") return { error: "INVALID_ARGS" };
+    const rows = this.sql.exec(`SELECT dir, task_id FROM msgs WHERE message_id = ?`, parsed.value.messageId).toArray();
+    if (rows.length === 0) return { error: "NOT_FOUND" };
+    const row = rows[0];
+    if (row.dir === "to_gpt") {
+      const task = this.getTask(row.task_id);
+      if (task && !["DONE", "BLOCKED"].includes(task.protocol_state)) {
+        return { error: "USE_DISCARD_TASK", message: "This message belongs to an active task; discard the task instead to keep protocol state consistent." };
+      }
+    }
+    return this.localDiscard({ message_id: parsed.value.messageId });
+  }
+
+  async dashboardDiscardTask(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.taskId !== "string") return { error: "INVALID_ARGS" };
+    const task = this.getTask(parsed.value.taskId);
+    if (!task) return { error: "NOT_FOUND" };
+    if (["DONE", "BLOCKED"].includes(task.protocol_state)) return { error: "ALREADY_TERMINAL" };
+    return this.localDiscardTask({ task_id: parsed.value.taskId });
+  }
+
+  /** The one path that creates a task from the dashboard — always through
+   *  localStartTask() (§"新規タスク投入"), never a second ad hoc INSERT.
+   *  task_id is generated server-side (crypto.randomUUID(), same as the
+   *  CLI) and the INIT body uses the identical "GOAL:\n<goal>" contract.
+   *  Task creation is authoritative regardless of what the best-effort
+   *  browser nudge below does — see docs/plans/queue-dashboard.md's
+   *  "ブラウザ通知は best-effort". */
+  async dashboardStartTask(request) {
+    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value.goal !== "string" || !parsed.value.goal.trim()) {
+      return { error: "INVALID_ARGS" };
+    }
+    const goal = parsed.value.goal;
+    const force = !!parsed.value.force;
+    const text = `GOAL:\n${goal}`;
+    if (byteLength(text) > this.maxBodyBytes()) {
+      return { error: "BODY_TOO_LARGE", message: `goal exceeds ${this.maxBodyBytes()} bytes (raise it with: gpt-worker limits <bytes>)` };
+    }
+    const taskId = crypto.randomUUID();
+    const started = this.localStartTask({ task_id: taskId, goal, text, force });
+    if (started.error) return started;
+    // Best-effort push to the local bridge daemon (see bridge/link.mjs's
+    // dashboard_task_created handler): ACKed before browser automation runs,
+    // so a slow/failed nudge never looks like a failed task creation here.
+    const nudge = await this.callLocal("dashboard_task_created", { taskId });
+    return { ...started, nudge: { status: nudge.ok ? "dispatched" : (nudge.error && nudge.error.status) || "unknown" } };
+  }
+
   // ======================= /local : CLI-facing HTTP =======================
 
   async handleLocalRoute(request, token) {
@@ -2099,6 +3056,25 @@ export class BridgeDO {
     if (typeof taskId !== "string" || typeof goal !== "string" || typeof text !== "string") {
       return { error: "INVALID_ARGS" };
     }
+    // Preflight the one predictable, common failure mode of localEnqueue()
+    // (an oversized INIT body) *before* any state mutation below — in
+    // particular before a force discard BLOCKs the previous active task.
+    // Doing this check only after the INSERT/discard (the original order)
+    // could otherwise leave a WAITING_PLAN tasks row with zero queued INIT,
+    // and — with force — also lose the previous task, which localEnqueue's
+    // own idempotency check can't recover from (it would keep matching the
+    // already-acked discarded row instead of inserting a fresh one). See
+    // docs/plans/queue-dashboard.md's "localStartTask() の失敗時の整合性".
+    if (byteLength(text) > this.maxBodyBytes()) return { error: "BODY_TOO_LARGE" };
+    // Same reasoning, same ordering requirement: task_id is a primary key,
+    // so an existing row (the current active task included — a caller can
+    // pass force:true with that same task_id) would otherwise throw a raw
+    // SQL constraint error out of the INSERT below, and with force could
+    // discard/BLOCK the previous active task first regardless. Reject it as
+    // a controlled protocol error before any mutation, not an exception
+    // after one.
+    if (this.getTask(taskId)) return { error: "TASK_EXISTS" };
+
     const active = this.activeTask();
     if (active && !force) return { error: "ACTIVE_TASK", task: this.taskView(active) };
     if (active) this.localDiscardTask({ task_id: active.task_id });
@@ -2113,7 +3089,14 @@ export class BridgeDO {
       now
     );
     const queued = this.localEnqueue({ kind: "INIT", task_id: taskId, iteration: 0, body: text });
-    if (queued.error) return queued;
+    if (queued.error) {
+      // Belt-and-suspenders: the preflight above should make this
+      // unreachable for BODY_TOO_LARGE, but any other localEnqueue failure
+      // must not leave an orphaned tasks row with no queued INIT — roll it
+      // back rather than leaving WAITING_PLAN wedged forever.
+      this.sql.exec(`DELETE FROM tasks WHERE task_id = ?`, taskId);
+      return queued;
+    }
     return { task: this.taskView(this.getTask(taskId)), ...queued };
   }
 
@@ -2355,6 +3338,7 @@ export class BridgeDO {
     this.sql.exec(`DELETE FROM oauth_authorization_codes WHERE expires_at < ?`, now);
     this.sql.exec(`DELETE FROM oauth_access_tokens WHERE expires_at < ? OR revoked_at IS NOT NULL`, now);
     this.sql.exec(`DELETE FROM oauth_refresh_tokens WHERE expires_at < ? OR revoked_at IS NOT NULL`, now);
+    this.sql.exec(`DELETE FROM dashboard_sessions WHERE expires_at < ?`, now);
     await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
   }
 }

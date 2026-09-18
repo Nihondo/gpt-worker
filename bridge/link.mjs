@@ -114,11 +114,16 @@ function sanitizeResult(result, pathContext) {
 }
 
 export class BridgeLink {
-  constructor({ workerUrl, workspaceId, linkToken, workspaceRoot, alwaysAllow, onPlanPushed }) {
+  constructor({ workerUrl, workspaceId, linkToken, workspaceRoot, alwaysAllow, onPlanPushed, onDashboardTaskCreated }) {
     this.url = `${workerUrl.replace(/\/$/, "")}/link/${workspaceId}/${linkToken}`;
     this.root = workspaceRoot;
     this.alwaysAllow = !!alwaysAllow;
     this.onPlanPushed = onPlanPushed || (() => {});
+    // Fired after a task is created through the Web dashboard
+    // (docs/plans/queue-dashboard.md, §"新規タスク投入") — see
+    // handleMessage's dashboard_task_created branch below for why this is
+    // ACKed before the callback runs, same as onPlanPushed.
+    this.onDashboardTaskCreated = onDashboardTaskCreated || (() => {});
     this.tools = new WorkspaceTools(workspaceRoot);
     this.ws = null;
     this.backoff = MIN_BACKOFF_MS;
@@ -212,6 +217,32 @@ export class BridgeLink {
     if (method === "plan_pushed") {
       this.reply(rid, true, {});
       this.onPlanPushed(params);
+      return;
+    }
+
+    // Best-effort browser nudge for a task created through the Web
+    // dashboard (BridgeDO.dashboardStartTask's callLocal push). ACKed
+    // *before* the (potentially slow, Chrome-automation-driven) callback
+    // runs — same ack-before-side-effect shape as plan_pushed — so a slow
+    // or failed nudge is never visible to the DO as an RPC timeout, and
+    // never reverses the already-authoritative task creation. Any callback
+    // failure is the callback's own responsibility to log (see
+    // cmdStart's --__daemon wiring in cli.mjs); it is never surfaced back
+    // through this RPC.
+    if (method === "dashboard_task_created") {
+      this.reply(rid, true, {});
+      try {
+        // Swallow both a synchronous throw and an async rejection here —
+        // the real callback (cli.mjs's handleDashboardTaskCreated) already
+        // catches its own errors and logs them via appendLog(), but this
+        // handler must not depend on every caller doing that: a callback
+        // that throws must never turn into an unhandled rejection on this
+        // WebSocket's "message" listener (which does not await
+        // handleMessage), let alone reach the caller of this method.
+        await this.onDashboardTaskCreated(params);
+      } catch (err) {
+        this.log(`dashboard_task_created callback failed: ${String((err && err.message) || err)}`);
+      }
       return;
     }
 

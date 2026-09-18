@@ -221,6 +221,56 @@ describe("Worker-owned task state", () => {
     assert.equal(doo.getTask("t1").protocol_state, "BLOCKED");
   });
 
+  // docs/plans/queue-dashboard.md's "localStartTask() の失敗時の整合性":
+  // an oversized body must be rejected *before* any tasks/msgs row is
+  // written, so a rejected start_task never leaves an orphaned WAITING_PLAN
+  // task with zero queued INIT.
+  describe("localStartTask: enqueue-failure consistency", () => {
+    test("an oversized body is rejected before the tasks row is created (no active task afterward)", () => {
+      const doo = makeDO();
+      doo.localMaxBodyBytesSet({ maxBodyBytes: 4096 });
+      const result = doo.localStartTask({ task_id: "t1", goal: "g", text: "x".repeat(5000) });
+      assert.equal(result.error, "BODY_TOO_LARGE");
+      assert.equal(doo.getTask("t1"), null);
+      assert.equal(doo.activeTask(), null);
+    });
+
+    test("force + oversized body does not lose the previous active task", () => {
+      const doo = makeDO();
+      doo.localStartTask({ task_id: "t1", goal: "first", text: "INIT" });
+      doo.localMaxBodyBytesSet({ maxBodyBytes: 4096 });
+      const result = doo.localStartTask({ task_id: "t2", goal: "second", text: "x".repeat(5000), force: true });
+      assert.equal(result.error, "BODY_TOO_LARGE");
+      // The preflight runs before the force-discard of the previous task,
+      // so t1 must still be the (untouched) active task — not BLOCKED, and
+      // no orphaned t2 row either.
+      assert.equal(doo.activeTask().task_id, "t1");
+      assert.equal(doo.getTask("t1").protocol_state, "WAITING_PLAN");
+      assert.equal(doo.getTask("t2"), null);
+    });
+
+    test("an existing task_id is rejected before any mutation, even with force on the same active task", () => {
+      const doo = makeDO();
+      doo.localStartTask({ task_id: "t1", goal: "first", text: "INIT" });
+      const result = doo.localStartTask({ task_id: "t1", goal: "first again", text: "INIT", force: true });
+      assert.equal(result.error, "TASK_EXISTS");
+      // Must not have discarded/BLOCKed the very task this call collided with.
+      assert.equal(doo.getTask("t1").protocol_state, "WAITING_PLAN");
+      assert.equal(doo.activeTask().task_id, "t1");
+    });
+
+    test("collision with a retained terminal task_id is a controlled error, not a thrown SQL exception", () => {
+      const doo = makeDO();
+      doo.localStartTask({ task_id: "t1", goal: "first", text: "INIT" });
+      doo.localDiscardTask({ task_id: "t1" }); // now BLOCKED, but the row is retained (see retention window)
+      assert.doesNotThrow(() => {
+        const result = doo.localStartTask({ task_id: "t1", goal: "second", text: "INIT" });
+        assert.equal(result.error, "TASK_EXISTS");
+      });
+      assert.equal(doo.getTask("t1").protocol_state, "BLOCKED");
+    });
+  });
+
   test("stores trusted guidance remotely and exposes it only through the dedicated method", () => {
     const doo = makeDO();
     assert.deepEqual(doo.workspaceGuidance(), { set: false });
@@ -337,5 +387,18 @@ describe("alarm(): retention sweeps for msgs and tasks", () => {
     assert.ok(!ids.includes("old-blocked"), "terminal task older than 30 days should be purged");
     assert.ok(ids.includes("recent-done"), "terminal task within 30 days should survive");
     assert.ok(ids.includes("old-active"), "active task should survive regardless of age");
+  });
+
+  test("purges expired dashboard sessions, keeps unexpired ones", async () => {
+    const doo = makeDO();
+    doo.provision();
+    const expired = await doo.createDashboardSession();
+    doo.sql.exec(`UPDATE dashboard_sessions SET expires_at = ?`, Date.now() - 1000);
+    const fresh = await doo.createDashboardSession();
+
+    await doo.alarm();
+
+    assert.equal(await doo.verifyDashboardSession(expired.raw), false);
+    assert.equal(await doo.verifyDashboardSession(fresh.raw), true);
   });
 });
