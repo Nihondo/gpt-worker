@@ -4,6 +4,8 @@
   var workspaceId = parts[1] || "";
   var base = "/dashboard/" + workspaceId;
   var POLL_MS = 10000;
+  var LIST_PREVIEW_CHARS = 180;
+  var DETAIL_PREVIEW_CHARS = 1200;
 
   function api(path, options) {
     return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
@@ -32,6 +34,64 @@
     try { return new Date(ms).toLocaleString(); } catch (e) { return String(ms); }
   }
 
+  // Truncates on Unicode code points (via Array.from), not UTF-16 code
+  // units, so a surrogate pair (e.g. an emoji) is never split in half.
+  function truncateText(value, maxChars) {
+    var s = String(value == null ? "" : value);
+    var chars = Array.from(s);
+    if (chars.length <= maxChars) return { text: s, truncated: false };
+    return { text: chars.slice(0, maxChars).join("") + "…", truncated: true };
+  }
+
+  // ---- 3-stage indicator: [Web] — [Hub] — [Local] ----
+  // See docs/plans/dashboard-ux-redesign.md "3ステージマッピング". A task's
+  // protocolState encodes *responsibility/protocol stage*, not physical
+  // transport location — WAITING_PLAN/WAITING_REVIEW never claim the task is
+  // "in the Hub queue", only that Web currently owns the next step.
+  function taskStage(t) {
+    if (t.protocolState === "WAITING_PLAN") return { node: "web", label: "Waiting for Web plan" };
+    if (t.protocolState === "EXECUTING") return { node: "local", label: "Executing locally" };
+    if (t.protocolState === "WAITING_REVIEW") return { node: "web", label: "Waiting for Web review" };
+    if (t.protocolState === "DONE") return { node: null, label: "Done", terminal: true };
+    if (t.protocolState === "BLOCKED") {
+      return { node: null, label: t.waitingFor === "USER" ? "Blocked — needs user" : "Blocked", terminal: true, blocked: true };
+    }
+    return { node: null, label: t.protocolState || "Unknown" };
+  }
+
+  // A message's dir+state does encode real transport location (pending ==
+  // sitting in the Hub's queue, unlike a task's protocolState above).
+  function messageStage(m) {
+    var destNode = m.dir === "to_gpt" ? "web" : "local";
+    var destLabel = m.dir === "to_gpt" ? "Web" : "Local";
+    if (m.state === "pending") return { node: "hub", label: "Queued for " + destLabel };
+    if (m.state === "leased") {
+      if (m.dir === "to_gpt") return { node: "web", label: "Web reading" };
+      return { node: "hub", label: "Queued for " + destLabel }; // defensive: to_local is not normally leased
+    }
+    if (m.state === "acked") return { node: destNode, label: "Consumed by " + destLabel, terminal: true };
+    return { node: null, label: m.state || "Unknown" };
+  }
+
+  function renderStageIndicator(stage, opts) {
+    opts = opts || {};
+    var wrap = el("div", { className: "stage-indicator" + (opts.small ? " small" : "") });
+    wrap.setAttribute("aria-label", "Stage: " + stage.label);
+    [
+      { key: "web", text: "Web" },
+      { key: "hub", text: "Hub" },
+      { key: "local", text: "Local" },
+    ].forEach(function (n, i, arr) {
+      var cls = "stage-node";
+      if (stage.node === n.key) cls += " current";
+      else if (stage.terminal) cls += " complete";
+      wrap.appendChild(el("span", { className: cls, text: n.text }));
+      if (i < arr.length - 1) wrap.appendChild(el("span", { className: "stage-connector" }));
+    });
+    wrap.appendChild(el("span", { className: "stage-label" + (stage.blocked ? " blocked" : ""), text: stage.label }));
+    return wrap;
+  }
+
   // ---- login page ----
   var loginForm = document.getElementById("login-form");
   if (loginForm) {
@@ -57,11 +117,40 @@
   var overviewEl = document.getElementById("overview");
   if (!overviewEl) return; // neither page — app.js loaded somewhere unexpected
 
-  var state = { activeTaskId: null, messagesCursor: null, tasksCursor: null };
+  var state = {
+    activeTaskId: null,
+    messagesCursor: null, tasksCursor: null,
+    tasks: [], messages: [],
+    selectedTaskId: null, selectedMessageId: null,
+    selectedTask: null, selectedMessage: null,
+    selectedTaskRowEl: null, selectedMessageRowEl: null,
+    activitySubview: "tasks",
+    detailExpanded: { goal: false, terminalSummary: false, body: false },
+  };
 
   document.getElementById("logout-btn").addEventListener("click", function () {
     api("/logout", { method: "POST" }).then(function () { location.reload(); });
   });
+
+  // ---- Tasks/Messages tab wiring (client-side only, no routing/hash) ----
+  // The sidebar (workspace controls/start-task/settings) sits outside this
+  // toggle entirely and never re-layouts when switching tabs — only which of
+  // the list/detail column pairs is visible changes. Switching tabs also
+  // always returns to the list view on narrow screens (closeDetail()) so a
+  // freshly-selected tab with nothing selected yet can't strand a mobile
+  // user on an empty detail pane with no "Back to list" control rendered.
+  function setActivityTab(which) {
+    state.activitySubview = which;
+    document.getElementById("tab-tasks").setAttribute("aria-selected", which === "tasks" ? "true" : "false");
+    document.getElementById("tab-messages").setAttribute("aria-selected", which === "messages" ? "true" : "false");
+    document.getElementById("tasks-list-col").hidden = which !== "tasks";
+    document.getElementById("tasks-detail").hidden = which !== "tasks";
+    document.getElementById("messages-list-col").hidden = which !== "messages";
+    document.getElementById("messages-detail").hidden = which !== "messages";
+    closeDetail();
+  }
+  document.getElementById("tab-tasks").addEventListener("click", function () { setActivityTab("tasks"); });
+  document.getElementById("tab-messages").addEventListener("click", function () { setActivityTab("messages"); });
 
   function renderOverview(data) {
     clearEl(overviewEl);
@@ -90,7 +179,7 @@
     });
   }
 
-  // ---- guidance ----
+  // ---- guidance (Settings tab) ----
   function loadGuidance() {
     api("/api/guidance").then(function (res) {
       if (res.ok) document.getElementById("guidance-text").value = res.body.guidance || "";
@@ -106,7 +195,7 @@
     });
   });
 
-  // ---- limits ----
+  // ---- limits (Settings tab) ----
   function loadLimits() {
     api("/api/limits").then(function (res) {
       if (res.ok) document.getElementById("limits-value").value = res.body.maxBodyBytes;
@@ -141,17 +230,182 @@
     });
   });
 
+  // ---- list/detail pane plumbing shared by Tasks and Messages ----
+  // There is a single .three-pane grid on the page (sidebar + one list/detail
+  // column pair, with the Tasks/Messages tab above choosing which pair is
+  // visible — see setActivityTab()), so open/close only ever need to toggle
+  // that one element's "detail-open" class, not a per-kind grid.
+  function threePane() { return document.querySelector(".three-pane"); }
+  function renderDetailPane(kind, node) {
+    var d = document.getElementById(kind + "-detail");
+    clearEl(d);
+    d.appendChild(node);
+  }
+  function openDetail() { threePane().classList.add("detail-open"); }
+  function closeDetail() { threePane().classList.remove("detail-open"); }
+  function renderBackButton(kind) {
+    var btn = el("button", { className: "secondary detail-back", text: "← Back to list" });
+    btn.addEventListener("click", function () {
+      closeDetail();
+      var rowEl = kind === "tasks" ? state.selectedTaskRowEl : state.selectedMessageRowEl;
+      if (rowEl && rowEl.focus) rowEl.focus();
+    });
+    return btn;
+  }
+  // Read more / Show less for one long text field. `expanded` is the
+  // *current* boolean from state.detailExpanded — callers re-render the
+  // whole detail section on toggle rather than mutating this node in place.
+  function renderExpandable(containerId, label, fullText, expanded, onToggle) {
+    var trunc = truncateText(fullText, DETAIL_PREVIEW_CHARS);
+    var wrap = el("div", { className: "detail-section" });
+    if (label) wrap.appendChild(el("h3", { text: label }));
+    var body = el("pre", { className: "detail-body" });
+    body.id = containerId;
+    body.textContent = expanded ? String(fullText == null ? "" : fullText) : trunc.text;
+    wrap.appendChild(body);
+    if (trunc.truncated) {
+      var btn = el("button", { className: "read-more-btn", text: expanded ? "Show less" : "Read more" });
+      btn.setAttribute("aria-expanded", expanded ? "true" : "false");
+      btn.setAttribute("aria-controls", containerId);
+      btn.addEventListener("click", onToggle);
+      wrap.appendChild(btn);
+    }
+    return wrap;
+  }
+
+  // ---- tasks ----
+  function renderTaskRow(t) {
+    var row = el("button", { className: "list-row" });
+    row.type = "button";
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", state.selectedTaskId === t.taskId ? "true" : "false");
+    var head = el("div", { className: "row" });
+    head.appendChild(el("span", { className: "badge", text: t.protocolState }));
+    head.appendChild(el("span", { className: "meta", text: t.taskId + " · iter " + t.iteration + " · " + fmtTime(t.updatedAt) }));
+    row.appendChild(head);
+    row.appendChild(renderStageIndicator(taskStage(t), { small: true }));
+    row.appendChild(el("div", { className: "preview", text: truncateText(t.goal, LIST_PREVIEW_CHARS).text }));
+    row.addEventListener("click", function () { selectTask(t, row); });
+    return row;
+  }
+
+  function renderTaskDetail(t) {
+    var wrap = el("div");
+    wrap.appendChild(renderBackButton("tasks"));
+    var head = el("div", { className: "row" });
+    head.appendChild(el("span", { className: "badge", text: t.protocolState }));
+    head.appendChild(el("span", { className: "meta", text: "Task " + t.taskId }));
+    wrap.appendChild(head);
+    wrap.appendChild(el("p", { className: "meta", text: "Iteration " + t.iteration + " · waiting for " + (t.waitingFor || "none") + " · started " + fmtTime(t.taskStartedAt) + " · updated " + fmtTime(t.updatedAt) }));
+    wrap.appendChild(renderStageIndicator(taskStage(t)));
+    wrap.appendChild(renderExpandable("task-detail-goal", "Goal", t.goal, state.detailExpanded.goal, function () {
+      state.detailExpanded.goal = !state.detailExpanded.goal;
+      renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
+    }));
+    if (t.terminalSummary) {
+      wrap.appendChild(renderExpandable("task-detail-summary", "Terminal summary", t.terminalSummary, state.detailExpanded.terminalSummary, function () {
+        state.detailExpanded.terminalSummary = !state.detailExpanded.terminalSummary;
+        renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
+      }));
+    }
+    if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
+      var discardBtn = el("button", { className: "danger", text: "Discard task" });
+      discardBtn.addEventListener("click", function () {
+        if (!confirm("Discard task " + t.taskId + "? This marks it BLOCKED and clears its queued messages.")) return;
+        api("/api/discard-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
+      });
+      wrap.appendChild(discardBtn);
+    }
+    return wrap;
+  }
+
+  // selectTask/selectMessage always take the row *object* (not a bare id) —
+  // see docs/plans/dashboard-ux-redesign.md's "選択スナップショットの契約":
+  // the id+object pair is set together so the detail pane can survive a
+  // later poll dropping this row off the first page.
+  function selectTask(t, rowEl) {
+    state.selectedTaskId = t.taskId;
+    state.selectedTask = t;
+    state.selectedTaskRowEl = rowEl || null;
+    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
+    renderTasksList();
+    renderDetailPane("tasks", renderTaskDetail(t));
+    openDetail();
+  }
+
+  function renderTasksList() {
+    var listEl = document.getElementById("tasks-list");
+    clearEl(listEl);
+    state.tasks.forEach(function (t) { listEl.appendChild(renderTaskRow(t)); });
+    if (!state.tasks.length) listEl.appendChild(el("p", { className: "note", text: "No tasks yet." }));
+  }
+
+  function loadTasks(more) {
+    var loadMoreBtn = document.getElementById("tasks-load-more");
+    var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
+    api("/api/tasks" + q).then(function (res) {
+      if (!res.ok) return;
+      var rows = res.body.tasks || [];
+      if (!more) {
+        state.tasks = rows;
+        if (state.selectedTaskId) {
+          var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0];
+          if (fresh) {
+            // Selected row still present on the refreshed first page: follow
+            // its latest content. detailExpanded is intentionally left
+            // as-is here (not reset) so a user's open "Read more" survives
+            // routine polling — only selectTask() resets it.
+            state.selectedTask = fresh;
+            renderDetailPane("tasks", renderTaskDetail(state.selectedTask));
+          }
+          // else: keep the existing state.selectedTask snapshot untouched —
+          // it fell off the first page, but the detail pane must not blank.
+        }
+      } else {
+        var byId = {};
+        state.tasks.forEach(function (t) { byId[t.taskId] = t; });
+        rows.forEach(function (t) { byId[t.taskId] = t; });
+        state.tasks = Object.keys(byId).map(function (k) { return byId[k]; });
+      }
+      renderTasksList();
+      state.tasksCursor = res.body.nextCursor;
+      loadMoreBtn.hidden = !res.body.nextCursor;
+    });
+  }
+  document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
+
   // ---- messages ----
-  function renderMessage(m) {
-    var item = el("div", { className: "item" });
-    var head = el("div");
+  function renderMessageRow(m) {
+    var row = el("button", { className: "list-row" });
+    row.type = "button";
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false");
+    var head = el("div", { className: "row" });
     head.appendChild(el("span", { className: "badge", text: m.dir }));
     head.appendChild(el("span", { className: "badge", text: m.kind }));
     head.appendChild(el("span", { className: "badge", text: m.state }));
-    head.appendChild(el("span", { text: " task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
-    item.appendChild(head);
-    var pre = el("pre", { text: m.body });
-    item.appendChild(pre);
+    row.appendChild(head);
+    row.appendChild(el("div", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
+    row.appendChild(renderStageIndicator(messageStage(m), { small: true }));
+    row.appendChild(el("div", { className: "preview", text: truncateText(m.body, LIST_PREVIEW_CHARS).text }));
+    row.addEventListener("click", function () { selectMessage(m, row); });
+    return row;
+  }
+
+  function renderMessageDetail(m) {
+    var wrap = el("div");
+    wrap.appendChild(renderBackButton("messages"));
+    var head = el("div", { className: "row" });
+    head.appendChild(el("span", { className: "badge", text: m.dir }));
+    head.appendChild(el("span", { className: "badge", text: m.kind }));
+    head.appendChild(el("span", { className: "badge", text: m.state }));
+    wrap.appendChild(head);
+    wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
+    wrap.appendChild(renderStageIndicator(messageStage(m)));
+    wrap.appendChild(renderExpandable("message-detail-body", "Body", m.body, state.detailExpanded.body, function () {
+      state.detailExpanded.body = !state.detailExpanded.body;
+      renderDetailPane("messages", renderMessageDetail(state.selectedMessage));
+    }));
     if (m.dir === "to_local" && m.state !== "acked") {
       var ackBtn = el("button", { text: "Ack" });
       ackBtn.addEventListener("click", function () {
@@ -163,7 +417,7 @@
           loadMessages(false);
         });
       });
-      item.appendChild(ackBtn);
+      wrap.appendChild(ackBtn);
     }
     var canDiscardDirectly = m.state !== "acked" && !(m.dir === "to_gpt" && state.activeTaskId === m.taskId);
     if (canDiscardDirectly) {
@@ -174,63 +428,60 @@
           if (res.body && res.body.error === "USE_DISCARD_TASK") {
             alert("This message belongs to the active task; discard the task instead.");
           }
-          loadMessages();
+          loadMessages(false);
         });
       });
-      item.appendChild(discardBtn);
+      wrap.appendChild(discardBtn);
     } else if (m.dir === "to_gpt" && m.state !== "acked" && state.activeTaskId === m.taskId) {
-      item.appendChild(el("span", { className: "note", text: " (part of the active task — use \"Discard task\" below)" }));
+      wrap.appendChild(el("span", { className: "note", text: "(part of the active task — use \"Discard task\" above)" }));
     }
-    return item;
+    return wrap;
+  }
+
+  function selectMessage(m, rowEl) {
+    state.selectedMessageId = m.messageId;
+    state.selectedMessage = m;
+    state.selectedMessageRowEl = rowEl || null;
+    state.detailExpanded = { goal: false, terminalSummary: false, body: false };
+    renderMessagesList();
+    renderDetailPane("messages", renderMessageDetail(m));
+    openDetail();
+  }
+
+  function renderMessagesList() {
+    var listEl = document.getElementById("messages-list");
+    clearEl(listEl);
+    state.messages.forEach(function (m) { listEl.appendChild(renderMessageRow(m)); });
+    if (!state.messages.length) listEl.appendChild(el("p", { className: "note", text: "No messages yet." }));
   }
 
   function loadMessages(more) {
-    var listEl = document.getElementById("messages-list");
     var loadMoreBtn = document.getElementById("messages-load-more");
     var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
     api("/api/messages" + q).then(function (res) {
       if (!res.ok) return;
-      if (!more) clearEl(listEl);
-      res.body.messages.forEach(function (m) { listEl.appendChild(renderMessage(m)); });
+      var rows = res.body.messages || [];
+      if (!more) {
+        state.messages = rows;
+        if (state.selectedMessageId) {
+          var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
+          if (fresh) {
+            state.selectedMessage = fresh;
+            renderDetailPane("messages", renderMessageDetail(state.selectedMessage));
+          }
+        }
+      } else {
+        var byId = {};
+        state.messages.forEach(function (m) { byId[m.messageId] = m; });
+        rows.forEach(function (m) { byId[m.messageId] = m; });
+        state.messages = Object.keys(byId).map(function (k) { return byId[k]; });
+      }
+      renderMessagesList();
       state.messagesCursor = res.body.nextCursor;
       loadMoreBtn.hidden = !res.body.nextCursor;
     });
   }
   document.getElementById("messages-load-more").addEventListener("click", function () { loadMessages(true); });
-
-  // ---- tasks ----
-  function renderTask(t) {
-    var item = el("div", { className: "item" });
-    var head = el("div");
-    head.appendChild(el("span", { className: "badge", text: t.protocolState }));
-    head.appendChild(el("span", { text: t.taskId + " · updated " + fmtTime(t.updatedAt) }));
-    item.appendChild(head);
-    item.appendChild(el("div", { text: t.goal }));
-    if (t.terminalSummary) item.appendChild(el("pre", { text: t.terminalSummary }));
-    if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
-      var discardBtn = el("button", { className: "danger", text: "Discard task" });
-      discardBtn.addEventListener("click", function () {
-        if (!confirm("Discard task " + t.taskId + "? This marks it BLOCKED and clears its queued messages.")) return;
-        api("/api/discard-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
-      });
-      item.appendChild(discardBtn);
-    }
-    return item;
-  }
-
-  function loadTasks(more) {
-    var listEl = document.getElementById("tasks-list");
-    var loadMoreBtn = document.getElementById("tasks-load-more");
-    var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
-    api("/api/tasks" + q).then(function (res) {
-      if (!res.ok) return;
-      if (!more) clearEl(listEl);
-      res.body.tasks.forEach(function (t) { listEl.appendChild(renderTask(t)); });
-      state.tasksCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
-    });
-  }
-  document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
 
   function loadAll() {
     loadOverview();

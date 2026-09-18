@@ -805,6 +805,18 @@ ${hiddenFields}
 const DASHBOARD_STYLE = `
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  /* The [hidden] attribute must always win, full stop — app.js relies on
+   * toggling .hidden to show exactly one of the Tasks/Messages list/detail
+   * pairs (and, for the hub shell, the whole "hub-gated" pre-selection
+   * block) at a time. Several classes below (.tabs, .list-col, and the
+   * narrow-layout .detail-pane rules) set their own "display" for layout
+   * purposes, at equal-or-higher CSS specificity than the UA stylesheet's
+   * bare "[hidden] { display: none }" rule — an author rule of equal
+   * specificity always wins the cascade over the UA stylesheet regardless
+   * of attribute presence, so without this override a hidden .list-col (or
+   * .tabs, or .detail-pane in narrow mode) would still render, overlapping
+   * its sibling in the same shared grid-area. */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     min-height: 100vh;
@@ -814,7 +826,7 @@ const DASHBOARD_STYLE = `
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   }
   .card {
-    max-width: 960px;
+    max-width: 1200px;
     margin: 0 auto 20px;
     background: #fff;
     border: 1px solid #e5e5e7;
@@ -859,12 +871,88 @@ const DASHBOARD_STYLE = `
   .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: #eee; margin-right: 6px; }
   .error { color: #c0392b; font-size: 13px; margin-top: 8px; }
   .note { font-size: 12px; color: #86868b; margin-top: 12px; line-height: 1.4; }
+
+  /* --- Tasks/Messages tabs, 3-pane (side/list/detail) layout, stage
+   * indicator --- See docs/plans/dashboard-ux-redesign.md. Reuses the
+   * existing palette tokens above (#0071e3/#6e6e73/#86868b/#d2d2d7/#c0392b,
+   * and the dark-mode surfaces below) — no new colors are introduced. */
+  .wide { max-width: 1200px; margin-left: auto; margin-right: auto; }
+  .note.wide { margin-bottom: 16px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e5e7; margin: 0 auto 16px; }
+  .tab { margin: 0; padding: 8px 14px; font-size: 13px; font-weight: 600; color: #6e6e73; background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; }
+  .tab[aria-selected="true"] { color: #0071e3; border-bottom-color: #0071e3; }
+  .tab:hover { opacity: 0.85; }
+
+  /* Three columns: a persistent sidebar (workspace picker/start-task/
+   * settings) plus the list/detail pair for whichever of Tasks/Messages is
+   * currently selected (toggled by the .tabs above, outside this grid, so
+   * the sidebar never re-layouts when switching tabs). align-items: stretch
+   * (the grid default) makes every column match the row's height, set by
+   * the tallest one — normally the detail pane, since its content (goal/
+   * body/terminal summary) is usually longer than a compact row list or the
+   * sidebar's form controls. The list pane then fills that same height via
+   * its flex parent .list-col and scrolls its own content internally
+   * instead of being capped at an arbitrary fixed height, or growing taller
+   * than the detail pane next to it. min-height: 0 is required on flex/grid
+   * items that need to shrink below their content size for overflow to
+   * work — without it, a flex/grid item's default content-based minimum
+   * size (min-height: auto) would keep it as tall as all of its rows and
+   * defeat overflow-y: auto. */
+  .three-pane { display: grid; grid-template-columns: minmax(220px, 0.7fr) minmax(260px, 0.9fr) minmax(0, 1.6fr); grid-template-areas: "side list detail"; gap: 16px; align-items: stretch; max-width: 1200px; margin: 0 auto; }
+  .side-pane { grid-area: side; display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+  .side-pane .card { margin: 0; max-width: none; } /* spacing comes from the flex gap above, not the card's own auto margins */
+  .list-col { grid-area: list; display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
+  .list-pane { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 4px; border: 1px solid #e5e5e7; border-radius: 8px; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #d2d2d7 transparent; }
+  .list-pane::-webkit-scrollbar { width: 8px; }
+  .list-pane::-webkit-scrollbar-track { background: transparent; }
+  .list-pane::-webkit-scrollbar-thumb { background: #d2d2d7; border-radius: 4px; }
+  .detail-pane { grid-area: detail; min-height: 80px; min-width: 0; }
+  .detail-empty { color: #86868b; font-size: 13px; }
+  .detail-back { display: none; }
+  .detail-section { margin: 12px 0; }
+  .detail-section h3 { font-size: 13px; margin: 0 0 6px; }
+  .detail-body { white-space: pre-wrap; word-break: break-word; font-size: 12px; background: #f5f5f7; padding: 8px; border-radius: 6px; max-height: 320px; overflow: auto; }
+  @media (max-width: 1099px) {
+    .three-pane { grid-template-columns: 1fr; grid-template-areas: "side" "list" "detail"; }
+    .three-pane .detail-pane { display: none; }
+    .three-pane.detail-open .list-col { display: none; }
+    .three-pane.detail-open .detail-pane { display: block; }
+    .detail-back { display: inline-block; }
+  }
+
+  .list-row { display: block; width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-bottom: 1px solid #e5e5e7; border-radius: 0; padding: 10px 8px; margin: 0; color: inherit; font: inherit; cursor: pointer; }
+  .list-row:hover { background: #f5f5f7; }
+  .list-row[aria-selected="true"] { background: #eef6ff; border-color: #0071e3; border-radius: 8px; }
+  .list-row .meta { margin: 4px 0; }
+  .list-row .preview { font-size: 12px; color: #6e6e73; margin-top: 4px; }
+
+  .read-more-btn { display: block; background: none; border: none; color: #0071e3; font-size: 12px; font-weight: 600; padding: 4px 0 0; margin: 0; cursor: pointer; }
+  .read-more-btn:hover { text-decoration: underline; }
+
+  .stage-indicator { display: flex; align-items: center; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
+  .stage-indicator.small { margin: 4px 0; }
+  .stage-node { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; color: #6e6e73; font-size: 11px; font-weight: 600; }
+  .stage-node.current { background: #0071e3; color: #fff; }
+  .stage-node.complete { background: #d2d2d7; color: #1d1d1f; }
+  .stage-connector { width: 10px; height: 1px; background: #d2d2d7; }
+  .stage-label { font-size: 12px; color: #6e6e73; margin-left: 4px; }
+  .stage-label.blocked { color: #c0392b; font-weight: 600; }
+
   @media (prefers-color-scheme: dark) {
     body { background: #1c1c1e; color: #f5f5f7; }
     .card { background: #2c2c2e; border-color: #3a3a3c; }
     input, textarea { background: #1c1c1e; border-color: #48484a; color: #f5f5f7; }
     .item pre { background: #1c1c1e; }
     .badge { background: #3a3a3c; }
+    .tabs { border-color: #3a3a3c; }
+    .list-pane { border-color: #3a3a3c; scrollbar-color: #48484a transparent; }
+    .list-pane::-webkit-scrollbar-thumb { background: #48484a; }
+    .list-row { border-bottom-color: #3a3a3c; }
+    .list-row:hover { background: #3a3a3c; }
+    .list-row[aria-selected="true"] { background: #16324d; border-color: #0071e3; }
+    .detail-body { background: #1c1c1e; }
+    .stage-node { background: #3a3a3c; color: #98989d; }
+    .stage-node.complete { background: #48484a; color: #f5f5f7; }
   }
 `;
 

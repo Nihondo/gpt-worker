@@ -1133,3 +1133,241 @@ describe("dashboard: Text-module asset extraction", () => {
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 });
+
+// ---------------------------------------------------------------------------
+// UX redesign (docs/plans/dashboard-ux-redesign.md): Activity/Settings tabs,
+// Tasks/Messages sub-tabs, list-pane -> detail-pane split, truncation with
+// "Read more", and the [Web]-[Hub]-[Local] stage indicator. Frontend-only —
+// no dashboardApiDispatch/auth/CSRF/rate-limit/pagination/retention change,
+// so this block only pins markup/source-level contracts on top of the
+// existing suites above (all of which must remain green unmodified).
+// ---------------------------------------------------------------------------
+
+// Extracts the full opening tag containing a given id, regardless of
+// attribute order (e.g. `role="tab"` may appear before or after `id="..."`),
+// so structural assertions below don't depend on incidental attribute order.
+function tagWithId(html, id) {
+  const m = html.match(new RegExp(`<[a-zA-Z0-9]+\\b[^>]*\\bid="${id}"[^>]*>`));
+  return m ? m[0] : null;
+}
+
+describe("dashboard: 3-pane UX redesign (sidebar + list/detail panes, truncation, stage indicator)", () => {
+  test("workspace shell exposes top-level Tasks/Messages tabs, a sidebar, and list+detail pane containers", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
+    const html = await res.text();
+    ["tab-tasks", "tab-messages"].forEach((id) => {
+      const tag = tagWithId(html, id);
+      assert.ok(tag, id + " element must exist");
+      assert.match(tag, /role="tab"/, id + " must have role=tab");
+    });
+    assert.match(html, /id="tasks-list"/);
+    assert.match(html, /id="tasks-detail"/);
+    assert.match(html, /id="messages-list"/);
+    assert.match(html, /id="messages-detail"/);
+    assert.match(html, /class="three-pane"/);
+    assert.match(html, /class="side-pane"/);
+  });
+
+  test("hub shell exposes the same top-level Tasks/Messages tabs and list+detail pane containers", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { hubGptToken } = makeHub(env, instanceFor);
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+    const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
+    const html = await res.text();
+    ["tab-tasks", "tab-messages"].forEach((id) => {
+      const tag = tagWithId(html, id);
+      assert.ok(tag, id + " element must exist");
+      assert.match(tag, /role="tab"/, id + " must have role=tab");
+    });
+    assert.match(html, /id="tasks-detail"/);
+    assert.match(html, /id="messages-detail"/);
+    assert.match(html, /class="three-pane"/);
+    assert.match(html, /class="side-pane"/);
+  });
+
+  // Workspace selection, "Start a new task", and Settings (guidance/limits)
+  // are bundled together in the sidebar (not the Tasks/Messages list/detail
+  // area), per docs/plans/dashboard-ux-redesign.md's 3-pane layout — this is
+  // the string-level stand-in for "these live in the sidebar pane" since
+  // this suite has no DOM/browser harness. The sidebar spans from the
+  // `.side-pane` opening tag to the first list/detail column that follows it.
+  function sidebarSection(html) {
+    const sideStart = html.indexOf('class="side-pane"');
+    assert.ok(sideStart >= 0, "side-pane must exist");
+    const afterSide = html.indexOf('id="tasks-list-col"', sideStart);
+    assert.ok(afterSide > sideStart, "tasks-list-col must follow side-pane");
+    return html.slice(sideStart, afterSide);
+  }
+
+  test("workspace shell: start-task/guidance/limits controls live in the sidebar, not in the list/detail columns", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
+    const html = await res.text();
+    const sidebar = sidebarSection(html);
+    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+      assert.match(sidebar, new RegExp(`id="${id}"`), id + " must be inside the sidebar");
+    });
+    const afterSidebar = html.slice(html.indexOf('id="tasks-list-col"'));
+    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+      assert.doesNotMatch(afterSidebar, new RegExp(`id="${id}"`), id + " must not also appear in the list/detail columns");
+    });
+  });
+
+  test("hub shell: workspace picker, start-task, and guidance/limits controls all live in the sidebar", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { hubGptToken } = makeHub(env, instanceFor);
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+    const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
+    const html = await res.text();
+    const sidebar = sidebarSection(html);
+    ["workspace-list", "new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+      assert.match(sidebar, new RegExp(`id="${id}"`), id + " must be inside the sidebar");
+    });
+  });
+
+  // The Tasks/Messages tab strip and their list/detail columns start hidden
+  // for the hub shell until a workspace is picked (there is nothing to show
+  // tabs for otherwise) — selectWorkspace() reveals them via the shared
+  // "hub-gated" class (see hub-app.js).
+  test("hub shell's Tasks/Messages tabs and list/detail columns start hidden until a workspace is selected", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { hubGptToken } = makeHub(env, instanceFor);
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+    const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
+    const html = await res.text();
+    ["tab-tasks", "tab-messages"].forEach((id) => {
+      const tag = tagWithId(html, id);
+      // the tag containing this id is the tab button itself; its ancestor
+      // .tabs.hub-gated element carries the `hidden` attribute, so check the
+      // wrapping tabs block directly instead.
+      assert.ok(tag);
+    });
+    const tabsBlockMatch = html.match(/<div class="tabs wide hub-gated" role="tablist"[^>]*>/);
+    assert.ok(tabsBlockMatch, "the Tasks/Messages tabs wrapper must exist");
+    assert.match(tabsBlockMatch[0], /hidden/, "the tabs wrapper must start hidden before a workspace is selected");
+    assert.match(tagWithId(html, "tasks-list-col"), /hidden/, "tasks-list-col must start hidden");
+    assert.match(tagWithId(html, "tasks-detail"), /hidden/, "tasks-detail must start hidden");
+  });
+
+  // Not a naive /innerHTML/ word match — both files legitimately contain the
+  // comment "Never innerHTML, even to clear ...", which a bare word match
+  // would misreport as a violation. Check the actual unsafe sinks instead.
+  const UNSAFE_HTML_SINKS = [/\.innerHTML\s*=/, /\.outerHTML\s*=/, /insertAdjacentHTML\s*\(/, /document\.write\s*\(/];
+  test("workspace app.js uses no unsafe HTML-insertion sink, only textContent/element construction", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    const js = await res.text();
+    assert.match(js, /Never innerHTML/, "the safety-rationale comment itself is expected and must not trip the sink check below");
+    UNSAFE_HTML_SINKS.forEach((pattern) => assert.doesNotMatch(js, pattern, "must not use " + pattern));
+    assert.match(js, /function el\(tag, opts\)/, "must still build all elements through the shared el() helper");
+    assert.match(js, /\.textContent = /);
+  });
+
+  test("hub app.js uses no unsafe HTML-insertion sink, only textContent/element construction", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
+    const js = await res.text();
+    assert.match(js, /Never innerHTML/);
+    UNSAFE_HTML_SINKS.forEach((pattern) => assert.doesNotMatch(js, pattern, "must not use " + pattern));
+    assert.match(js, /function el\(tag, opts\)/);
+  });
+
+  // The task/message stage mapping is the source of truth for the
+  // [Web]-[Hub]-[Local] indicator (docs/plans/dashboard-ux-redesign.md's
+  // "3ステージマッピング"). Pin that all 5 protocolState values and the
+  // message dir/state branches are actually present in both copies.
+  function assertStageMappingPresent(js) {
+    const taskStageIdx = js.indexOf("function taskStage(t)");
+    assert.ok(taskStageIdx >= 0, "taskStage(t) must exist");
+    const taskStageBody = js.slice(taskStageIdx, js.indexOf("\n  }\n", taskStageIdx) + 5);
+    ["WAITING_PLAN", "EXECUTING", "WAITING_REVIEW", "DONE", "BLOCKED"].forEach((s) => {
+      assert.match(taskStageBody, new RegExp(s), "taskStage must branch on " + s);
+    });
+
+    const messageStageIdx = js.indexOf("function messageStage(m)");
+    assert.ok(messageStageIdx >= 0, "messageStage(m) must exist");
+    const messageStageBody = js.slice(messageStageIdx, js.indexOf("\n  }\n", messageStageIdx) + 5);
+    assert.match(messageStageBody, /m\.dir === "to_gpt"/);
+    assert.match(messageStageBody, /m\.state === "pending"/);
+    assert.match(messageStageBody, /m\.state === "leased"/);
+    assert.match(messageStageBody, /m\.state === "acked"/);
+  }
+
+  test("workspace app.js's stage mapping covers all 5 protocolState values and the message dir/state branches", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    assertStageMappingPresent(await res.text());
+  });
+
+  test("hub app.js's stage mapping covers all 5 protocolState values and the message dir/state branches", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
+    assertStageMappingPresent(await res.text());
+  });
+
+  // Unicode-safe truncation: must slice on code points (Array.from), not
+  // UTF-16 code units, so a surrogate pair is never split in half.
+  function assertTruncationContract(js) {
+    assert.match(js, /LIST_PREVIEW_CHARS\s*=\s*180/);
+    assert.match(js, /DETAIL_PREVIEW_CHARS\s*=\s*1200/);
+    const fnIdx = js.indexOf("function truncateText(value, maxChars)");
+    assert.ok(fnIdx >= 0, "truncateText(value, maxChars) must exist");
+    const fnBody = js.slice(fnIdx, fnIdx + 400);
+    assert.match(fnBody, /Array\.from\(/, "must slice on code points via Array.from, not a raw UTF-16 .slice()");
+  }
+
+  test("workspace app.js defines the 180/1200-char, code-point-safe truncation contract", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    assertTruncationContract(await res.text());
+  });
+
+  test("hub app.js defines the 180/1200-char, code-point-safe truncation contract", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
+    assertTruncationContract(await res.text());
+  });
+
+  // Read more/Show less accessibility contract: aria-expanded paired with
+  // aria-controls, per docs/plans/dashboard-ux-redesign.md Phase 4.
+  test("workspace app.js's expandable sections wire aria-expanded/aria-controls, never innerHTML", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    const js = await res.text();
+    assert.match(js, /setAttribute\("aria-expanded"/);
+    assert.match(js, /setAttribute\("aria-controls"/);
+  });
+
+  // Selection-snapshot contract (docs/plans/dashboard-ux-redesign.md's
+  // "選択スナップショットの契約"): selectTask/selectMessage must be called
+  // with the row *object*, not a bare id, so the detail pane can survive a
+  // later poll dropping the row off the first refreshed page.
+  function assertSelectionSnapshotContract(js) {
+    assert.doesNotMatch(js, /selectTask\(t\.taskId\)/, "must pass the row object, not a bare taskId, to selectTask");
+    assert.doesNotMatch(js, /selectMessage\(m\.messageId\)/, "must pass the row object, not a bare messageId, to selectMessage");
+    assert.match(js, /state\.selectedTask\s*=\s*t;/, "selectTask must store a full row snapshot, not just the id");
+    assert.match(js, /state\.selectedMessage\s*=\s*m;/, "selectMessage must store a full row snapshot, not just the id");
+  }
+
+  test("workspace app.js's selectTask/selectMessage take the row object and store a snapshot", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
+    assertSelectionSnapshotContract(await res.text());
+  });
+
+  test("hub app.js's selectTask/selectMessage take the row object and store a snapshot", async () => {
+    const { env } = makeRealBridgeDoEnv();
+    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
+    assertSelectionSnapshotContract(await res.text());
+  });
+});
