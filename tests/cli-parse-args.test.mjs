@@ -54,6 +54,24 @@ describe("parseArgs", () => {
     assert.equal(args.workspace, "/tmp/x");
   });
 
+  test("--title takes a string value and works alongside -w", () => {
+    const args = parseArgs(["--title", "Exchange title", "-w", "/tmp/x"]);
+    assert.equal(args.title, "Exchange title");
+    assert.equal(args.workspace, "/tmp/x");
+  });
+
+  test("bare --title before -w sets args.title to true", () => {
+    const args = parseArgs(["--title", "-w", "/tmp/x"]);
+    assert.equal(args.title, true);
+    assert.equal(args.workspace, "/tmp/x");
+  });
+
+  test("--title=value form parses value correctly", () => {
+    const args = parseArgs(["--title=Inline Title", "-w", "/tmp/x"]);
+    assert.equal(args.title, "Inline Title");
+    assert.equal(args.workspace, "/tmp/x");
+  });
+
   test("--flag=value form is unaffected", () => {
     const args = parseArgs(["--changed=3", "-w", "/tmp/x"]);
     assert.equal(args.changed, "3");
@@ -347,5 +365,31 @@ describe("cmdUrl WebUI output", () => {
     const wsOut = execFileSync(process.execPath, [cliPath, "url", "-w", "."], { encoding: "utf8" });
     assert.match(wsOut, /^WebUI URL:\s+https?:\/\/[^\/]+\/dashboard\/[a-f0-9]{16}/m);
     assert.match(wsOut, /^OAuth Server URL:\s+https?:\/\/[^\/]+\/mcp\/[a-f0-9]{16}/m);
+  });
+});
+
+describe("CLI title option validation", () => {
+  const cliPath = path.resolve("bridge/cli.mjs");
+
+  test("gpt-worker task rejects bare --title before -w", () => {
+    assert.throws(
+      () => execFileSync(process.execPath, [cliPath, "task", "some goal", "--title", "-w", "."], { encoding: "utf8", stdio: "pipe" }),
+      (err) => {
+        assert.equal(err.status, 1);
+        assert.match(err.stderr, /Invalid title: --title requires a string value/);
+        return true;
+      }
+    );
+  });
+
+  test("gpt-worker report rejects bare --title before -w", () => {
+    assert.throws(
+      () => execFileSync(process.execPath, [cliPath, "report", "--title", "-w", "."], { encoding: "utf8", stdio: "pipe" }),
+      (err) => {
+        assert.equal(err.status, 1);
+        assert.match(err.stderr, /Invalid title: --title requires a string value/);
+        return true;
+      }
+    );
   });
 });

@@ -1077,6 +1077,51 @@ function normalizeTaskTitle(raw) {
   return Array.from(title).length <= TASK_TITLE_MAX_CHARS ? title : null;
 }
 
+/** Derives a clean one-line fallback title from message text if no title was explicitly provided. */
+function deriveMessageTitle(kind, text) {
+  if (typeof text !== "string") return null;
+  const lines = text.split("\n");
+  let inBoilerplate = false;
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+    if (/^Execution finished\.?$/i.test(line)) continue;
+    if (/^\(?not run\)?\.?$/i.test(line)) continue;
+    if (/^CHANGED_FILES:/i.test(line)) {
+      inBoilerplate = true;
+      continue;
+    }
+    if (/^TESTS:/i.test(line)) {
+      inBoilerplate = false;
+      line = line.replace(/^TESTS:\s*/i, "").trim();
+      if (!line || /^\(?not run\)?\.?$/i.test(line)) continue;
+    }
+    if (inBoilerplate) continue;
+    if (/^(GOAL|RESULT|HANDOFF|HANDOFF_BRIEF|PLAN|DONE|BLOCKED):/i.test(line)) {
+      line = line.replace(/^(GOAL|RESULT|HANDOFF|HANDOFF_BRIEF|PLAN|DONE|BLOCKED):\s*/i, "").trim();
+      if (!line) continue;
+    }
+    if (/^reason:\s*/i.test(line)) {
+      line = line.replace(/^reason:\s*/i, "").trim();
+      if (!line) continue;
+    }
+    if (/^\(?not run\)?\.?$/i.test(line)) continue;
+    if (/^\(not given\)$/i.test(line)) continue;
+    line = line.replace(/^[#>\s*+-]+/, "").trim();
+    line = line.replace(/^[*_]{1,2}(.*?)[*_]{1,2}/, "$1").trim();
+    if (!line || /^\(?not run\)?\.?$/i.test(line)) continue;
+    const normalized = normalizeTaskTitle(line);
+    if (normalized) return normalized;
+    const chars = Array.from(line.replace(/\s+/gu, " "));
+    if (chars.length > TASK_TITLE_MAX_CHARS) {
+      const truncated = chars.slice(0, TASK_TITLE_MAX_CHARS - 1).join("") + "…";
+      const normTrunc = normalizeTaskTitle(truncated);
+      if (normTrunc) return normTrunc;
+    }
+  }
+  return null;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1143,12 +1188,20 @@ export class BridgeDO {
         task_id     TEXT NOT NULL,
         iteration   INTEGER NOT NULL,
         kind        TEXT NOT NULL,       -- INIT/EXECUTED/PLAN/DONE/BLOCKED
+        title       TEXT,
         body        TEXT NOT NULL,
         state       TEXT NOT NULL,       -- 'pending' | 'leased' | 'acked'
         lease_until INTEGER,
         created_at  INTEGER NOT NULL
       )
     `);
+    // Existing Durable Objects already have the pre-title `msgs` table.
+    const msgColumns = this.sql.exec(`PRAGMA table_info('msgs')`).toArray();
+    let needsMsgTitleBackfill = false;
+    if (!msgColumns.some((column) => column.name === "title")) {
+      this.sql.exec(`ALTER TABLE msgs ADD COLUMN title TEXT`);
+      needsMsgTitleBackfill = true;
+    }
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_q ON msgs(dir, state, created_at)`);
 
     // Workflow state is deliberately separate from the delivery queue. Queue
@@ -1176,6 +1229,17 @@ export class BridgeDO {
       this.sql.exec(`ALTER TABLE tasks ADD COLUMN title TEXT`);
     }
     this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(protocol_state, updated_at DESC)`);
+
+    // Backfill INIT messages from tasks.title only after both msgs.title and
+    // tasks.title are guaranteed to exist, protecting direct upgrades from
+    // dormant DO instances that lacked title in both tables.
+    if (needsMsgTitleBackfill) {
+      this.sql.exec(`
+        UPDATE msgs
+        SET title = (SELECT title FROM tasks WHERE tasks.task_id = msgs.task_id)
+        WHERE kind = 'INIT' AND title IS NULL AND (SELECT title FROM tasks WHERE tasks.task_id = msgs.task_id) IS NOT NULL
+      `);
+    }
 
     // Non-secret, Workspace-scoped preferences. Keeping these here avoids
     // using state.json as an accidental second task-state store. Secrets stay
@@ -2291,6 +2355,7 @@ export class BridgeDO {
       kind: row.kind,
       body: row.body,
       task_title: task && task.title ? task.title : null,
+      title: row.title || null,
     };
   }
 
@@ -2334,15 +2399,19 @@ export class BridgeDO {
     }
 
     if (task.title) {
-      if (task.title === title) return toolOk({ title: task.title, idempotent: true });
+      if (task.title === title) {
+        this.sql.exec(`UPDATE msgs SET title = ? WHERE message_id = ? AND title IS NULL`, task.title, messageId);
+        return toolOk({ title: task.title, idempotent: true });
+      }
       return toolError("TITLE_ALREADY_SET", "Task title is already set and cannot be replaced");
     }
     this.sql.exec(`UPDATE tasks SET title = ? WHERE task_id = ?`, title, taskId);
+    this.sql.exec(`UPDATE msgs SET title = ? WHERE message_id = ?`, title, messageId);
     return toolOk({ title, idempotent: false });
   }
 
   queueSubmit(args) {
-    const { task_id, iteration, state, body } = args || {};
+    const { task_id, iteration, state, body, title: rawTitle } = args || {};
     if (
       typeof task_id !== "string" ||
       typeof iteration !== "number" ||
@@ -2375,6 +2444,13 @@ export class BridgeDO {
     ) {
       return toolError("NO_MATCHING_TASK", `No active task for task_id=${task_id} iteration=${iteration}`);
     }
+    let explicitTitle = null;
+    if (rawTitle !== undefined && rawTitle !== null) {
+      explicitTitle = normalizeTaskTitle(rawTitle);
+      if (!explicitTitle) {
+        return toolError("INVALID_TITLE", "Title must be non-empty and at most 80 characters without control characters.");
+      }
+    }
     for (const m of matches) {
       this.sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ?`, m.message_id);
     }
@@ -2392,20 +2468,22 @@ export class BridgeDO {
     );
 
     const messageId = crypto.randomUUID();
+    const title = explicitTitle || deriveMessageTitle(state, body);
     this.sql.exec(
-      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at)
-       VALUES (?, 'to_local', ?, ?, ?, ?, 'pending', NULL, ?)`,
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, title, body, state, lease_until, created_at)
+       VALUES (?, 'to_local', ?, ?, ?, ?, ?, 'pending', NULL, ?)`,
       messageId,
       task_id,
       iteration,
       state,
+      title,
       body,
       now
     );
     // Best-effort immediate push; the CLI's /local poll (below) is the
     // authoritative delivery path and does not depend on this succeeding.
     this.callLocal("plan_pushed", { message_id: messageId }).catch(() => {});
-    return toolOk({ message_id: messageId });
+    return toolOk({ message_id: messageId, title: title || null });
   }
 
   /** Past tasks that reached a terminal state (DONE/BLOCKED), newest first —
@@ -2718,8 +2796,8 @@ export class BridgeDO {
     const rows = this.sql
       .exec(
         includeBody
-          ? `SELECT message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`
-          : `SELECT message_id, dir, task_id, iteration, kind, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
+          ? `SELECT message_id, dir, task_id, iteration, kind, title, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`
+          : `SELECT message_id, dir, task_id, iteration, kind, title, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
         ...args,
         limit + 1
       )
@@ -2735,6 +2813,7 @@ export class BridgeDO {
           taskId: r.task_id,
           iteration: r.iteration,
           kind: r.kind,
+          title: r.title || null,
           // Same leased-but-expired normalization as localList() — see there.
           state: r.state === "leased" && r.lease_until && r.lease_until < now ? "pending" : r.state,
           createdAt: r.created_at,
@@ -3326,7 +3405,7 @@ export class BridgeDO {
   }
 
   localStartTask(body) {
-    const { task_id: taskId, goal, text, force } = body || {};
+    const { task_id: taskId, goal, text, force, title: rawTitle } = body || {};
     if (typeof taskId !== "string" || typeof goal !== "string" || typeof text !== "string") {
       return { error: "INVALID_ARGS" };
     }
@@ -3349,20 +3428,27 @@ export class BridgeDO {
     // after one.
     if (this.getTask(taskId)) return { error: "TASK_EXISTS" };
 
+    let title = null;
+    if (rawTitle !== undefined && rawTitle !== null) {
+      title = normalizeTaskTitle(rawTitle);
+      if (!title) return { error: "INVALID_TITLE" };
+    }
+
     const active = this.activeTask();
     if (active && !force) return { error: "ACTIVE_TASK", task: this.taskView(active) };
     if (active) this.localDiscardTask({ task_id: active.task_id });
 
     const now = Date.now();
     this.sql.exec(
-      `INSERT INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
-       VALUES (?, ?, 0, 'WAITING_PLAN', 'GPT_PLAN', ?, ?)`,
+      `INSERT INTO tasks (task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+       VALUES (?, ?, ?, 0, 'WAITING_PLAN', 'GPT_PLAN', ?, ?)`,
       taskId,
       goal,
+      title,
       now,
       now
     );
-    const queued = this.localEnqueue({ kind: "INIT", task_id: taskId, iteration: 0, body: text });
+    const queued = this.localEnqueue({ kind: "INIT", task_id: taskId, iteration: 0, body: text, title });
     if (queued.error) {
       // Belt-and-suspenders: the preflight above should make this
       // unreachable for BODY_TOO_LARGE, but any other localEnqueue failure
@@ -3375,13 +3461,19 @@ export class BridgeDO {
   }
 
   localReportTask(body) {
-    const { task_id: taskId, changed, tests, text } = body || {};
+    const { task_id: taskId, changed, tests, text, title: rawTitle } = body || {};
     if (typeof taskId !== "string" || typeof text !== "string") return { error: "INVALID_ARGS" };
     const task = this.getTask(taskId);
     if (!task) return { error: "NO_ACTIVE_TASK" };
     const nextIteration = task.iteration + 1;
     if (task.protocol_state !== "EXECUTING") return { error: "INVALID_STATE", state: task.protocol_state };
-    const queued = this.localEnqueue({ kind: "EXECUTED", task_id: taskId, iteration: nextIteration, body: text });
+    let explicitTitle = null;
+    if (rawTitle !== undefined && rawTitle !== null) {
+      explicitTitle = normalizeTaskTitle(rawTitle);
+      if (!explicitTitle) return { error: "INVALID_TITLE" };
+    }
+    const title = explicitTitle || (tests && !/^\(?not run\)?\.?$/i.test(tests.trim()) ? deriveMessageTitle("EXECUTED", tests) : null);
+    const queued = this.localEnqueue({ kind: "EXECUTED", task_id: taskId, iteration: nextIteration, body: text, title });
     if (queued.error) return queued;
     this.sql.exec(
       `UPDATE tasks SET iteration = ?, protocol_state = 'WAITING_REVIEW', waiting_for = 'GPT_REVIEW', updated_at = ? WHERE task_id = ?`,
@@ -3558,6 +3650,7 @@ export class BridgeDO {
         task_id: r.task_id,
         iteration: r.iteration,
         kind: r.kind,
+        title: r.title || null,
         // The DB row can say 'leased' after its lease_until has already
         // passed — queueNext() already treats that as available again, so
         // report it that way here too rather than showing a stale "leased".
@@ -3569,7 +3662,7 @@ export class BridgeDO {
   }
 
   localEnqueue(body) {
-    const { kind, task_id, iteration, body: text } = body;
+    const { kind, task_id, iteration, body: text, title: rawTitle } = body;
     if (
       !["INIT", "EXECUTED"].includes(kind) ||
       typeof task_id !== "string" ||
@@ -3614,19 +3707,27 @@ export class BridgeDO {
       .toArray();
     if (existing.length > 0) return { message_id: existing[0].message_id, idempotent: true };
 
+    let explicitTitle = null;
+    if (rawTitle !== undefined && rawTitle !== null) {
+      explicitTitle = normalizeTaskTitle(rawTitle);
+      if (!explicitTitle) return { error: "INVALID_TITLE" };
+    }
+
+    const title = explicitTitle || deriveMessageTitle(kind, text);
     const messageId = crypto.randomUUID();
     const now = Date.now();
     this.sql.exec(
-      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at)
-       VALUES (?, 'to_gpt', ?, ?, ?, ?, 'pending', NULL, ?)`,
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, title, body, state, lease_until, created_at)
+       VALUES (?, 'to_gpt', ?, ?, ?, ?, ?, 'pending', NULL, ?)`,
       messageId,
       task_id,
       iteration,
       kind,
+      title,
       text,
       now
     );
-    return { message_id: messageId };
+    return { message_id: messageId, title: title || null };
   }
 
   async localPoll(body) {
@@ -3643,6 +3744,7 @@ export class BridgeDO {
             task_id: r.task_id,
             iteration: r.iteration,
             kind: r.kind,
+            title: r.title || null,
             body: r.body,
           })),
         };

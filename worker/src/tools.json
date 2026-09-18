@@ -160,6 +160,7 @@
           "task_id": { "type": "string", "description": "The TASK_ID from the INIT/EXECUTED message you are responding to." },
           "iteration": { "type": "integer", "minimum": 0, "description": "The ITERATION from the message you are responding to." },
           "state": { "type": "string", "enum": ["PLAN", "DONE", "BLOCKED"] },
+          "title": { "type": "string", "maxLength": 80, "description": "A concise, single-line summary title of this plan, completion, or blocker (max 80 code points, no Markdown prefix or newline)." },
           "body": { "type": "string", "maxLength": 16000, "description": "The control message body: rationale, concrete actions, files, tests, success criteria (for PLAN); summary (for DONE); reason (for BLOCKED)." }
         },
         "required": ["task_id", "iteration", "state", "body"],

@@ -406,6 +406,10 @@
       row.appendChild(el("span", { className: "task-history-time", text: formatTimelineTime(m.createdAt) }));
       row.appendChild(el("strong", { className: "task-history-kind", text: m.kind || "UNKNOWN" }));
       row.appendChild(el("span", { className: "task-history-iteration", text: "Iteration " + m.iteration }));
+      var titleText = typeof m.title === "string" && m.title ? m.title : (m.kind === "INIT" && typeof t.title === "string" && t.title ? t.title : "");
+      if (titleText) {
+        row.appendChild(el("span", { className: "task-history-title", text: titleText }));
+      }
       list.appendChild(row);
     });
     wrap.appendChild(list);
@@ -622,6 +626,10 @@
   document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
 
   // ---- messages ----
+  function messageListLabel(m) {
+    return typeof m.title === "string" && m.title ? m.title : truncateText(m.body, LIST_PREVIEW_CHARS).text;
+  }
+
   function renderMessageRow(m) {
     var row = el("button", { className: "list-row" });
     row.type = "button";
@@ -631,7 +639,7 @@
     head.appendChild(el("span", { className: "badge", text: m.state }));
     head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "preview", text: truncateText(m.body, LIST_PREVIEW_CHARS).text }));
+    row.appendChild(el("div", { className: "preview" + (m.title ? " message-title" : ""), text: messageListLabel(m) }));
     row.addEventListener("click", function () { selectMessage(m, row); });
     return row;
   }
@@ -644,6 +652,7 @@
     head.appendChild(el("span", { className: "badge", text: m.kind }));
     head.appendChild(el("span", { className: "badge", text: m.state }));
     wrap.appendChild(head);
+    if (m.title) wrap.appendChild(el("p", { className: "meta message-detail-title", text: m.title }));
     wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
     wrap.appendChild(renderStageIndicator(messageStage(m)));
     wrap.appendChild(renderTextSection("message-detail-body", "Body", m.body));

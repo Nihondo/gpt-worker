@@ -468,7 +468,7 @@ describe("dashboard: message/task history pagination and retention framing", () 
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     doo.sql.exec(
-      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at) VALUES ('retained', 'to_gpt', 'task-a', 2, 'EXECUTED', 'private body', 'acked', NULL, ?), ('other-task', 'to_local', 'task-b', 0, 'PLAN', 'other body', 'pending', NULL, ?)`,
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, title, body, state, lease_until, created_at) VALUES ('retained', 'to_gpt', 'task-a', 2, 'EXECUTED', 'Retained exchange title', 'private body', 'acked', NULL, ?), ('other-task', 'to_local', 'task-b', 0, 'PLAN', 'Other title', 'other body', 'pending', NULL, ?)`,
       Date.now(),
       Date.now(),
     );
@@ -477,10 +477,13 @@ describe("dashboard: message/task history pagination and retention framing", () 
     const metadata = await metadataRes.json();
     assert.deepEqual(metadata.messages.map((m) => m.messageId), ["retained"]);
     assert.equal(Object.hasOwn(metadata.messages[0], "body"), false);
+    assert.equal(metadata.messages[0].title, "Retained exchange title");
     assert.equal(metadata.messages[0].state, "acked");
 
     const defaultRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/messages?task_id=task-a`, { headers: { cookie } }), env);
-    assert.equal((await defaultRes.json()).messages[0].body, "private body");
+    const defaultJson = await defaultRes.json();
+    assert.equal(defaultJson.messages[0].body, "private body");
+    assert.equal(defaultJson.messages[0].title, "Retained exchange title");
   });
 
   test("tasks endpoint uses updatedAt (not taskHistory()'s misnamed created_at) and includes non-terminal tasks", async () => {
@@ -1513,6 +1516,19 @@ describe("dashboard: task exchange-history detail", () => {
     assert.match(WORKSPACE_DASHBOARD_APP_JS, /state\.selectedTaskId === taskId/);
     assert.match(HUB_DASHBOARD_APP_JS, /state\.workspaceId === id && state\.selectionGen === gen/);
     assert.match(HUB_DASHBOARD_APP_JS, /wsApiFor\(id, "\/messages" \+ q\)/);
+  });
+
+  test("workspace and hub apps render exchange history titles and prefer message titles in message lists", () => {
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      assert.match(js, /function messageListLabel\(m\)/);
+      assert.match(js, /typeof m\.title === "string" && m\.title/);
+      assert.match(js, /task-history-title/);
+      assert.match(js, /message-title/);
+      assert.match(js, /message-detail-title/);
+    });
+    assert.match(DASHBOARD_CSS, /\.task-history-title/);
+    assert.match(DASHBOARD_CSS, /\.list-row \.message-title/);
+    assert.match(DASHBOARD_CSS, /\.message-detail-title/);
   });
 });
 

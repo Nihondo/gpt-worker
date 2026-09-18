@@ -58,27 +58,34 @@ GPT's reply to it:
 responding to; the Worker rejects a mismatch with `NO_MATCHING_TASK` so a
 stale or duplicated reply can never be misapplied to the wrong round.
 
-## Task titles
+## Task and message titles
 
 Each task has optional durable `title` metadata for compact dashboard rows.
-It begins as `NULL` when the local agent creates the task. A non-empty
-iteration-0 `next_task` result includes `task_title` (`string | null`) beside
-its normal message fields. When that value is `null`, the Web planning partner
-generates a concise one-line title and calls `set_title` with the exact
-`message_id`, `task_id`, and `iteration` from that leased INIT.
+A task normally begins untitled (`tasks.title` is `NULL`) unless the local task
+command (`gpt-worker task "<goal>" --title "<title>"`) supplies an explicit title.
+A non-empty iteration-0 `next_task` result includes `task_title` (`string | null`)
+beside its normal message fields. When that value is `null`, the Web planning
+partner generates a concise one-line title and calls `set_title` with the exact
+`message_id`, `task_id`, and `iteration` from that leased INIT. Calling `set_title`
+persists the title to `tasks.title` and to `msgs.title` for that INIT message.
 
-`set_title` is accepted only for the current, unexpired INIT lease while the
+Each message row in `msgs` also supports a concise display `title` (at most 80
+code points). `submit_plan` accepts an optional `title` parameter when sending
+PLAN/DONE/BLOCKED; if omitted, a clean one-line title is defensively derived from
+the message body (stripping protocol markers and boilerplate). Local commands
+(`gpt-worker task` / `report` / `handoff`) accept `--title`, with reports falling back
+to the first line of the execution tests/summary or handoff reason. Titles normalize
+whitespace (including tabs and newlines) into single spaces. Explicit titles that
+normalize empty, exceed 80 code points, or contain non-whitespace control characters
+are rejected with `INVALID_TITLE`. These titles populate the task's Exchange history
+and the Messages tab.
+
+`set_title` is accepted for the current, unexpired INIT lease while the
 task remains in `WAITING_PLAN`. It normalizes whitespace, limits the title to
 80 code points, and is first-write-wins: retrying the same title during that
 lease is idempotent, while a different value is refused. It never changes
 `protocol_state`, `iteration`, `waiting_for`, `updated_at`, or either message
-queue. Re-delivered INIT messages return the existing `task_title`; EXECUTED
-messages never generate a title.
-
-This uses a separate tool rather than adding a title to `submit_plan`: title
-metadata is then available immediately after task receipt and its retry rules
-remain independent from the PLAN/DONE/BLOCKED state transition. Existing
-tasks can retain a null title; dashboard lists fall back to their goal preview.
+queue. Re-delivered INIT messages return the existing `task_title`.
 
 ## Message bodies
 
@@ -273,7 +280,7 @@ everything else in this table falls into.
 | `task_history` | GPT | Past tasks in this workspace that reached DONE/BLOCKED, newest first, with a short summary. It is durable task state in the Worker, so it works even if the local bridge is offline. |
 | `next_task` | GPT | Fetch the oldest undelivered INIT/EXECUTED, or a specific one if called with `task_id` (see below). `{"empty":true}` when there is nothing (matching); otherwise the result also carries `operating_instructions` and nullable `task_title` (see above). This is what "continue" triggers. |
 | `set_title` | GPT | Set the concise one-line title for the exact currently leased INIT when `task_title` is null. It is immutable display metadata, not a PLAN/DONE/BLOCKED reply. |
-| `submit_plan` | GPT | Send PLAN/DONE/BLOCKED for a specific `task_id`+`iteration`. |
+| `submit_plan` | GPT | Send PLAN/DONE/BLOCKED for a specific `task_id`+`iteration`, optionally with a concise display `title`. |
 
 ## Egress content sanitization
 

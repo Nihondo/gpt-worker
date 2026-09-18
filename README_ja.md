@@ -445,12 +445,12 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker start -w <dir>` | ローカルブリッジ（通信プロセス）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
 | `gpt-worker status -w <dir>` | ブリッジの稼働状況とタスク状態を確認 |
-| `gpt-worker task "<goal>" -w <dir>` | ChatGPT に新しいタスクを依頼 |
+| `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | ChatGPT に新しいタスクを依頼 |
 | `gpt-worker wait -w <dir>` | ChatGPT の応答（計画またはレビュー結果）を待機 |
-| `gpt-worker report -w <dir>` | 実装結果やテスト内容を ChatGPT に報告 |
+| `gpt-worker report [-w <dir>] [--title "<title>"]` | 実装結果やテスト内容を ChatGPT に報告 |
 | `gpt-worker complete -w <dir>` | LOCAL_DECISION（判断待ち）状態のレビュー/計画タスクの完了を確定 |
 | `gpt-worker continue -w <dir>` | LOCAL_DECISION 状態のレビュータスクを EXECUTING に戻して指摘事項の実装を継続 |
-| `gpt-worker handoff -w <dir> [--reason "<理由>"]` | ラウンドを終えてタスクを別のエージェントに引き継ぐ（受け手は `wait` で再開） |
+| `gpt-worker handoff [-w <dir>] [--reason "<理由>"] [--title "<title>"]` | ラウンドを終えてタスクを別のエージェントに引き継ぐ（受け手は `wait` で再開） |
 | `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | 保留中のキューメッセージの確認や、滞留したメッセージの破棄 |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | このワークスペースのメッセージ本文サイズ上限を表示・変更する（既定 16KB） |
 | `gpt-worker guidance "<text>" -w <dir>` | プロジェクト固有の開発ルールを設定 |

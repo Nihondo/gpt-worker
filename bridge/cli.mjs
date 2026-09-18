@@ -1139,7 +1139,8 @@ async function cmdQueue(args) {
   }
   for (const m of messages) {
     const when = new Date(m.created_at).toISOString();
-    console.log(`[${m.dir}] ${m.kind} task=${m.task_id.slice(0, 8)} iter=${m.iteration} state=${m.state} (${when})`);
+    const titleInfo = m.title ? ` title="${m.title}"` : "";
+    console.log(`[${m.dir}] ${m.kind} task=${m.task_id.slice(0, 8)} iter=${m.iteration} state=${m.state}${titleInfo} (${when})`);
     console.log(`  ${m.body_preview.replace(/\n/g, "\n  ")}`);
   }
 }
@@ -1181,15 +1182,30 @@ async function cmdTask(args) {
   await migrateLegacyStateIfNeeded(root, cfg);
   const goal = args._[0];
   if (!goal) {
-    console.error('Usage: gpt-worker task "<goal>" [-w <dir>] [--force]');
+    console.error('Usage: gpt-worker task "<goal>" [-w <dir>] [--title "<title>"] [--force]');
+    process.exit(1);
+  }
+
+  if (Object.hasOwn(args, "title") && typeof args.title !== "string") {
+    console.error("Invalid title: --title requires a string value.");
     process.exit(1);
   }
 
   const taskId = crypto.randomUUID();
   const body = buildInitBody(goal);
-  const result = await localCall(cfg, "start_task", { task_id: taskId, goal, text: body, force: !!args.force });
+  const result = await localCall(cfg, "start_task", {
+    task_id: taskId,
+    goal,
+    text: body,
+    force: !!args.force,
+    ...(Object.hasOwn(args, "title") ? { title: args.title } : {}),
+  });
   if (result.error === "ACTIVE_TASK") {
     console.error(`A task is already in progress (task_id=${result.task.taskId}, state=${result.task.protocolState}). Finish it, or pass --force to replace it.`);
+    process.exit(1);
+  }
+  if (result.error === "INVALID_TITLE") {
+    console.error("Invalid title: must normalize to a non-empty single line of at most 80 characters without control characters.");
     process.exit(1);
   }
   if (result.error) {
@@ -1412,8 +1428,19 @@ async function reportRound(args, handoff) {
     });
   }
 
+  if (Object.hasOwn(args, "title") && typeof args.title !== "string") {
+    console.error("Invalid title: --title requires a string value.");
+    process.exit(1);
+  }
+
   const body = buildExecutedBody({ changed, tests, handoff });
-  const result = await localCall(cfg, "report_task", { task_id: task.taskId, changed, tests, text: body });
+  const result = await localCall(cfg, "report_task", {
+    task_id: task.taskId,
+    changed,
+    tests,
+    text: body,
+    ...(Object.hasOwn(args, "title") ? { title: args.title } : {}),
+  });
   if (result.error === "BODY_TOO_LARGE") {
     console.error(
       `Failed to enqueue report: body exceeds this workspace's configured limit.\n` +
@@ -1426,6 +1453,10 @@ async function reportRound(args, handoff) {
       `Nothing to hand off: this task is ${result.state}, not EXECUTING.\n` +
         "If a reply is already queued, run 'gpt-worker wait' instead — a hand-off only applies to a round left mid-execution."
     );
+    process.exit(1);
+  }
+  if (result.error === "INVALID_TITLE") {
+    console.error("Invalid title: must normalize to a non-empty single line of at most 80 characters without control characters.");
     process.exit(1);
   }
   if (result.error) {

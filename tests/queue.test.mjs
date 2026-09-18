@@ -32,6 +32,96 @@ describe("tasks title schema migration", () => {
     assert.equal(doo.getTask("legacy").title, null);
     assert.ok(ctx.storage.sql.exec(`PRAGMA table_info('tasks')`).toArray().some((column) => column.name === "title"));
   });
+
+  test("migrates oldest combined legacy shape where both msgs and tasks lack title", () => {
+    const ctx = makeFakeCtx();
+    ctx.storage.sql.exec(`
+      CREATE TABLE msgs (
+        message_id  TEXT PRIMARY KEY,
+        dir         TEXT NOT NULL,
+        task_id     TEXT NOT NULL,
+        iteration   INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        lease_until INTEGER,
+        created_at  INTEGER NOT NULL
+      )
+    `);
+    ctx.storage.sql.exec(`
+      CREATE TABLE tasks (
+        task_id          TEXT PRIMARY KEY,
+        goal             TEXT NOT NULL,
+        iteration        INTEGER NOT NULL,
+        protocol_state   TEXT NOT NULL,
+        waiting_for      TEXT NOT NULL,
+        task_started_at  INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        terminal_summary TEXT
+      )
+    `);
+    ctx.storage.sql.exec(
+      `INSERT INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+       VALUES ('t-old', 'old goal', 0, 'WAITING_PLAN', 'GPT_PLAN', 100, 100)`
+    );
+    ctx.storage.sql.exec(
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at)
+       VALUES ('m-old', 'to_gpt', 't-old', 0, 'INIT', 'GOAL:\nold goal', 'pending', NULL, 100)`
+    );
+
+    const doo = new BridgeDO(ctx, makeFakeEnv());
+    assert.ok(ctx.storage.sql.exec(`PRAGMA table_info('msgs')`).toArray().some((c) => c.name === "title"));
+    assert.ok(ctx.storage.sql.exec(`PRAGMA table_info('tasks')`).toArray().some((c) => c.name === "title"));
+    assert.equal(doo.getTask("t-old").title, null);
+    const msg = doo.sql.exec(`SELECT title, body FROM msgs WHERE message_id = 'm-old'`).toArray()[0];
+    assert.equal(msg.title, null);
+    assert.equal(msg.body, "GOAL:\nold goal");
+  });
+
+  test("migrates intermediate shape where tasks already has title and backfills matching INIT msgs", () => {
+    const ctx = makeFakeCtx();
+    ctx.storage.sql.exec(`
+      CREATE TABLE msgs (
+        message_id  TEXT PRIMARY KEY,
+        dir         TEXT NOT NULL,
+        task_id     TEXT NOT NULL,
+        iteration   INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        state       TEXT NOT NULL,
+        lease_until INTEGER,
+        created_at  INTEGER NOT NULL
+      )
+    `);
+    ctx.storage.sql.exec(`
+      CREATE TABLE tasks (
+        task_id          TEXT PRIMARY KEY,
+        goal             TEXT NOT NULL,
+        title            TEXT,
+        iteration        INTEGER NOT NULL,
+        protocol_state   TEXT NOT NULL,
+        waiting_for      TEXT NOT NULL,
+        task_started_at  INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        terminal_summary TEXT
+      )
+    `);
+    ctx.storage.sql.exec(
+      `INSERT INTO tasks (task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+       VALUES ('t-int', 'int goal', 'Pre-existing Task Title', 1, 'EXECUTING', 'none', 100, 200)`
+    );
+    ctx.storage.sql.exec(
+      `INSERT INTO msgs (message_id, dir, task_id, iteration, kind, body, state, lease_until, created_at)
+       VALUES ('m-init', 'to_gpt', 't-int', 0, 'INIT', 'GOAL:\nint goal', 'acked', NULL, 100),
+              ('m-plan', 'to_local', 't-int', 0, 'PLAN', 'Plan body', 'acked', NULL, 150)`
+    );
+
+    const doo = new BridgeDO(ctx, makeFakeEnv());
+    const initRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = 'm-init'`).toArray()[0];
+    const planRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = 'm-plan'`).toArray()[0];
+    assert.equal(initRow.title, "Pre-existing Task Title");
+    assert.equal(planRow.title, null);
+  });
 });
 
 describe("localEnqueue: iteration invariants", () => {
@@ -251,6 +341,215 @@ describe("queueSetTitle: current INIT lease only", () => {
     doo.localCompleteTask({ task_id: "t1" });
     assert.equal(doo.taskView(doo.getTask("t1")).title, "Remembered title");
     assert.equal(doo.taskHistory({}).tasks[0].title, "Remembered title");
+  });
+
+  test("set_title updates msgs.title for the INIT message", () => {
+    const doo = makeDO();
+    const next = startAndLease(doo);
+    doo.queueSetTitle({ message_id: next.message_id, task_id: "t1", iteration: 0, title: "INIT Title" });
+    const row = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, next.message_id).toArray()[0];
+    assert.equal(row.title, "INIT Title");
+  });
+
+  test("submit_plan preserves explicit title and falls back to auto-derived title", () => {
+    const doo = makeDO();
+    // Round 0: explicit title in submit_plan
+    const next0 = startAndLease(doo, "t1", "GOAL:\nFirst goal");
+    const sub0 = doo.queueSubmit({
+      task_id: "t1",
+      iteration: 0,
+      state: "PLAN",
+      body: "# Implementation Details\n1. Do something",
+      title: "Custom Plan Title",
+    });
+    const row0 = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, sub0.structuredContent.message_id).toArray()[0];
+    assert.equal(row0.title, "Custom Plan Title");
+    assert.equal(sub0.structuredContent.title, "Custom Plan Title");
+
+    // Ack and report iteration 1
+    doo.localAck({ message_id: sub0.structuredContent.message_id });
+    const rep = doo.localReportTask({
+      task_id: "t1",
+      changed: 2,
+      tests: "All tests passing",
+      text: "RESULT:\nExecution finished.\n\nCHANGED_FILES:\n2\n\nTESTS:\nAll tests passing",
+      title: "Executed round 1",
+    });
+    const repRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, rep.message_id).toArray()[0];
+    assert.equal(repRow.title, "Executed round 1");
+
+    // Round 1: omit title in submit_plan -> derived from body
+    const next1 = doo.queueNext("t1");
+    assert.equal(next1.title, "Executed round 1");
+    const sub1 = doo.queueSubmit({
+      task_id: "t1",
+      iteration: 1,
+      state: "DONE",
+      body: "## Wrap-up\nAll items completed successfully.",
+    });
+    const row1 = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, sub1.structuredContent.message_id).toArray()[0];
+    assert.equal(row1.title, "Wrap-up");
+    assert.equal(sub1.structuredContent.title, "Wrap-up");
+  });
+
+  test("localReportTask auto-derives title from tests if omitted", () => {
+    const doo = makeDO();
+    startAndLease(doo, "t2", "GOAL:\nSecond goal");
+    const sub = doo.queueSubmit({ task_id: "t2", iteration: 0, state: "PLAN", body: "plan" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+
+    const rep = doo.localReportTask({
+      task_id: "t2",
+      changed: 1,
+      tests: "Added 3 regression tests",
+      text: "RESULT:\nExecution finished.\n\nCHANGED_FILES:\n1\n\nTESTS:\nAdded 3 regression tests",
+    });
+    const repRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, rep.message_id).toArray()[0];
+    assert.equal(repRow.title, "Added 3 regression tests");
+  });
+
+  test("localReportTask with tests '(not run)' leaves title null instead of boilerplate", () => {
+    const doo = makeDO();
+    startAndLease(doo, "t3", "GOAL:\nThird goal");
+    const sub = doo.queueSubmit({ task_id: "t3", iteration: 0, state: "PLAN", body: "plan" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+
+    const rep = doo.localReportTask({
+      task_id: "t3",
+      changed: 1,
+      tests: "(not run)",
+      text: "RESULT:\nExecution finished.\n\nCHANGED_FILES:\n1\n\nTESTS:\n(not run)",
+    });
+    const repRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, rep.message_id).toArray()[0];
+    assert.equal(repRow.title, null);
+  });
+
+  test("handoff EXECUTED with tests '(not run)' derives title from handoff reason", () => {
+    const doo = makeDO();
+    startAndLease(doo, "t4", "GOAL:\nFourth goal");
+    const sub = doo.queueSubmit({ task_id: "t4", iteration: 0, state: "PLAN", body: "plan" });
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+
+    const rep = doo.localReportTask({
+      task_id: "t4",
+      changed: 0,
+      tests: "(not run)",
+      text: "RESULT:\nExecution finished.\n\nCHANGED_FILES:\n0\n\nTESTS:\n(not run)\n\nHANDOFF:\nreason: rate limit reached",
+    });
+    const repRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, rep.message_id).toArray()[0];
+    assert.equal(repRow.title, "rate limit reached");
+  });
+
+  test("queueSubmit PLAN starting with HANDOFF_BRIEF does not derive HANDOFF_BRIEF as title", () => {
+    const doo = makeDO();
+    startAndLease(doo, "t5", "GOAL:\nFifth goal");
+    const sub = doo.queueSubmit({
+      task_id: "t5",
+      iteration: 0,
+      state: "PLAN",
+      body: "HANDOFF_BRIEF:\nResume implementing the dashboard widget",
+    });
+    const row = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, sub.structuredContent.message_id).toArray()[0];
+    assert.equal(row.title, "Resume implementing the dashboard widget");
+    assert.equal(sub.structuredContent.title, "Resume implementing the dashboard widget");
+  });
+
+  test("rejects invalid titles across localStartTask, localReportTask, localEnqueue, and queueSubmit", () => {
+    const doo = makeDO();
+    const tooLong = "a".repeat(81);
+    const withCtrl = "Title\u0001WithCtrl";
+    const onlyWhitespace = "   ";
+
+    // localStartTask
+    assert.equal(doo.localStartTask({ task_id: "inv1", goal: "g", text: "GOAL:\ng", title: tooLong }).error, "INVALID_TITLE");
+    assert.equal(doo.localStartTask({ task_id: "inv2", goal: "g", text: "GOAL:\ng", title: withCtrl }).error, "INVALID_TITLE");
+    assert.equal(doo.localStartTask({ task_id: "inv2b", goal: "g", text: "GOAL:\ng", title: onlyWhitespace }).error, "INVALID_TITLE");
+
+    // Start valid task
+    doo.localStartTask({ task_id: "inv3", goal: "g", text: "GOAL:\ng", title: "Valid Title" });
+    const leased = doo.queueNext("inv3");
+
+    // queueSubmit
+    const invSub = doo.queueSubmit({ task_id: "inv3", iteration: 0, state: "PLAN", body: "body", title: tooLong });
+    assert.equal(invSub.isError, true);
+    assert.equal(invSub.structuredContent.error, "INVALID_TITLE");
+
+    const invSubCtrl = doo.queueSubmit({ task_id: "inv3", iteration: 0, state: "PLAN", body: "body", title: withCtrl });
+    assert.equal(invSubCtrl.isError, true);
+    assert.equal(invSubCtrl.structuredContent.error, "INVALID_TITLE");
+
+    // Valid queueSubmit
+    const okSub = doo.queueSubmit({ task_id: "inv3", iteration: 0, state: "PLAN", body: "body" });
+    doo.localAck({ message_id: okSub.structuredContent.message_id });
+
+    // localReportTask
+    assert.equal(
+      doo.localReportTask({ task_id: "inv3", changed: 0, tests: "t", text: "txt", title: tooLong }).error,
+      "INVALID_TITLE"
+    );
+    assert.equal(
+      doo.localReportTask({ task_id: "inv3", changed: 0, tests: "t", text: "txt", title: withCtrl }).error,
+      "INVALID_TITLE"
+    );
+
+    // localEnqueue
+    assert.equal(
+      doo.localEnqueue({ kind: "EXECUTED", task_id: "inv3", iteration: 2, body: "txt", title: tooLong }).error,
+      "INVALID_TITLE"
+    );
+    assert.equal(
+      doo.localEnqueue({ kind: "EXECUTED", task_id: "inv3", iteration: 2, body: "txt", title: onlyWhitespace }).error,
+      "INVALID_TITLE"
+    );
+  });
+
+  test("whitespace including newlines and tabs is normalized to single spaces across all title paths", () => {
+    const doo = makeDO();
+    const multiLine = "  Start\n  Task\t Title  ";
+    doo.localStartTask({ task_id: "norm1", goal: "goal", text: "GOAL:\ngoal", title: multiLine });
+    assert.equal(doo.getTask("norm1").title, "Start Task Title");
+    const leased = doo.queueNext("norm1");
+    assert.equal(leased.title, "Start Task Title");
+
+    // queueSubmit with newlines
+    const sub = doo.queueSubmit({
+      task_id: "norm1",
+      iteration: 0,
+      state: "PLAN",
+      body: "plan",
+      title: "Plan\nWith\n\tNewlines",
+    });
+    assert.equal(sub.structuredContent.title, "Plan With Newlines");
+    const subRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, sub.structuredContent.message_id).toArray()[0];
+    assert.equal(subRow.title, "Plan With Newlines");
+    doo.localAck({ message_id: sub.structuredContent.message_id });
+
+    // localReportTask with newlines
+    const rep = doo.localReportTask({
+      task_id: "norm1",
+      changed: 0,
+      tests: "t",
+      text: "txt",
+      title: "Report\n\t Title",
+    });
+    assert.equal(rep.title, "Report Title");
+    const repRow = doo.sql.exec(`SELECT title FROM msgs WHERE message_id = ?`, rep.message_id).toArray()[0];
+    assert.equal(repRow.title, "Report Title");
+  });
+
+  test("deriveMessageTitle truncates lines exceeding 80 code points in a code-point-safe manner", () => {
+    const doo = makeDO();
+    startAndLease(doo, "t-trunc", "GOAL:\nTruncation test");
+    const longEmojiHeading = "## " + "🚀".repeat(100);
+    const sub = doo.queueSubmit({
+      task_id: "t-trunc",
+      iteration: 0,
+      state: "PLAN",
+      body: longEmojiHeading,
+    });
+    const title = sub.structuredContent.title;
+    assert.equal(Array.from(title).length, 80);
+    assert.equal(title, "🚀".repeat(79) + "…");
   });
 });
 

@@ -446,12 +446,12 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker start -w <dir>` | Start the local bridge process |
 | `gpt-worker stop -w <dir>` | Stop the local bridge process |
 | `gpt-worker status -w <dir>` | Check bridge process status and active task |
-| `gpt-worker task "<goal>" -w <dir>` | Queue a new task for ChatGPT |
+| `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | Queue a new task for ChatGPT |
 | `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
-| `gpt-worker report -w <dir>` | Submit execution metrics and test results to ChatGPT |
+| `gpt-worker report [-w <dir>] [--title "<title>"]` | Submit execution metrics and test results to ChatGPT |
 | `gpt-worker complete -w <dir>` | Confirm completion of a review/planning task left in LOCAL_DECISION |
 | `gpt-worker continue -w <dir>` | Transition a review task in LOCAL_DECISION back to EXECUTING to implement recommendations |
-| `gpt-worker handoff -w <dir> [--reason "<why>"]` | End the round and hand the task to a different agent, which resumes with `wait` |
+| `gpt-worker handoff [-w <dir>] [--reason "<why>"] [--title "<title>"]` | End the round and hand the task to a different agent, which resumes with `wait` |
 | `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | Inspect pending queue messages or discard stuck messages |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | View or change this workspace's message body size limit (default 16 KB) |
 | `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
