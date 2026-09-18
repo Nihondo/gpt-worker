@@ -2,7 +2,7 @@
 
 **This is an experimental project. Use at your own risk.**
 
-**gpt-worker** is a developer workflow tool that pairs the web version of ChatGPT (Plus, Team, Pro) as your planning and review "brain" with a local coding agent (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files, run tests, and manage Git.
+**gpt-worker** is a developer workflow tool that pairs the web version of ChatGPT (Plus, Business, Pro, or any plan supporting Projects, Developer mode, and custom MCP connectors) as your planning and review "brain" with a local coding agent (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files, run tests, and manage Git.
 
 It brings ChatGPT's advanced web reasoning into your daily coding loop without consuming any ChatGPT API tokens.
 
@@ -17,13 +17,13 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 
 ## Key Features
 
-- **Zero API Costs**: Powered by your existing ChatGPT web subscription (Plus, Team, Pro) with no per-token API charges.
+- **Zero API Costs**: Powered by your existing ChatGPT web subscription (Plus, Business, Pro, etc.) with no per-token API charges.
 - **One-Time Setup Hub**: Deploy the relay Cloudflare Worker and configure ChatGPT once. Every subsequent project is added instantly with a single local command.
-- **Safe Read-Only Design**: ChatGPT only inspects files and generates plans. File modifications and command executions are always reviewed and run locally.
+- **Read-Only Workspace Access**: ChatGPT can inspect repository data and propose plans, but cannot edit files or run local commands; protocol/display metadata is written only to the Worker through bounded MCP operations.
 - **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT, and every tool result is additionally scanned by an external secret scanner (betterleaks/gitleaks) before it reaches ChatGPT, with any finding masked in place.
 - **Chrome Automation**: Automatically opens the ChatGPT Project in Chrome when a task is queued, and can submit messages in the background without stealing window focus.
 - **Web Dashboard**: Your own Worker also serves a browser dashboard, either scoped to one workspace or, logging in with the shared hub token, across every registered workspace at once — view the queue and task history, ack/discard messages, edit guidance/limits, and queue a new task without touching the CLI. See [Web Dashboard](#web-dashboard).
-- **Zero Extra Dependencies**: Built purely with standard Node.js built-ins. No bulky npm packages or heavy daemons to install.
+- **No npm Runtime Dependencies**: Built purely with standard Node.js built-ins. No bulky npm packages or heavy daemons to install (an external secret scanner like betterleaks is required as a prerequisite).
 
 ---
 
@@ -32,7 +32,7 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 - **OS**: macOS (for automated Chrome integration)
 - **Node.js**: v22 or higher (install with `brew install node` if not present)
 - **Google Chrome**: Browser used to run ChatGPT
-- **ChatGPT Subscription**: Plus, Team, or Pro (with Developer mode and Projects enabled)
+- **ChatGPT Account**: Plus, Business, or Pro (any plan where Projects, Developer mode, and custom MCP connectors are available; verified on Plus by the maintainer)
 - **Cloudflare Account**: Free tier is sufficient (used to deploy the relay Worker)
 - **A secret scanner**: [betterleaks](https://github.com/betterleaks/betterleaks) (recommended) or [gitleaks](https://github.com/gitleaks/gitleaks) as a compatible fallback — required so the local bridge can mask secrets before they reach ChatGPT; `gpt-worker start` refuses to run without one.
   ```bash
@@ -105,9 +105,9 @@ gpt-worker init -w /path/to/your-project
 ### Step 4: Configure ChatGPT
 
 1. **Enable Developer Mode**:
-   - In ChatGPT, click your profile (bottom-left) → **Settings** → **Developer mode** and toggle it ON.
+   - In ChatGPT, open **Settings** → **Apps / Developer mode** (the exact location in Settings varies by current ChatGPT UI and workspace type) and toggle Developer mode ON.
 2. **Add MCP Connector**:
-   - Go to **Settings** → **Connectors** (or Developer mode settings) and add a new connector.
+   - Go to **Settings** → **Connectors** (or **Apps** / Developer mode settings) and add a new connector.
    - **Name**: `gpt-worker` (fixed — do not rename)
    - **Server URL**: The URL printed by `gpt-worker url`
    - **Authentication**: Select `OAuth`. When the consent page appears, enter the owner token printed by `gpt-worker url` to approve it.
@@ -440,6 +440,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) durably stores t
 | `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
 | `gpt-worker report -w <dir>` | Submit execution metrics and test results to ChatGPT |
 | `gpt-worker handoff -w <dir> [--reason "<why>"]` | End the round and hand the task to a different agent, which resumes with `wait` |
+| `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | Inspect pending queue messages or discard stuck messages |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | View or change this workspace's message body size limit (default 16 KB) |
 | `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
 | `gpt-worker chat-url "<url>" -w <dir>` | Save or inspect ChatGPT Project URL |
@@ -449,6 +450,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) durably stores t
 | `gpt-worker allow-list -w <dir>` | List allowed Git-ignored files |
 | `gpt-worker deny-read <file> -w <dir>` | Revoke reading permission for a file |
 | `gpt-worker state -w <dir>` | Display active task checkpoint in JSON |
+| `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | Rotate authentication tokens (workspace GPT/link/CLI token or shared hub token) |
 | `gpt-worker workspaces` | List all registered workspaces |
 | `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge records |
 

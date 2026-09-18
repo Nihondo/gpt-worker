@@ -2,7 +2,7 @@
 
 **開発中・実験的プロジェクトです。使用にあたっては自己責任でお願いします。**
 
-**gpt-worker** は、Web ブラウザ版の ChatGPT（Plus, Team, Pro）を「計画・レビュー役（頭脳）」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
+**gpt-worker** は、Web ブラウザ版の ChatGPT（Plus、Business、Pro など、Projects・Developer mode・カスタム MCP コネクタが利用可能なプラン）を「計画・レビュー役（頭脳）」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
 
 ChatGPT の API トークン料金を消費することなく、ブラウザ版の高度な推論能力を作業ループに取り込めます。
 
@@ -17,13 +17,13 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
 
 ## 主な特長
 
-- **API 課金ゼロ**：日常使っている ChatGPT の月額サブスクリプション（Web版）を利用するため、トークン従量課金が発生しません。
+- **API 課金ゼロ**：日常使っている ChatGPT の月額サブスクリプション（Plus、Business、Pro などの Web 版）を利用するため、トークン従量課金が発生しません。
 - **1回設定するだけの共通ハブ**：中継用の Cloudflare Worker と ChatGPT 側の設定は最初の1度だけです。2つ目以降のプロジェクトはローカルコマンド1つで瞬時に追加できます。
-- **安全な読み取り専用設計**：ChatGPT はリポジトリの調査と計画の立案のみを行います。ファイルの変更やコマンド実行は必ずローカル側で検証してから行います。
+- **安全な読み取り専用設計（ワークスペース）**：ChatGPT はリポジトリの調査と計画立案のみを行い、ローカルファイルの編集やコマンド実行は行えません（プロトコルや表示用のメタデータ更新のみ、制約された MCP 操作経由で Worker に対して行われます）。ファイルの変更やコマンド実行は必ずローカル側で検証してから行います。
 - **機密情報の自動保護**：`.env`、秘密鍵、`.ssh`、`.aws` などの機密ファイルや、Git で無視されているファイルは自動的に ChatGPT から隠されます。さらに、すべてのツール結果は外部の秘密スキャナ（betterleaks/gitleaks）で検査され、検出された秘密情報はその場でマスクされてから ChatGPT に届きます。
 - **Chrome による自動入力と送信**：タスク発行時に Chrome で該当プロジェクトを開き、バックグラウンド（画面フォーカスを奪わずに）でメッセージの入力や送信まで行えます。
 - **Web ダッシュボード**：自分自身の Worker が、ワークスペースごとのブラウザダッシュボードに加えて、共有 hub token でログインすれば登録済みの全ワークスペースを横断できるダッシュボードも配信します。キュー状態・タスク履歴の閲覧、メッセージの ack/discard、guidance/limits の編集、CLI を使わない新規タスクの投入ができます。[Web ダッシュボード](#web-ダッシュボード)を参照してください。
-- **追加パッケージ不要**：Node.js の標準機能だけで作られており、余計なライブラリのインストールは不要です。
+- **npm ランタイム依存なし**：Node.js の標準機能だけで作られており、npm パッケージの依存や重いデーモンはありません（前提条件として betterleaks などの外部秘密スキャナが必要です）。
 
 ---
 
@@ -32,7 +32,7 @@ ChatGPT の API トークン料金を消費することなく、ブラウザ版�
 - **OS**：macOS（Chrome 自動連携機能を使用する場合）
 - **Node.js**：v22 以上（未導入の場合は `brew install node`）
 - **Google Chrome**：ChatGPT を操作するブラウザ
-- **ChatGPT サブスクリプション**：Plus、Team、Pro のいずれか（Developer mode と Projects 機能が使えること）
+- **ChatGPT アカウント**：Plus、Business、Pro のいずれか（Projects、Developer mode、カスタム MCP コネクタが利用可能なプラン。作者環境の Plus にて動作確認済み）
 - **Cloudflare アカウント**：無料プランで十分です（中継 Worker の設置に使用）
 - **秘密スキャナ**：[betterleaks](https://github.com/betterleaks/betterleaks)（推奨）または互換フォールバックの [gitleaks](https://github.com/gitleaks/gitleaks) — ローカルブリッジが ChatGPT に届ける前に秘密情報をマスクするために必須です。導入されていないと `gpt-worker start` は起動を拒否します。
   ```bash
@@ -105,9 +105,9 @@ gpt-worker init -w /path/to/your-project
 ### ステップ 4：ChatGPT の設定
 
 1. **開発者モードを有効にする**：
-   - ChatGPT 画面左下のユーザー名をクリックし、**設定** → **Developer mode** をオンにします。
+   - ChatGPT の **設定** → **Apps** / **Developer mode**（UI のバージョンやアカウント種別により設定内の配置が異なる場合があります）を開き、Developer mode をオンにします。
 2. **MCP Connector を登録する**：
-   - **設定** → **Connectors**（または Developer mode 設定）から新しいコネクタを追加します。
+   - **設定** → **Connectors**（または **Apps** / Developer mode 設定）から新しいコネクタを追加します。
    - **Name**：`gpt-worker`（固定。変更不可）
    - **Server URL**：`gpt-worker url` で表示された URL
    - **Authentication**：`OAuth` を選択します。同意画面が開いたら、`gpt-worker url` で表示されたトークンを入力して承認します。
@@ -440,6 +440,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker wait -w <dir>` | ChatGPT の応答（計画またはレビュー結果）を待機 |
 | `gpt-worker report -w <dir>` | 実装結果やテスト内容を ChatGPT に報告 |
 | `gpt-worker handoff -w <dir> [--reason "<理由>"]` | ラウンドを終えてタスクを別のエージェントに引き継ぐ（受け手は `wait` で再開） |
+| `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | 保留中のキューメッセージの確認や、滞留したメッセージの破棄 |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | このワークスペースのメッセージ本文サイズ上限を表示・変更する（既定 16KB） |
 | `gpt-worker guidance "<text>" -w <dir>` | プロジェクト固有の開発ルールを設定 |
 | `gpt-worker chat-url "<url>" -w <dir>` | ChatGPT Project の URL を登録・変更 |
@@ -449,6 +450,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker allow-list -w <dir>` | 個別許可されたファイル一覧を表示 |
 | `gpt-worker deny-read <file> -w <dir>` | 個別読み取りの許可を取り消し |
 | `gpt-worker state -w <dir>` | 現在のタスク状態を JSON で確認 |
+| `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | 認証トークン（ワークスペースの GPT/link/CLI トークン、または共有 hub トークン）を再生成 |
 | `gpt-worker workspaces` | 登録済みプロジェクト一覧を表示 |
 | `gpt-worker remove -w <dir> --yes` | プロジェクトの登録を解除 |
 
