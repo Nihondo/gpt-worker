@@ -323,6 +323,100 @@ describe("dashboard: overview + guidance + limits", () => {
     const resetBody = await resetRes.json();
     assert.equal(resetBody.maxBodyBytes, resetBody.default);
   });
+
+  test("browser-settings get/set/clear round-trip and validation on workspace dashboard", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    // Initial state: not set
+    const getInit = await worker.fetch(req(`/dashboard/${workspaceId}/api/browser-settings`, { headers: { cookie } }), env);
+    assert.equal(getInit.status, 200);
+    const initBody = await getInit.json();
+    assert.equal(initBody.chatUrlOverride, null);
+    assert.equal(initBody.conversationUrl, null);
+
+    // Set valid project override
+    const setOverride = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { chatUrlOverride: "https://chatgpt.com/g/g-p-test-proj/project" }, { cookie }),
+      env
+    );
+    assert.equal(setOverride.status, 200);
+    const overrideBody = await setOverride.json();
+    assert.equal(overrideBody.chatUrlOverride, "https://chatgpt.com/g/g-p-test-proj/project");
+
+    // Invalid project override
+    const invalidOverride = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { chatUrlOverride: "https://not-chatgpt.com" }, { cookie }),
+      env
+    );
+    assert.equal((await invalidOverride.json()).error, "INVALID_ARGS");
+
+    // Set conversation URL matching the project
+    const setConv = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { conversationUrl: "https://chatgpt.com/g/g-p-test-proj/c/68412345-1234-5678-9abc-def012345678" }, { cookie }),
+      env
+    );
+    assert.equal(setConv.status, 200);
+    const convBody = await setConv.json();
+    assert.equal(convBody.conversationUrl, "https://chatgpt.com/g/g-p-test-proj/c/68412345-1234-5678-9abc-def012345678");
+
+    // Clear conversation URL (reset conversation)
+    const clearConv = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { conversationUrl: null }, { cookie }),
+      env
+    );
+    assert.equal(clearConv.status, 200);
+    const clearConvBody = await clearConv.json();
+    assert.equal(clearConvBody.conversationUrl, null);
+    assert.equal(clearConvBody.chatUrlOverride, "https://chatgpt.com/g/g-p-test-proj/project");
+
+    // Clear project override
+    const clearOverride = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { chatUrlOverride: null }, { cookie }),
+      env
+    );
+    assert.equal(clearOverride.status, 200);
+    assert.equal((await clearOverride.json()).chatUrlOverride, null);
+
+    // Malformed mutation payloads are rejected with INVALID_ARGS and do not alter state
+    for (const badPayload of [null, [], {}, "string", 123]) {
+      const res = await worker.fetch(jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, badPayload, { cookie }), env);
+      assert.equal((await res.json()).error, "INVALID_ARGS", `payload ${JSON.stringify(badPayload)} must be rejected`);
+    }
+
+    // Setting conversationUrl with neither override nor shared hub Project must be rejected
+    const noProjectConv = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { conversationUrl: "https://chatgpt.com/g/g-p-test-proj/c/68412345-1234-5678-9abc-def012345678" }, { cookie }),
+      env
+    );
+    assert.equal((await noProjectConv.json()).error, "INVALID_ARGS");
+
+    // Once shared hub Project is set, workspace without override accepts matching conversationUrl
+    const { hub } = makeHub(env, instanceFor);
+    hub.hubBrowserSettingsSet({ chatUrl: "https://chatgpt.com/g/g-p-shared-proj/project" });
+
+    // Matching shared Project conversation succeeds
+    const sharedMatch = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { conversationUrl: "https://chatgpt.com/g/g-p-shared-proj/c/68412345-1234-5678-9abc-def012345678" }, { cookie }),
+      env
+    );
+    assert.equal(sharedMatch.status, 200);
+    assert.equal((await sharedMatch.json()).conversationUrl, "https://chatgpt.com/g/g-p-shared-proj/c/68412345-1234-5678-9abc-def012345678");
+
+    // Mismatched conversation against shared Project is rejected
+    const sharedMismatch = await worker.fetch(
+      jsonReq(`/dashboard/${workspaceId}/api/browser-settings`, { conversationUrl: "https://chatgpt.com/g/g-p-other-proj/c/68412345-1234-5678-9abc-def012345678" }, { cookie }),
+      env
+    );
+    assert.equal((await sharedMismatch.json()).error, "INVALID_ARGS");
+
+    // GET browser-settings returns sharedChatUrl and effectiveProjectUrl
+    const getWithShared = await worker.fetch(req(`/dashboard/${workspaceId}/api/browser-settings`, { headers: { cookie } }), env);
+    const withSharedBody = await getWithShared.json();
+    assert.equal(withSharedBody.sharedChatUrl, "https://chatgpt.com/g/g-p-shared-proj/project");
+    assert.equal(withSharedBody.effectiveProjectUrl, "https://chatgpt.com/g/g-p-shared-proj/project");
+  });
 });
 
 describe("dashboard: message/task history pagination and retention framing", () => {
@@ -1147,12 +1241,83 @@ describe("hub dashboard: relayed operations reach only the selected target works
     assert.equal((await hubRes.json()).error, "INVALID_ARGS");
     assert.equal(doo.localMaxBodyBytesGet().maxBodyBytes, 8192, "the hub relay must not have changed the stored limit either");
 
-    // The normal, well-formed reset request ({maxBodyBytes:null}, a real
-    // object — not a bare JSON null) must still work through the hub.
     const resetRes = await worker.fetch(jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/limits`, { maxBodyBytes: null }, { cookie: hubCookie }), env);
     assert.equal(resetRes.status, 200);
     const resetBody = await resetRes.json();
     assert.equal(resetBody.maxBodyBytes, resetBody.default);
+  });
+
+  test("shared hub browser-settings get/set/clear round-trip and validation", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { hub, hubGptToken } = makeHub(env, instanceFor);
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    // Initial state: not set
+    const getInit = await worker.fetch(req("/dashboard/hub/api/browser-settings", { headers: { cookie } }), env);
+    assert.equal(getInit.status, 200);
+    const initBody = await getInit.json();
+    assert.equal(initBody.chatUrl, null);
+
+    // Set shared project URL
+    const setRes = await worker.fetch(
+      jsonReq("/dashboard/hub/api/browser-settings", { chatUrl: "https://chatgpt.com/g/g-p-shared-proj/project" }, { cookie }),
+      env
+    );
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.chatUrl, "https://chatgpt.com/g/g-p-shared-proj/project");
+
+    // Invalid project URL rejected
+    const invalidRes = await worker.fetch(
+      jsonReq("/dashboard/hub/api/browser-settings", { chatUrl: "https://not-chatgpt.com" }, { cookie }),
+      env
+    );
+    assert.equal((await invalidRes.json()).error, "INVALID_ARGS");
+
+    // Clear shared project URL
+    const clearRes = await worker.fetch(
+      jsonReq("/dashboard/hub/api/browser-settings", { chatUrl: null }, { cookie }),
+      env
+    );
+    assert.equal(clearRes.status, 200);
+    assert.equal((await clearRes.json()).chatUrl, null);
+
+    // Malformed mutation payloads on hub API are rejected
+    for (const badPayload of [null, [], {}, "string", 123]) {
+      const res = await worker.fetch(jsonReq("/dashboard/hub/api/browser-settings", badPayload, { cookie }), env);
+      assert.equal((await res.json()).error, "INVALID_ARGS", `hub payload ${JSON.stringify(badPayload)} must be rejected`);
+    }
+  });
+
+  test("hub relay forwards workspace browser-settings get and set", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const { hub, hubGptToken } = makeHub(env, instanceFor);
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "Relay Test" });
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    // Get via hub relay
+    const getRes = await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/browser-settings`, { headers: { cookie } }), env);
+    assert.equal(getRes.status, 200);
+    const getBody = await getRes.json();
+    assert.equal(getBody.chatUrlOverride, null);
+
+    // Set via hub relay
+    const setRes = await worker.fetch(
+      jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/browser-settings`, { chatUrlOverride: "https://chatgpt.com/g/g-p-via-hub/project" }, { cookie }),
+      env
+    );
+    assert.equal(setRes.status, 200);
+    const setBody = await setRes.json();
+    assert.equal(setBody.chatUrlOverride, "https://chatgpt.com/g/g-p-via-hub/project");
+    assert.equal(doo.localBrowserSettingsGet().chatUrlOverride, "https://chatgpt.com/g/g-p-via-hub/project");
+
+    // Malformed mutation payloads via hub relay are rejected
+    const badRelay = await worker.fetch(
+      jsonReq(`/dashboard/hub/api/workspaces/${workspaceId}/browser-settings`, [], { cookie }),
+      env
+    );
+    assert.equal((await badRelay.json()).error, "INVALID_ARGS");
   });
 });
 
@@ -1205,12 +1370,16 @@ describe("hub dashboard: untrusted content and app.js safety", () => {
 
     // Every load*() response handler must check the captured generation
     // against the current one before touching the DOM.
-    ["loadOverview", "loadGuidance", "loadLimits", "loadMessages", "loadTasks"].forEach((fnName) => {
+    ["loadOverview", "loadGuidance", "loadLimits", "loadBrowserSettings", "loadMessages", "loadTasks"].forEach((fnName) => {
       const fnIndex = js.indexOf("function " + fnName + "(");
       assert.ok(fnIndex >= 0, fnName + " must exist");
       const fnBody = js.slice(fnIndex, fnIndex + 500);
       assert.match(fnBody, /gen === state\.selectionGen|gen !== state\.selectionGen/, fnName + " must guard its response against a stale selection generation");
     });
+
+    // Browser settings mutation handlers must also guard error/success UI against stale selectionGen
+    assert.match(js, /chat-project-override-save[\s\S]*?gen === state\.selectionGen/);
+    assert.match(js, /conversation-url-save[\s\S]*?gen === state\.selectionGen/);
   });
 });
 
@@ -1503,12 +1672,12 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
     const html = await res.text();
     const context = contextSection(html);
-    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+    ["new-task-goal", "guidance-text", "limits-value", "chat-project-override", "conversation-url"].forEach((id) => {
       assert.match(context, new RegExp(`id="${id}"`), id + " must be inside workspace context");
     });
     assert.match(context, /<details class="settings-disclosure">/);
     const afterContext = html.slice(html.indexOf('class="tabs'));
-    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+    ["new-task-goal", "guidance-text", "limits-value", "chat-project-override", "conversation-url"].forEach((id) => {
       assert.doesNotMatch(afterContext, new RegExp(`id="${id}"`), id + " must not also appear in the activity panes");
     });
   });
@@ -1519,14 +1688,53 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     const cookie = await loginHubAndGetCookie(env, hubGptToken);
     const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
     const html = await res.text();
+    assert.match(html, /id="hub-shared-project-url"/, "hub shell must contain shared project URL input");
     const sidebarStart = html.indexOf('class="workspace-sidebar"');
     const contextStart = html.indexOf('class="workspace-context"');
     const sidebar = html.slice(sidebarStart, contextStart);
     assert.match(sidebar, /id="workspace-list"/);
-    ["new-task-goal", "guidance-text", "limits-value"].forEach((id) => {
+    ["new-task-goal", "guidance-text", "limits-value", "chat-project-override", "conversation-url"].forEach((id) => {
       assert.doesNotMatch(sidebar, new RegExp(`id="${id}"`), id + " must not be inside the workspace sidebar");
       assert.match(contextSection(html), new RegExp(`id="${id}"`), id + " must be inside selected workspace context");
     });
+  });
+
+  test("workspace and hub shells contain no inline style attributes or style tags (CSP invariant)", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const wsCookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const wsRes = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie: wsCookie } }), env);
+    const wsHtml = await wsRes.text();
+
+    const { hubGptToken } = makeHub(env, instanceFor);
+    const hubCookie = await loginHubAndGetCookie(env, hubGptToken);
+    const hubRes = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie: hubCookie } }), env);
+    const hubHtml = await hubRes.text();
+
+    [wsHtml, hubHtml].forEach((html) => {
+      assert.doesNotMatch(html, /\bstyle\s*=/i, "rendered shell must not contain any inline style attributes");
+      assert.doesNotMatch(html, /<style\b/i, "rendered shell must not contain <style> blocks");
+    });
+  });
+
+  test("browser settings placeholders use canonical /project and /c/ URL shapes", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const wsCookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const wsRes = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie: wsCookie } }), env);
+    const wsHtml = await wsRes.text();
+
+    assert.match(wsHtml, /id="chat-project-override"[^>]*placeholder="https:\/\/chatgpt\.com\/g\/[^"]+\/project/);
+    assert.match(wsHtml, /id="conversation-url"[^>]*placeholder="https:\/\/chatgpt\.com\/g\/[^"]+\/c\//);
+
+    const { hubGptToken } = makeHub(env, instanceFor);
+    const hubCookie = await loginHubAndGetCookie(env, hubGptToken);
+    const hubRes = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie: hubCookie } }), env);
+    const hubHtml = await hubRes.text();
+
+    assert.match(hubHtml, /id="hub-shared-project-url"[^>]*placeholder="https:\/\/chatgpt\.com\/g\/[^"]+\/project/);
+    assert.match(hubHtml, /id="chat-project-override"[^>]*placeholder="https:\/\/chatgpt\.com\/g\/[^"]+\/project/);
+    assert.match(hubHtml, /id="conversation-url"[^>]*placeholder="https:\/\/chatgpt\.com\/g\/[^"]+\/c\//);
   });
 
   // The Tasks/Messages tab strip and their list/detail columns start hidden

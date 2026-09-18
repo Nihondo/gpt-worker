@@ -2659,6 +2659,18 @@ export class BridgeDO {
     if (name === "guidance" && method === "POST") return json(await this.dashboardSetGuidance(request), 200, dashboardApiHeaders());
     if (name === "limits" && method === "GET") return json(this.localMaxBodyBytesGet(), 200, dashboardApiHeaders());
     if (name === "limits" && method === "POST") return json(await this.dashboardSetLimits(request), 200, dashboardApiHeaders());
+    if (name === "browser-settings" && method === "GET") {
+      const local = this.localBrowserSettingsGet();
+      const hubSettings = await this.getHubBrowserSettings();
+      const sharedChatUrl = (hubSettings && hubSettings.chatUrl) || null;
+      const effectiveProjectUrl = local.chatUrlOverride || sharedChatUrl || null;
+      return json({
+        ...local,
+        sharedChatUrl,
+        effectiveProjectUrl,
+      }, 200, dashboardApiHeaders());
+    }
+    if (name === "browser-settings" && method === "POST") return json(await this.dashboardSetBrowserSettings(request), 200, dashboardApiHeaders());
     if (name === "ack" && method === "POST") return json(await this.dashboardAck(request), 200, dashboardApiHeaders());
     if (name === "complete-task" && method === "POST") return json(await this.dashboardCompleteTask(request), 200, dashboardApiHeaders());
     if (name === "continue-task" && method === "POST") return json(await this.dashboardContinueTask(request), 200, dashboardApiHeaders());
@@ -2789,6 +2801,69 @@ export class BridgeDO {
     if (parsed.parseError || !parsed.value) return { error: "INVALID_ARGS" };
     const maxBodyBytes = parsed.value.maxBodyBytes === undefined ? null : parsed.value.maxBodyBytes;
     return this.localMaxBodyBytesSet({ maxBodyBytes });
+  }
+
+  async getHubBrowserSettings() {
+    if (this.isHubInstance()) return this.hubBrowserSettingsGet();
+    try {
+      const hub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(HUB_DO_NAME));
+      const res = await hub.fetch(
+        new Request("https://gpt-worker.internal/admin", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ op: "hub_browser_settings_get" }),
+        })
+      );
+      if (res.status !== 200) return null;
+      return await res.json().catch(() => null);
+    } catch {
+      return null;
+    }
+  }
+
+  async dashboardSetBrowserSettings(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+      return { error: "INVALID_ARGS" };
+    }
+    const { chatUrlOverride, conversationUrl } = parsed.value;
+    if (chatUrlOverride === undefined && conversationUrl === undefined) {
+      return { error: "INVALID_ARGS" };
+    }
+
+    if (conversationUrl !== undefined && conversationUrl !== null && conversationUrl !== "") {
+      const current = this.localBrowserSettingsGet();
+      let targetProject = null;
+      if (chatUrlOverride !== undefined) {
+        if (chatUrlOverride !== null && chatUrlOverride !== "") {
+          targetProject = parseProjectUrl(chatUrlOverride);
+          if (!targetProject) return { error: "INVALID_ARGS", message: "invalid project url" };
+        }
+      } else if (current.chatUrlOverride) {
+        targetProject = parseProjectUrl(current.chatUrlOverride);
+      }
+
+      if (!targetProject) {
+        const hubSettings = await this.getHubBrowserSettings();
+        const sharedChatUrl = hubSettings && hubSettings.chatUrl;
+        if (sharedChatUrl) {
+          targetProject = parseProjectUrl(sharedChatUrl);
+        }
+      }
+
+      if (!targetProject) {
+        return { error: "INVALID_ARGS", message: "cannot set conversation url without an effective project url" };
+      }
+
+      const parsedConv = parseConversationUrl(conversationUrl);
+      if (!parsedConv) return { error: "INVALID_ARGS", message: "invalid conversation url" };
+      if (!areSameProject(targetProject, parsedConv)) {
+        return { error: "INVALID_ARGS", message: "conversation does not match effective project url" };
+      }
+    }
+
+    return this.localBrowserSettingsSet(parsed.value);
   }
 
   /** Only `dir='to_local'` messages, same as localAck() itself — matches
@@ -3050,10 +3125,27 @@ export class BridgeDO {
     if (subParts.length === 1 && subParts[0] === "workspaces" && request.method === "GET") {
       return json(await this.hubDashboardWorkspaces(), 200, dashboardApiHeaders());
     }
+    if (subParts.length === 1 && subParts[0] === "browser-settings") {
+      if (request.method === "GET") return json(this.hubBrowserSettingsGet(), 200, dashboardApiHeaders());
+      if (request.method === "POST") return json(await this.dashboardSetHubBrowserSettings(request), 200, dashboardApiHeaders());
+    }
     if (subParts.length >= 3 && subParts[0] === "workspaces" && subParts[1]) {
       return this.hubDashboardRelay(subParts[1], subParts.slice(2).join("/"), request);
     }
     return json({ error: "UNKNOWN_ROUTE" }, 404, dashboardApiHeaders());
+  }
+
+  async dashboardSetHubBrowserSettings(request) {
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return { error: "PAYLOAD_TOO_LARGE" };
+    if (parsed.parseError || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+      return { error: "INVALID_ARGS" };
+    }
+    const { chatUrl } = parsed.value;
+    if (chatUrl === undefined) {
+      return { error: "INVALID_ARGS" };
+    }
+    return this.hubBrowserSettingsSet(parsed.value);
   }
 
   /** Aggregates every registered workspace's dashboardOverview() for the hub

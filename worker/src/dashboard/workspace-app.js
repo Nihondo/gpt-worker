@@ -232,6 +232,94 @@
     api("/api/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: null }) }).then(loadLimits);
   });
 
+  // ---- browser settings (Settings tab) ----
+  function loadBrowserSettings() {
+    api("/api/browser-settings").then(function (res) {
+      if (res.ok) {
+        document.getElementById("chat-project-override").value = res.body.chatUrlOverride || "";
+        document.getElementById("conversation-url").value = res.body.conversationUrl || "";
+        var overrideInput = document.getElementById("chat-project-override");
+        if (res.body.sharedChatUrl) {
+          overrideInput.placeholder = res.body.sharedChatUrl + " (shared default)";
+        } else {
+          overrideInput.placeholder = "https://chatgpt.com/g/g-p-.../project (leave empty for shared default)";
+        }
+      }
+    });
+  }
+  document.getElementById("chat-project-override-save").addEventListener("click", function () {
+    var val = document.getElementById("chat-project-override").value.trim();
+    var errEl = document.getElementById("chat-project-override-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    api("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrlOverride: val || null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to save project override.";
+      } else {
+        loadBrowserSettings();
+      }
+    });
+  });
+  document.getElementById("chat-project-override-clear").addEventListener("click", function () {
+    var errEl = document.getElementById("chat-project-override-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    api("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrlOverride: null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to clear project override.";
+      } else {
+        document.getElementById("chat-project-override").value = "";
+        loadBrowserSettings();
+      }
+    });
+  });
+  document.getElementById("conversation-url-save").addEventListener("click", function () {
+    var val = document.getElementById("conversation-url").value.trim();
+    var errEl = document.getElementById("conversation-url-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    api("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationUrl: val || null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to save conversation URL.";
+      } else {
+        loadBrowserSettings();
+      }
+    });
+  });
+  document.getElementById("conversation-url-clear").addEventListener("click", function () {
+    var errEl = document.getElementById("conversation-url-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    api("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationUrl: null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to reset conversation.";
+      } else {
+        document.getElementById("conversation-url").value = "";
+        loadBrowserSettings();
+      }
+    });
+  });
+
   // ---- new task ----
   document.getElementById("new-task-submit").addEventListener("click", function () {
     var goal = document.getElementById("new-task-goal").value;
@@ -648,6 +736,7 @@
     loadOverview();
     loadGuidance();
     loadLimits();
+    loadBrowserSettings();
     loadMessages(false);
     loadTasks(false);
   }

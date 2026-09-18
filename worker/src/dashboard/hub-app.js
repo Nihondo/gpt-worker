@@ -270,6 +270,10 @@
     clearEl(overviewEl);
     document.getElementById("guidance-text").value = "";
     document.getElementById("limits-value").value = "";
+    document.getElementById("chat-project-override").value = "";
+    document.getElementById("conversation-url").value = "";
+    document.getElementById("chat-project-override-error").hidden = true;
+    document.getElementById("conversation-url-error").hidden = true;
     clearEl(document.getElementById("tasks-detail"));
     clearEl(document.getElementById("messages-detail"));
     closeDetail();
@@ -352,6 +356,163 @@
     var gen = state.selectionGen;
     if (!id) return;
     wsApiFor(id, "/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: null }) }).then(function () { loadLimits(id, gen); });
+  });
+
+  // ---- shared hub browser settings ----
+  function loadHubBrowserSettings() {
+    hubApi("/api/browser-settings").then(function (res) {
+      if (res.ok) {
+        document.getElementById("hub-shared-project-url").value = res.body.chatUrl || "";
+      }
+    });
+  }
+  document.getElementById("hub-shared-project-save").addEventListener("click", function () {
+    var val = document.getElementById("hub-shared-project-url").value.trim();
+    var errEl = document.getElementById("hub-shared-project-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    hubApi("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrl: val || null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to save shared project URL.";
+      } else {
+        loadHubBrowserSettings();
+      }
+    });
+  });
+  document.getElementById("hub-shared-project-clear").addEventListener("click", function () {
+    var errEl = document.getElementById("hub-shared-project-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    hubApi("/api/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrl: null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        errEl.hidden = false;
+        errEl.textContent = res.body.message || res.body.error || "Failed to clear shared project URL.";
+      } else {
+        document.getElementById("hub-shared-project-url").value = "";
+        loadHubBrowserSettings();
+      }
+    });
+  });
+
+  // ---- workspace browser settings (Settings tab) ----
+  function loadBrowserSettings(id, gen) {
+    wsApiFor(id, "/browser-settings").then(function (res) {
+      if (res.ok && gen === state.selectionGen) {
+        document.getElementById("chat-project-override").value = res.body.chatUrlOverride || "";
+        document.getElementById("conversation-url").value = res.body.conversationUrl || "";
+        var overrideInput = document.getElementById("chat-project-override");
+        if (res.body.sharedChatUrl) {
+          overrideInput.placeholder = res.body.sharedChatUrl + " (shared default)";
+        } else {
+          overrideInput.placeholder = "https://chatgpt.com/g/g-p-.../project (leave empty for shared default)";
+        }
+      }
+    });
+  }
+  document.getElementById("chat-project-override-save").addEventListener("click", function () {
+    var id = state.workspaceId;
+    var gen = state.selectionGen;
+    if (!id) return;
+    var val = document.getElementById("chat-project-override").value.trim();
+    var errEl = document.getElementById("chat-project-override-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    wsApiFor(id, "/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrlOverride: val || null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        if (gen === state.selectionGen) {
+          errEl.hidden = false;
+          errEl.textContent = res.body.message || res.body.error || "Failed to save project override.";
+        }
+      } else {
+        loadBrowserSettings(id, gen);
+      }
+    });
+  });
+  document.getElementById("chat-project-override-clear").addEventListener("click", function () {
+    var id = state.workspaceId;
+    var gen = state.selectionGen;
+    if (!id) return;
+    var errEl = document.getElementById("chat-project-override-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    wsApiFor(id, "/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatUrlOverride: null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        if (gen === state.selectionGen) {
+          errEl.hidden = false;
+          errEl.textContent = res.body.message || res.body.error || "Failed to clear project override.";
+        }
+      } else {
+        if (gen === state.selectionGen) {
+          document.getElementById("chat-project-override").value = "";
+        }
+        loadBrowserSettings(id, gen);
+      }
+    });
+  });
+  document.getElementById("conversation-url-save").addEventListener("click", function () {
+    var id = state.workspaceId;
+    var gen = state.selectionGen;
+    if (!id) return;
+    var val = document.getElementById("conversation-url").value.trim();
+    var errEl = document.getElementById("conversation-url-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    wsApiFor(id, "/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationUrl: val || null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        if (gen === state.selectionGen) {
+          errEl.hidden = false;
+          errEl.textContent = res.body.message || res.body.error || "Failed to save conversation URL.";
+        }
+      } else {
+        loadBrowserSettings(id, gen);
+      }
+    });
+  });
+  document.getElementById("conversation-url-clear").addEventListener("click", function () {
+    var id = state.workspaceId;
+    var gen = state.selectionGen;
+    if (!id) return;
+    var errEl = document.getElementById("conversation-url-error");
+    errEl.hidden = true;
+    errEl.textContent = "";
+    wsApiFor(id, "/browser-settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ conversationUrl: null }),
+    }).then(function (res) {
+      if (!res.ok || res.body.error) {
+        if (gen === state.selectionGen) {
+          errEl.hidden = false;
+          errEl.textContent = res.body.message || res.body.error || "Failed to reset conversation.";
+        }
+      } else {
+        if (gen === state.selectionGen) {
+          document.getElementById("conversation-url").value = "";
+        }
+        loadBrowserSettings(id, gen);
+      }
+    });
   });
 
   // ---- new task ----
@@ -775,11 +936,13 @@
     loadOverview(id, gen);
     loadGuidance(id, gen);
     loadLimits(id, gen);
+    loadBrowserSettings(id, gen);
     loadMessages(id, gen, false);
     loadTasks(id, gen, false);
   }
 
   loadWorkspaceList();
+  loadHubBrowserSettings();
   setInterval(function () {
     loadWorkspaceList();
     if (state.workspaceId) loadDetail(state.workspaceId, state.selectionGen);

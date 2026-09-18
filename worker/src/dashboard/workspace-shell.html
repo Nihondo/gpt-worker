@@ -37,6 +37,14 @@
           <label for="limits-value">Bytes</label>
           <input type="number" id="limits-value">
           <div><button type="button" id="limits-save">Save</button><button type="button" class="secondary" id="limits-reset">Reset to default</button></div>
+          <h3>ChatGPT Project URL override</h3>
+          <input type="url" id="chat-project-override" placeholder="https://chatgpt.com/g/g-p-.../project (leave empty for shared default)">
+          <div><button type="button" id="chat-project-override-save">Save override</button><button type="button" class="secondary" id="chat-project-override-clear">Clear (use default)</button></div>
+          <p class="error" id="chat-project-override-error" hidden></p>
+          <h3>Current ChatGPT Conversation URL</h3>
+          <input type="url" id="conversation-url" placeholder="https://chatgpt.com/g/g-p-.../c/... (leave empty for new chat)">
+          <div><button type="button" id="conversation-url-save">Save conversation</button><button type="button" class="secondary" id="conversation-url-clear">Reset conversation</button></div>
+          <p class="error" id="conversation-url-error" hidden></p>
         </section>
       </div>
     </details>
