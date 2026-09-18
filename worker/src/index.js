@@ -34,6 +34,19 @@
 
 import TOOLS from "./tools.json" with { type: "json" };
 import { operatingInstructions } from "./instructions.js";
+// Dashboard browser assets: same Wrangler Text-module mechanism as
+// instructions.md above (see wrangler.jsonc's `rules`), not bundled/built —
+// these are the literal bytes served at .../app.js and the literal HTML
+// markup rendered by renderDashboard*Html/renderHubDashboard*Html below.
+// The .js assets embed no server-side interpolation (workspaceId is read
+// from location.pathname client-side); the .html assets carry `{{MARKER}}`
+// placeholders filled by fillDashboardTemplate().
+import WORKSPACE_DASHBOARD_APP_JS from "./dashboard/workspace-app.js";
+import HUB_DASHBOARD_APP_JS from "./dashboard/hub-app.js";
+import WORKSPACE_DASHBOARD_LOGIN_HTML from "./dashboard/workspace-login.html";
+import WORKSPACE_DASHBOARD_SHELL_HTML from "./dashboard/workspace-shell.html";
+import HUB_DASHBOARD_LOGIN_HTML from "./dashboard/hub-login.html";
+import HUB_DASHBOARD_SHELL_HTML from "./dashboard/hub-shell.html";
 
 // Tools answered locally by the hub (no workspace_id involved) instead of
 // being relayed to a workspace's Durable Object. Excluded from the
@@ -179,6 +192,20 @@ export default {
     // entirely inside the target DO (see BridgeDO.handleDashboard), same
     // division of responsibility as every other route here.
     if (parts[0] === "dashboard") {
+      // Shared hub dashboard: "/dashboard/hub[/...]" — every registered
+      // workspace, one owner login (the shared hub_gpt_token). "hub" can
+      // never collide with a real workspace_id (isValidWorkspaceId requires
+      // 16 hex chars or the legacy "default"), so this check ahead of the
+      // per-workspace one below never shadows a real workspace's route.
+      // Login/session/CSRF/rate-limit verification happens entirely inside
+      // the hub DO (see BridgeDO.handleHubDashboard), same division of
+      // responsibility as the per-workspace dashboard.
+      if (parts.length >= 2 && parts[1] === "hub") {
+        const hub = env.BRIDGE_DO.get(env.BRIDGE_DO.idFromName(HUB_DO_NAME));
+        const forwardUrl = new URL(request.url);
+        forwardUrl.pathname = `/dashboard/hub${parts.length > 2 ? "/" + parts.slice(2).join("/") : ""}`;
+        return hub.fetch(new Request(forwardUrl, request));
+      }
       if (parts.length < 2 || !isValidWorkspaceId(parts[1])) return new Response("not found", { status: 404 });
       const workspaceId = parts[1];
       const doId = env.BRIDGE_DO.idFromName(workspaceId);
@@ -841,362 +868,54 @@ const DASHBOARD_STYLE = `
   }
 `;
 
+// Fills a dashboard HTML Text-module template's `{{MARKER}}` placeholders.
+// Uses split/join (never String#replace with a pattern string) so a `$`
+// inside a value (e.g. `$&`) can never be reinterpreted as a replacement
+// pattern. Throws if any `{{`/`}}` marker syntax remains unresolved, so a
+// mistyped/missing marker can never reach the browser silently.
+function fillDashboardTemplate(template, values) {
+  let out = template;
+  for (const [marker, value] of Object.entries(values)) {
+    out = out.split(`{{${marker}}}`).join(value);
+  }
+  if (out.includes("{{") || out.includes("}}")) {
+    throw new Error("dashboard template: unresolved {{marker}} after fill");
+  }
+  return out;
+}
+
 function renderDashboardLoginHtml(workspaceId) {
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gpt-worker dashboard</title>
-<style>${DASHBOARD_STYLE}</style>
-</head>
-<body>
-<div class="card login-card">
-<h1>gpt-worker dashboard</h1>
-<p class="meta">Workspace: <strong>${escapeHtml(workspaceId)}</strong></p>
-<form id="login-form">
-<label for="owner_token">Workspace owner token</label>
-<input type="password" id="owner_token" name="owner_token" autocomplete="off" autofocus required>
-<button type="submit">Log in</button>
-</form>
-<p class="error" id="login-error" hidden></p>
-<p class="note">Get this token with: <code>gpt-worker url -w &lt;workspace&gt;</code> — the <code>gpt_token</code> shown there, not the shared hub token.</p>
-</div>
-<script src="/dashboard/${encodeURIComponent(workspaceId)}/app.js"></script>
-</body>
-</html>
-`;
-  return html;
+  return fillDashboardTemplate(WORKSPACE_DASHBOARD_LOGIN_HTML, {
+    DASHBOARD_STYLE,
+    WORKSPACE_ID: escapeHtml(workspaceId),
+    APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
+  });
 }
 
 function renderDashboardShellHtml(workspaceId) {
-  const html = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gpt-worker dashboard</title>
-<style>${DASHBOARD_STYLE}</style>
-</head>
-<body>
-<div class="card">
-  <div class="row">
-    <h1>gpt-worker dashboard</h1>
-    <button type="button" class="secondary" id="logout-btn">Log out</button>
-  </div>
-  <p class="meta">Workspace: <strong>${escapeHtml(workspaceId)}</strong></p>
-  <div id="overview">Loading…</div>
-</div>
-
-<div class="card">
-  <h2>Start a new task</h2>
-  <label for="new-task-goal">Goal</label>
-  <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
-  <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
-  <div>
-    <button type="button" id="new-task-submit">Start task</button>
-  </div>
-  <p class="note" id="new-task-status"></p>
-</div>
-
-<div class="card">
-  <h2>Workspace guidance</h2>
-  <textarea id="guidance-text" placeholder="(none set)"></textarea>
-  <div>
-    <button type="button" id="guidance-save">Save</button>
-    <button type="button" class="secondary" id="guidance-clear">Clear</button>
-  </div>
-</div>
-
-<div class="card">
-  <h2>Message body limit</h2>
-  <label for="limits-value">Bytes</label>
-  <input type="number" id="limits-value">
-  <div>
-    <button type="button" id="limits-save">Save</button>
-    <button type="button" class="secondary" id="limits-reset">Reset to default</button>
-  </div>
-</div>
-
-<div class="card">
-  <div class="row"><h2>Tasks</h2></div>
-  <p class="note">Only DONE/BLOCKED tasks older than 30 days, and acked messages older than 7 days, are purged — everything else stays until then.</p>
-  <div id="tasks-list"></div>
-  <button type="button" class="secondary" id="tasks-load-more" hidden>Load more</button>
-</div>
-
-<div class="card">
-  <div class="row"><h2>Messages</h2></div>
-  <div id="messages-list"></div>
-  <button type="button" class="secondary" id="messages-load-more" hidden>Load more</button>
-</div>
-
-<script src="/dashboard/${encodeURIComponent(workspaceId)}/app.js"></script>
-</body>
-</html>
-`;
-  return html;
+  return fillDashboardTemplate(WORKSPACE_DASHBOARD_SHELL_HTML, {
+    DASHBOARD_STYLE,
+    WORKSPACE_ID: escapeHtml(workspaceId),
+    APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
+  });
 }
 
-/** Same-origin dashboard script (served at .../app.js, never inline — see
- *  dashboardHtmlHeaders' CSP). Derives workspaceId from location.pathname
- *  rather than a server-injected inline value, so this one static asset
- *  works unmodified for every workspace. Renders every server-supplied
- *  string (goal/body/terminal_summary/etc — untrusted workspace content,
- *  never HTML-escaped again client-side) via textContent only; never
- *  innerHTML with that data — see docs/plans/queue-dashboard.md's
- *  "表示するデータのサニタイズ". Polling only (no SSE/WebSocket — out of
- *  scope for v1). */
-const DASHBOARD_APP_JS = `(function () {
-  "use strict";
-  var parts = location.pathname.split("/").filter(Boolean);
-  var workspaceId = parts[1] || "";
-  var base = "/dashboard/" + workspaceId;
-  var POLL_MS = 10000;
+// ---------------------------------------------------------------------------
+// Shared hub dashboard HTML shell + script: same look/CSP/no-inline-HTML
+// rules as the per-workspace dashboard above, but scoped to "/dashboard/hub"
+// and driven by the hub DO's own registeredWorkspaces() rather than a single
+// workspace_id. See BridgeDO.handleHubDashboard for the server-side routes
+// and the "hub authority propagation" design note on handleHubDashboardRelay
+// for why this never forwards the hub session/token into a workspace DO.
+// ---------------------------------------------------------------------------
 
-  function api(path, options) {
-    return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (body) {
-        return { ok: res.ok, status: res.status, body: body };
-      });
-    });
-  }
+function renderHubDashboardLoginHtml() {
+  return fillDashboardTemplate(HUB_DASHBOARD_LOGIN_HTML, { DASHBOARD_STYLE });
+}
 
-  function el(tag, opts) {
-    var e = document.createElement(tag);
-    opts = opts || {};
-    if (opts.className) e.className = opts.className;
-    if (opts.text !== undefined) e.textContent = opts.text;
-    return e;
-  }
-
-  // Never innerHTML, even to clear — every element here is either built
-  // fresh via el()/textContent above or removed one node at a time.
-  function clearEl(node) {
-    while (node.firstChild) node.removeChild(node.firstChild);
-  }
-
-  function fmtTime(ms) {
-    if (!ms) return "";
-    try { return new Date(ms).toLocaleString(); } catch (e) { return String(ms); }
-  }
-
-  // ---- login page ----
-  var loginForm = document.getElementById("login-form");
-  if (loginForm) {
-    loginForm.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      var tokenInput = document.getElementById("owner_token");
-      var errorEl = document.getElementById("login-error");
-      errorEl.hidden = true;
-      api("/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ownerToken: tokenInput.value }),
-      }).then(function (res) {
-        if (res.ok) { location.reload(); return; }
-        errorEl.textContent = res.status === 403 ? "Invalid owner token." : "Login failed (" + res.status + ").";
-        errorEl.hidden = false;
-      });
-    });
-    return; // nothing else to do on the login page
-  }
-
-  // ---- dashboard shell ----
-  var overviewEl = document.getElementById("overview");
-  if (!overviewEl) return; // neither page — app.js loaded somewhere unexpected
-
-  var state = { activeTaskId: null, messagesCursor: null, tasksCursor: null };
-
-  document.getElementById("logout-btn").addEventListener("click", function () {
-    api("/logout", { method: "POST" }).then(function () { location.reload(); });
-  });
-
-  function renderOverview(data) {
-    clearEl(overviewEl);
-    var row = el("div", { className: "row" });
-    row.appendChild(el("span", { text: "Bridge: " + (data.connected ? "connected" : "not connected") }));
-    row.appendChild(el("span", { text: "Queued to ChatGPT: " + data.pendingToGpt }));
-    row.appendChild(el("span", { text: "Queued to local: " + data.pendingToLocal }));
-    overviewEl.appendChild(row);
-    var taskLine = el("p", { className: "meta" });
-    if (data.activeTask) {
-      state.activeTaskId = data.activeTask.taskId;
-      taskLine.textContent = "Active task: " + data.activeTask.taskId + " (" + data.activeTask.protocolState + ")";
-    } else {
-      state.activeTaskId = null;
-      taskLine.textContent = "No active task.";
-    }
-    overviewEl.appendChild(taskLine);
-    var settingsLine = el("p", { className: "meta" });
-    settingsLine.textContent = "Guidance set: " + (data.guidanceSet ? "yes" : "no") + " · Body limit: " + data.maxBodyBytes + " bytes";
-    overviewEl.appendChild(settingsLine);
-  }
-
-  function loadOverview() {
-    api("/api/overview").then(function (res) {
-      if (res.ok) renderOverview(res.body);
-    });
-  }
-
-  // ---- guidance ----
-  function loadGuidance() {
-    api("/api/guidance").then(function (res) {
-      if (res.ok) document.getElementById("guidance-text").value = res.body.guidance || "";
-    });
-  }
-  document.getElementById("guidance-save").addEventListener("click", function () {
-    var text = document.getElementById("guidance-text").value;
-    api("/api/guidance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: text }) });
-  });
-  document.getElementById("guidance-clear").addEventListener("click", function () {
-    api("/api/guidance", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ clear: true }) }).then(function () {
-      document.getElementById("guidance-text").value = "";
-    });
-  });
-
-  // ---- limits ----
-  function loadLimits() {
-    api("/api/limits").then(function (res) {
-      if (res.ok) document.getElementById("limits-value").value = res.body.maxBodyBytes;
-    });
-  }
-  document.getElementById("limits-save").addEventListener("click", function () {
-    var value = Number(document.getElementById("limits-value").value);
-    api("/api/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: value }) }).then(loadLimits);
-  });
-  document.getElementById("limits-reset").addEventListener("click", function () {
-    api("/api/limits", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ maxBodyBytes: null }) }).then(loadLimits);
-  });
-
-  // ---- new task ----
-  document.getElementById("new-task-submit").addEventListener("click", function () {
-    var goal = document.getElementById("new-task-goal").value;
-    var force = document.getElementById("new-task-force").checked;
-    var statusEl = document.getElementById("new-task-status");
-    if (!goal.trim()) { statusEl.textContent = "Goal is required."; return; }
-    if (force && !confirm("This will BLOCK the currently active task. Continue?")) return;
-    statusEl.textContent = "Starting…";
-    api("/api/start-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ goal: goal, force: force }) }).then(function (res) {
-      if (!res.ok || res.body.error) {
-        statusEl.textContent = "Failed: " + (res.body.error || res.status);
-        return;
-      }
-      var nudgeStatus = res.body.nudge && res.body.nudge.status;
-      statusEl.textContent = "Task " + res.body.task.taskId + " queued. Browser notification: " + (nudgeStatus || "unknown") + ".";
-      document.getElementById("new-task-goal").value = "";
-      document.getElementById("new-task-force").checked = false;
-      loadAll();
-    });
-  });
-
-  // ---- messages ----
-  function renderMessage(m) {
-    var item = el("div", { className: "item" });
-    var head = el("div");
-    head.appendChild(el("span", { className: "badge", text: m.dir }));
-    head.appendChild(el("span", { className: "badge", text: m.kind }));
-    head.appendChild(el("span", { className: "badge", text: m.state }));
-    head.appendChild(el("span", { text: " task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) }));
-    item.appendChild(head);
-    var pre = el("pre", { text: m.body });
-    item.appendChild(pre);
-    if (m.dir === "to_local" && m.state !== "acked") {
-      var ackBtn = el("button", { text: "Ack" });
-      ackBtn.addEventListener("click", function () {
-        // Not .then(loadMessages) — that would pass the resolved {ok,status,body}
-        // object through as loadMessages(more), which loadMessages() treats as a
-        // truthy "load more" flag (skips clearing the list, and may fetch the
-        // next cursor page instead of refreshing the first page).
-        api("/api/ack", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId: m.messageId }) }).then(function () {
-          loadMessages(false);
-        });
-      });
-      item.appendChild(ackBtn);
-    }
-    var canDiscardDirectly = m.state !== "acked" && !(m.dir === "to_gpt" && state.activeTaskId === m.taskId);
-    if (canDiscardDirectly) {
-      var discardBtn = el("button", { className: "danger", text: "Discard" });
-      discardBtn.addEventListener("click", function () {
-        if (!confirm("Discard this message?")) return;
-        api("/api/discard", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId: m.messageId }) }).then(function (res) {
-          if (res.body && res.body.error === "USE_DISCARD_TASK") {
-            alert("This message belongs to the active task; discard the task instead.");
-          }
-          loadMessages();
-        });
-      });
-      item.appendChild(discardBtn);
-    } else if (m.dir === "to_gpt" && m.state !== "acked" && state.activeTaskId === m.taskId) {
-      item.appendChild(el("span", { className: "note", text: " (part of the active task — use \\"Discard task\\" below)" }));
-    }
-    return item;
-  }
-
-  function loadMessages(more) {
-    var listEl = document.getElementById("messages-list");
-    var loadMoreBtn = document.getElementById("messages-load-more");
-    var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
-    api("/api/messages" + q).then(function (res) {
-      if (!res.ok) return;
-      if (!more) clearEl(listEl);
-      res.body.messages.forEach(function (m) { listEl.appendChild(renderMessage(m)); });
-      state.messagesCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
-    });
-  }
-  document.getElementById("messages-load-more").addEventListener("click", function () { loadMessages(true); });
-
-  // ---- tasks ----
-  function renderTask(t) {
-    var item = el("div", { className: "item" });
-    var head = el("div");
-    head.appendChild(el("span", { className: "badge", text: t.protocolState }));
-    head.appendChild(el("span", { text: t.taskId + " · updated " + fmtTime(t.updatedAt) }));
-    item.appendChild(head);
-    item.appendChild(el("div", { text: t.goal }));
-    if (t.terminalSummary) item.appendChild(el("pre", { text: t.terminalSummary }));
-    if (t.protocolState !== "DONE" && t.protocolState !== "BLOCKED") {
-      var discardBtn = el("button", { className: "danger", text: "Discard task" });
-      discardBtn.addEventListener("click", function () {
-        if (!confirm("Discard task " + t.taskId + "? This marks it BLOCKED and clears its queued messages.")) return;
-        api("/api/discard-task", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ taskId: t.taskId }) }).then(loadAll);
-      });
-      item.appendChild(discardBtn);
-    }
-    return item;
-  }
-
-  function loadTasks(more) {
-    var listEl = document.getElementById("tasks-list");
-    var loadMoreBtn = document.getElementById("tasks-load-more");
-    var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
-    api("/api/tasks" + q).then(function (res) {
-      if (!res.ok) return;
-      if (!more) clearEl(listEl);
-      res.body.tasks.forEach(function (t) { listEl.appendChild(renderTask(t)); });
-      state.tasksCursor = res.body.nextCursor;
-      loadMoreBtn.hidden = !res.body.nextCursor;
-    });
-  }
-  document.getElementById("tasks-load-more").addEventListener("click", function () { loadTasks(true); });
-
-  function loadAll() {
-    loadOverview();
-    loadGuidance();
-    loadLimits();
-    loadMessages(false);
-    loadTasks(false);
-  }
-
-  loadAll();
-  setInterval(function () {
-    loadOverview();
-    loadMessages(false);
-    loadTasks(false);
-  }, POLL_MS);
-})();
-`;
+function renderHubDashboardShellHtml() {
+  return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, { DASHBOARD_STYLE });
+}
 
 /** Handles the secret-free OAuth MCP resource routes ("/mcp" and
  *  "/mcp/<workspace_id>"): Bearer-authenticates the request against the
@@ -1546,11 +1265,23 @@ export class BridgeDO {
     const parts = url.pathname.split("/").filter(Boolean);
     if (parts.length === 1 && parts[0] === "admin") return this.handleAdmin(request);
     if (parts.length === 1 && parts[0] === "hub") return this.handleHubRelay(request);
+    // Internal-only, binding-call route used by the hub DO to relay one
+    // authenticated hub-dashboard operation into this workspace's own
+    // dashboard API dispatcher (see handleHubDashboardRelay/
+    // hubDashboardRelay) — never routed here from a public URL (the
+    // top-level Worker's fetch has no path shape that reaches it).
+    if (parts.length === 1 && parts[0] === "hub-dashboard-relay") return this.handleHubDashboardRelay(request);
     // Web dashboard (docs/plans/queue-dashboard.md): forwarded here as
     // /dashboard/<workspace_id>[/...] — see the top-level routing comment.
     // Variable length (root shell, app.js, login/logout, api/*), so this
     // dispatches by prefix rather than the fixed part-count checks below.
-    if (parts[0] === "dashboard" && parts.length >= 2) return this.handleDashboard(request, parts[1], parts.slice(2));
+    // "hub" is routed to the hub DO's own dashboard instead (see
+    // handleHubDashboard) — a workspace DO's own instance is never reached
+    // with workspaceId === "hub" through the top-level routing above.
+    if (parts[0] === "dashboard" && parts.length >= 2) {
+      if (parts[1] === "hub") return this.handleHubDashboard(request, parts.slice(2));
+      return this.handleDashboard(request, parts[1], parts.slice(2));
+    }
     // Internal-only OAuth routes: reachable exclusively through a
     // BRIDGE_DO binding call from the top-level Worker (see
     // handleOAuthAuthorizeRoute/handleOAuthTokenRoute/validateAccessToken/
@@ -1690,6 +1421,12 @@ export class BridgeDO {
     const value = randomHex(32);
     this.setSecret("hub_gpt_token", value);
     this.revokeAllOAuthTokens();
+    // hub_gpt_token doubles as the shared hub dashboard's login credential
+    // (see checkResourceOwnerToken and handleHubDashboardLogin) — same
+    // reasoning as rotateSecret("gpt_token") revoking that workspace's own
+    // dashboard sessions: a deliberate rotation must also cut off hub
+    // dashboard sessions already issued under the old value.
+    this.revokeAllDashboardSessions();
     return { value };
   }
 
@@ -2698,7 +2435,7 @@ export class BridgeDO {
     if (!this.rateLimit("dashboard-public", 120)) {
       return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
     }
-    return new Response(DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
+    return new Response(WORKSPACE_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
   }
 
   async handleDashboardLogin(request, workspaceId) {
@@ -2771,17 +2508,34 @@ export class BridgeDO {
 
     const name = subParts.join("/");
     const url = new URL(request.url);
-    if (name === "overview" && request.method === "GET") return json(this.dashboardOverview(), 200, dashboardApiHeaders());
-    if (name === "messages" && request.method === "GET") return json(this.dashboardMessages(url.searchParams), 200, dashboardApiHeaders());
-    if (name === "tasks" && request.method === "GET") return json(this.dashboardTasks(url.searchParams), 200, dashboardApiHeaders());
-    if (name === "guidance" && request.method === "GET") return json(this.workspaceGuidance(), 200, dashboardApiHeaders());
-    if (name === "guidance" && request.method === "POST") return json(await this.dashboardSetGuidance(request), 200, dashboardApiHeaders());
-    if (name === "limits" && request.method === "GET") return json(this.localMaxBodyBytesGet(), 200, dashboardApiHeaders());
-    if (name === "limits" && request.method === "POST") return json(await this.dashboardSetLimits(request), 200, dashboardApiHeaders());
-    if (name === "ack" && request.method === "POST") return json(await this.dashboardAck(request), 200, dashboardApiHeaders());
-    if (name === "discard" && request.method === "POST") return json(await this.dashboardDiscard(request), 200, dashboardApiHeaders());
-    if (name === "discard-task" && request.method === "POST") return json(await this.dashboardDiscardTask(request), 200, dashboardApiHeaders());
-    if (name === "start-task" && request.method === "POST") return json(await this.dashboardStartTask(request), 200, dashboardApiHeaders());
+    return this.dashboardApiDispatch(name, request.method, request, url);
+  }
+
+  /** The actual per-workspace dashboard operations, factored out of
+   *  handleDashboardApi so the exact same dispatch — with identical
+   *  validation/state semantics — serves two different auth paths without
+   *  duplicating any of it (§"hub authority propagation" design note on
+   *  handleHubDashboardRelay):
+   *   (A) the public per-workspace dashboard, gated by handleDashboardApi's
+   *       own session/CSRF/rate-limit checks above;
+   *   (B) the binding-only hub relay (handleHubDashboardRelay), gated
+   *       instead by the *hub* DO's session/CSRF/rate-limit checks and
+   *       registry-membership check before the call ever reaches this
+   *       workspace's DO.
+   *  This method itself performs no auth — it must only ever be reached
+   *  through one of those two already-gated callers. */
+  async dashboardApiDispatch(name, method, request, url) {
+    if (name === "overview" && method === "GET") return json(this.dashboardOverview(), 200, dashboardApiHeaders());
+    if (name === "messages" && method === "GET") return json(this.dashboardMessages(url.searchParams), 200, dashboardApiHeaders());
+    if (name === "tasks" && method === "GET") return json(this.dashboardTasks(url.searchParams), 200, dashboardApiHeaders());
+    if (name === "guidance" && method === "GET") return json(this.workspaceGuidance(), 200, dashboardApiHeaders());
+    if (name === "guidance" && method === "POST") return json(await this.dashboardSetGuidance(request), 200, dashboardApiHeaders());
+    if (name === "limits" && method === "GET") return json(this.localMaxBodyBytesGet(), 200, dashboardApiHeaders());
+    if (name === "limits" && method === "POST") return json(await this.dashboardSetLimits(request), 200, dashboardApiHeaders());
+    if (name === "ack" && method === "POST") return json(await this.dashboardAck(request), 200, dashboardApiHeaders());
+    if (name === "discard" && method === "POST") return json(await this.dashboardDiscard(request), 200, dashboardApiHeaders());
+    if (name === "discard-task" && method === "POST") return json(await this.dashboardDiscardTask(request), 200, dashboardApiHeaders());
+    if (name === "start-task" && method === "POST") return json(await this.dashboardStartTask(request), 200, dashboardApiHeaders());
     return json({ error: "UNKNOWN_ROUTE" }, 404, dashboardApiHeaders());
   }
 
@@ -2969,6 +2723,262 @@ export class BridgeDO {
     // so a slow/failed nudge never looks like a failed task creation here.
     const nudge = await this.callLocal("dashboard_task_created", { taskId });
     return { ...started, nudge: { status: nudge.ok ? "dispatched" : (nudge.error && nudge.error.status) || "unknown" } };
+  }
+
+  /** Internal, binding-only entry point analogous to handleHubRelay (the
+   *  existing MCP tool relay) but for the browser dashboard's authenticated
+   *  operations instead of ChatGPT's read-only tools. Reachable only from
+   *  hubDashboardRelay/hubDashboardWorkspaces (this file) via a BRIDGE_DO
+   *  binding call — never routed from a public URL (see the top-level
+   *  Worker's fetch: no path shape maps to "/hub-dashboard-relay").
+   *
+   *  Authority propagation: the hub DO has already verified its own
+   *  dashboard session, CSRF origin, rate limit, and registry membership
+   *  for the target workspace_id *before* this is ever called — this
+   *  workspace DO does not (and structurally cannot) re-derive who the
+   *  hub-side browser caller was; the binding call itself, exactly like
+   *  handleHubRelay, is the authority. The hub's session cookie/token is
+   *  never forwarded here — only the already-authorized operation name,
+   *  method, query, and body. This preserves "token validation stays
+   *  inside the DO" (CLAUDE.md): hub_gpt_token is validated only in the hub
+   *  DO, never copied to or re-checked by a workspace DO. */
+  async handleHubDashboardRelay(request) {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    // A workspace_registry entry (hub DO) can outlive this workspace's own
+    // deprovision() — they are two separate admin calls (see CLAUDE.md's
+    // "stale registered but deprovisioned target" note) — so refuse rather
+    // than silently recreate task/settings state for a workspace that no
+    // longer has tokens.
+    if (!this.hasSecrets()) return json({ error: "NOT_PROVISIONED" }, 404, dashboardApiHeaders());
+    // Its own bucket, shared by every hub-driven call into this workspace —
+    // deliberately never the same bucket as this workspace's own
+    // dashboard-public/dashboard-login/dashboard-api/dashboard-api-unauth
+    // (owner-driven traffic), so hub management activity can never
+    // rate-limit this workspace's own dashboard, or vice versa.
+    if (!this.rateLimit("hub-dashboard-internal", 240)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
+    if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+    const envelope = parsed.value || {};
+    if (parsed.parseError || typeof envelope.name !== "string" || typeof envelope.method !== "string") {
+      return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+    }
+    const innerUrl = new URL("https://gpt-worker.internal/");
+    for (const [k, v] of Object.entries(envelope.query || {})) innerUrl.searchParams.set(k, String(v));
+    // Preserve the exact parsed JSON value the hub received, including a
+    // literal `null` body — do not coalesce a missing/null body to `{}`.
+    // dashboardSetLimits/dashboardSetGuidance/etc. treat "body parsed to a
+    // falsy value" as INVALID_ARGS; silently upgrading a browser-submitted
+    // `null` into `{}` here would let a malformed hub request succeed (and
+    // mutate state) in a case the identical direct workspace-dashboard
+    // request would reject, breaking the "same dispatcher / identical
+    // validation semantics" guarantee dashboardApiDispatch exists for.
+    const hasBody = Object.prototype.hasOwnProperty.call(envelope, "body");
+    const innerRequest = new Request(innerUrl, {
+      method: envelope.method,
+      headers: { "content-type": "application/json" },
+      body: envelope.method === "GET" || envelope.method === "HEAD" ? undefined : JSON.stringify(hasBody ? envelope.body : null),
+    });
+    // Same dispatcher handleDashboardApi uses (dashboardApiDispatch) — an
+    // unrecognized name/method pair still falls through to its own
+    // UNKNOWN_ROUTE, so this internal route can never expose an operation
+    // the public per-workspace dashboard doesn't already have.
+    return this.dashboardApiDispatch(envelope.name, envelope.method, innerRequest, innerUrl);
+  }
+
+  // ======================= /dashboard/hub : shared hub dashboard =======================
+  // Owner-control-plane extension of the per-workspace dashboard above:
+  // logging in with the shared hub_gpt_token (never a workspace's own
+  // gpt_token — same disjoint-secret guarantee checkResourceOwnerToken's own
+  // doc comment relies on) opens a session scoped to Path=/dashboard/hub
+  // (see dashboardSessionCookie("hub", ...)) on *this* hub DO's own
+  // dashboard_sessions table — entirely separate from any workspace DO's
+  // table of the same name. Every operation against a specific workspace is
+  // relayed through hubDashboardRelay -> handleHubDashboardRelay, never by
+  // routing the browser directly to that workspace's DO.
+  //
+  // Workspace isolation restated for this feature (CLAUDE.md "Workspace
+  // isolation between DOs"): this is the owner's own control plane across
+  // workspaces they already registered here themselves — not a new way for
+  // one workspace to reach another, and not a way for anyone without the
+  // hub token to reach any workspace. A hub session cannot authenticate a
+  // workspace's own "/dashboard/<id>/api/*" (different DO, different
+  // dashboard_sessions table, different cookie Path), a workspace session
+  // cannot authenticate the hub API, and the hub can only ever reach a
+  // workspace_id present in its own registeredWorkspaces() — never an
+  // arbitrary valid-looking 16-hex id.
+
+  async handleHubDashboard(request, subParts) {
+    // Same reasoning as handleDashboard: no shared pre-auth bucket across
+    // shell/app.js/login/logout/api — see handleHubDashboardShell etc.
+    if (subParts.length === 0) return this.handleHubDashboardShell(request);
+    if (subParts.length === 1 && subParts[0] === "app.js") return this.handleHubDashboardAppJs(request);
+    if (subParts.length === 1 && subParts[0] === "login") return this.handleHubDashboardLogin(request);
+    if (subParts.length === 1 && subParts[0] === "logout") return this.handleHubDashboardLogout(request);
+    if (subParts[0] === "api") return this.handleHubDashboardApi(request, subParts.slice(1));
+    return new Response("not found", { status: 404 });
+  }
+
+  async handleHubDashboardShell(request) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("hub-dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const cookies = parseCookies(request.headers.get("cookie"));
+    const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    const html = authed ? renderHubDashboardShellHtml() : renderHubDashboardLoginHtml();
+    return new Response(html, { status: 200, headers: dashboardHtmlHeaders() });
+  }
+
+  async handleHubDashboardAppJs(request) {
+    if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
+    if (!this.rateLimit("hub-dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    return new Response(HUB_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
+  }
+
+  async handleHubDashboardLogin(request) {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    if (!this.rateLimit("hub-dashboard-login", 10)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
+    if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+    if (parsed.parseError || !parsed.value || typeof parsed.value.ownerToken !== "string" || !parsed.value.ownerToken) {
+      return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+    }
+    // The hub DO never holds a gpt_token (only a workspace DO does — see
+    // checkResourceOwnerToken's own doc comment), so reusing it here is
+    // equivalent to checking hub_gpt_token alone; reused rather than adding
+    // a second owner-credential check for the same disjoint-secret reason.
+    if (!this.checkResourceOwnerToken(parsed.value.ownerToken)) {
+      return json({ error: "INVALID_CREDENTIAL" }, 403, dashboardApiHeaders());
+    }
+    const session = await this.createDashboardSession();
+    return json({ ok: true }, 200, {
+      ...dashboardApiHeaders(),
+      "set-cookie": dashboardSessionCookie("hub", session.raw, Math.floor(DASHBOARD_SESSION_TTL_MS / 1000)),
+    });
+  }
+
+  async handleHubDashboardLogout(request) {
+    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    if (!this.rateLimit("hub-dashboard-public", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    const cookies = parseCookies(request.headers.get("cookie"));
+    await this.revokeDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    return json({ ok: true }, 200, { ...dashboardApiHeaders(), "set-cookie": dashboardSessionCookie("hub", "", 0) });
+  }
+
+  /** Same two-tier rate-limit isolation reasoning as handleDashboardApi,
+   *  with its own bucket names so hub traffic never shares a bucket with
+   *  any workspace's own dashboard (or another feature's hub-* bucket). */
+  async handleHubDashboardApi(request, subParts) {
+    const cookies = parseCookies(request.headers.get("cookie"));
+    const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
+    if (!authed) {
+      if (!this.rateLimit("hub-dashboard-api-unauth", 120)) {
+        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+      }
+      return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
+    }
+    if (!this.rateLimit("hub-dashboard-api", 120)) {
+      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+    }
+    if (request.method === "POST" && !checkDashboardOrigin(request)) {
+      return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    }
+
+    if (subParts.length === 1 && subParts[0] === "workspaces" && request.method === "GET") {
+      return json(await this.hubDashboardWorkspaces(), 200, dashboardApiHeaders());
+    }
+    if (subParts.length >= 3 && subParts[0] === "workspaces" && subParts[1]) {
+      return this.hubDashboardRelay(subParts[1], subParts.slice(2).join("/"), request);
+    }
+    return json({ error: "UNKNOWN_ROUTE" }, 404, dashboardApiHeaders());
+  }
+
+  /** Aggregates every registered workspace's dashboardOverview() for the hub
+   *  dashboard's landing list. One workspace's DO being unreachable or
+   *  unprovisioned (e.g. a stale registry entry — see
+   *  handleHubDashboardRelay's own comment) never fails the whole listing;
+   *  it just reports that one entry as unavailable. */
+  async hubDashboardWorkspaces() {
+    const registered = this.registeredWorkspaces();
+    const workspaces = await Promise.all(
+      registered.map(async (w) => {
+        try {
+          const stub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(w.workspace_id));
+          const res = await stub.fetch(
+            new Request("https://gpt-worker.internal/hub-dashboard-relay", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ name: "overview", method: "GET" }),
+            })
+          );
+          const data = await res.json().catch(() => ({}));
+          return {
+            workspaceId: w.workspace_id,
+            name: w.name,
+            registeredAt: w.registered_at,
+            overview: res.ok ? data : null,
+            error: res.ok ? null : (data && data.error) || `HTTP_${res.status}`,
+          };
+        } catch (err) {
+          return { workspaceId: w.workspace_id, name: w.name, registeredAt: w.registered_at, overview: null, error: String((err && err.message) || err) };
+        }
+      })
+    );
+    return { workspaces };
+  }
+
+  /** Relays one authenticated hub-dashboard operation to the target
+   *  workspace's own DO, over a binding call only (handleHubDashboardRelay)
+   *  — never forwarding this hub session's cookie/token itself. `workspaceId`
+   *  must both look valid and already be a member of registeredWorkspaces():
+   *  an authenticated hub session must never reach an arbitrary 16-hex DO
+   *  instance the owner hasn't explicitly registered here, same membership
+   *  check handleHubToolCall already applies to the MCP tool relay. */
+  async hubDashboardRelay(workspaceId, opName, request) {
+    if (!isValidWorkspaceId(workspaceId) || !this.registeredWorkspaces().some((w) => w.workspace_id === workspaceId)) {
+      return json({ error: "UNKNOWN_WORKSPACE" }, 404, dashboardApiHeaders());
+    }
+    let bodyPayload = null;
+    if (request.method !== "GET") {
+      // The hub DO doesn't own the target workspace's own max_body_bytes
+      // setting (per-workspace DO state) and can't know it without an extra
+      // round trip, so this envelope gate uses the same fixed ceiling
+      // handleOAuthMcpDispatch's hub-level branch uses for the identical
+      // reason (see its own comment) — the real, precise limit is enforced
+      // once the call reaches the target DO's own dashboardApiDispatch.
+      const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES_CEILING);
+      if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+      if (parsed.parseError) return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+      bodyPayload = parsed.value;
+    }
+    const query = {};
+    if (request.method === "GET") {
+      for (const [k, v] of new URL(request.url).searchParams.entries()) query[k] = v;
+    }
+    try {
+      const stub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(workspaceId));
+      const res = await stub.fetch(
+        new Request("https://gpt-worker.internal/hub-dashboard-relay", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: opName, method: request.method, query, body: bodyPayload }),
+        })
+      );
+      const text = await res.text();
+      return new Response(text, { status: res.status, headers: dashboardApiHeaders() });
+    } catch (err) {
+      return json({ error: "WORKSPACE_UNAVAILABLE", message: String((err && err.message) || err) }, 502, dashboardApiHeaders());
+    }
   }
 
   // ======================= /local : CLI-facing HTTP =======================

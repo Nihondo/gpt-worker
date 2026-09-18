@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt-worker dashboard</title>
+<style>{{DASHBOARD_STYLE}}</style>
+</head>
+<body>
+<div class="card login-card">
+<h1>gpt-worker dashboard</h1>
+<p class="meta">Shared hub — every registered workspace</p>
+<form id="login-form">
+<label for="owner_token">Shared hub token</label>
+<input type="password" id="owner_token" name="owner_token" autocomplete="off" autofocus required>
+<button type="submit">Log in</button>
+</form>
+<p class="error" id="login-error" hidden></p>
+<p class="note">Get this token with: <code>gpt-worker url</code> (no <code>-w</code>) — the shared owner token shown there, not a single workspace's <code>gpt_token</code>.</p>
+</div>
+<script src="/dashboard/hub/app.js"></script>
+</body>
+</html>

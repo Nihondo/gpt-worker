@@ -46,6 +46,21 @@ describe("shared connector hub", () => {
     assert.equal(doo.checkToken("hub_gpt_token", first.gptToken), true);
   });
 
+  test("rotating the hub token revokes every existing hub dashboard session", async () => {
+    const doo = makeDO();
+    doo.provisionHub();
+    const session = await doo.createDashboardSession();
+    assert.equal(await doo.verifyDashboardSession(session.raw), true);
+    const r = doo.rotateHubToken();
+    assert.equal(typeof r.value, "string");
+    assert.equal(await doo.verifyDashboardSession(session.raw), false);
+  });
+
+  test("rotateHubToken refuses on an unprovisioned hub", () => {
+    const doo = makeDO();
+    assert.equal(doo.rotateHubToken().error, "NOT_PROVISIONED");
+  });
+
   test("registers and removes workspace choices independently of workspace secrets", () => {
     const doo = makeDO();
     assert.deepEqual(doo.registerWorkspace({ workspace_id: "0123456789abcdef", name: "Project A" }), { ok: true });

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt-worker dashboard</title>
+<style>{{DASHBOARD_STYLE}}</style>
+</head>
+<body>
+<div class="card login-card">
+<h1>gpt-worker dashboard</h1>
+<p class="meta">Workspace: <strong>{{WORKSPACE_ID}}</strong></p>
+<form id="login-form">
+<label for="owner_token">Workspace owner token</label>
+<input type="password" id="owner_token" name="owner_token" autocomplete="off" autofocus required>
+<button type="submit">Log in</button>
+</form>
+<p class="error" id="login-error" hidden></p>
+<p class="note">Get this token with: <code>gpt-worker url -w &lt;workspace&gt;</code> — the <code>gpt_token</code> shown there, not the shared hub token.</p>
+</div>
+<script src="{{APP_JS_URL}}"></script>
+</body>
+</html>

@@ -12,6 +12,13 @@ const files = [
     .map((f) => path.join("bridge", f)),
   "worker/src/index.js",
   "worker/src/instructions.js",
+  // Browser-side dashboard assets: imported as opaque Text-module strings
+  // (see worker/wrangler.jsonc's `rules`), so nothing else parses these as
+  // JS — check their syntax here instead.
+  ...fs
+    .readdirSync("worker/src/dashboard")
+    .filter((f) => f.endsWith(".js"))
+    .map((f) => path.join("worker/src/dashboard", f)),
 ];
 
 let failed = false;

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpt-worker dashboard</title>
+<style>{{DASHBOARD_STYLE}}</style>
+</head>
+<body>
+<div class="card">
+  <div class="row">
+    <h1>gpt-worker dashboard — shared hub</h1>
+    <button type="button" class="secondary" id="logout-btn">Log out</button>
+  </div>
+  <p class="meta">Every workspace registered with this shared connector (<code>gpt-worker init</code>).</p>
+  <div id="workspace-list">Loading…</div>
+</div>
+
+<div id="workspace-detail" hidden>
+<div class="card">
+  <h2 id="detail-title"></h2>
+  <div id="overview">Loading…</div>
+</div>
+
+<div class="card">
+  <h2>Start a new task</h2>
+  <label for="new-task-goal">Goal</label>
+  <textarea id="new-task-goal" placeholder="Describe what should happen next"></textarea>
+  <label><input type="checkbox" id="new-task-force" style="width:auto;display:inline-block;margin-right:6px;">Force-replace the active task (BLOCKs it)</label>
+  <div>
+    <button type="button" id="new-task-submit">Start task</button>
+  </div>
+  <p class="note" id="new-task-status"></p>
+</div>
+
+<div class="card">
+  <h2>Workspace guidance</h2>
+  <textarea id="guidance-text" placeholder="(none set)"></textarea>
+  <div>
+    <button type="button" id="guidance-save">Save</button>
+    <button type="button" class="secondary" id="guidance-clear">Clear</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Message body limit</h2>
+  <label for="limits-value">Bytes</label>
+  <input type="number" id="limits-value">
+  <div>
+    <button type="button" id="limits-save">Save</button>
+    <button type="button" class="secondary" id="limits-reset">Reset to default</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="row"><h2>Tasks</h2></div>
+  <p class="note">Only DONE/BLOCKED tasks older than 30 days, and acked messages older than 7 days, are purged — everything else stays until then.</p>
+  <div id="tasks-list"></div>
+  <button type="button" class="secondary" id="tasks-load-more" hidden>Load more</button>
+</div>
+
+<div class="card">
+  <div class="row"><h2>Messages</h2></div>
+  <div id="messages-list"></div>
+  <button type="button" class="secondary" id="messages-load-more" hidden>Load more</button>
+</div>
+</div>
+
+<script src="/dashboard/hub/app.js"></script>
+</body>
+</html>

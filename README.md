@@ -22,7 +22,7 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 - **Safe Read-Only Design**: ChatGPT only inspects files and generates plans. File modifications and command executions are always reviewed and run locally.
 - **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT, and every tool result is additionally scanned by an external secret scanner (betterleaks/gitleaks) before it reaches ChatGPT, with any finding masked in place.
 - **Chrome Automation**: Automatically opens the ChatGPT Project in Chrome when a task is queued, and can submit messages in the background without stealing window focus.
-- **Web Dashboard**: Your own Worker also serves a browser dashboard per workspace — view the queue and task history, ack/discard messages, edit guidance/limits, and queue a new task without touching the CLI. See [Web Dashboard](#web-dashboard).
+- **Web Dashboard**: Your own Worker also serves a browser dashboard, either scoped to one workspace or, logging in with the shared hub token, across every registered workspace at once — view the queue and task history, ack/discard messages, edit guidance/limits, and queue a new task without touching the CLI. See [Web Dashboard](#web-dashboard).
 - **Zero Extra Dependencies**: Built purely with standard Node.js built-ins. No bulky npm packages or heavy daemons to install.
 
 ---
@@ -297,7 +297,9 @@ gpt-worker workspaces
 ```
 
 ### Web Dashboard
-Your Cloudflare Worker also serves a browser dashboard for one workspace at a time — a kanban-style view of the queue and task history, plus the ability to ack/discard messages, edit guidance/limits, and queue a new task from the browser instead of the CLI.
+Your Cloudflare Worker also serves a browser dashboard — a kanban-style view of the queue and task history, plus the ability to ack/discard messages, edit guidance/limits, and queue a new task from the browser instead of the CLI. There are two login paths, at two different URLs:
+
+**One workspace at a time**, with that workspace's own owner token:
 
 ```bash
 gpt-worker url -w .
@@ -305,14 +307,24 @@ gpt-worker url -w .
 # OAuth owner token: <gpt_token>
 ```
 
-Open `https://<your-worker>.workers.dev/dashboard/<workspace_id>` and log in with that same owner token (the `gpt_token` shown above for that workspace — **not** the shared hub token from a bare `gpt-worker url` with no `-w`; that one is rejected). Login exchanges the token for a 24-hour browser session (an `HttpOnly`/`Secure` cookie) — the owner token itself is never sent again after that.
+Open `https://<your-worker>.workers.dev/dashboard/<workspace_id>` and log in with that same owner token (the `gpt_token` shown above for that workspace — **not** the shared hub token; that one is rejected here). Login exchanges the token for a 24-hour browser session (an `HttpOnly`/`Secure` cookie scoped to that workspace's own dashboard path) — the owner token itself is never sent again after that.
+
+**Every registered workspace at once**, with the shared hub token:
+
+```bash
+gpt-worker url
+# OAuth Server URL:  https://<your-worker>.workers.dev/mcp
+# OAuth owner token: <hub_gpt_token>
+```
+
+Open `https://<your-worker>.workers.dev/dashboard/hub` and log in with that shared hub token (**not** a single workspace's `gpt_token`; that one is rejected here). After login you get a workspace picker listing every workspace registered with this shared connector (the same set `gpt-worker init` adds you to and `list_workspaces` shows ChatGPT); selecting one gives you the exact same view/actions as that workspace's own dashboard above. The two logins are entirely separate sessions — a workspace session can't reach the hub dashboard and a hub session can't directly authenticate a workspace's own dashboard URL — and the hub only ever reaches a workspace_id it has registered, never an arbitrary one.
 
 What it can and can't do:
-- **Can**: view queued/acked messages and task history, ack a `to_local` message, discard a message or a whole task, edit guidance and the message body limit, and start a new task (which best-effort-nudges your local bridge to open/submit it in Chrome, same as `gpt-worker task`, but never fails to queue the task itself if that nudge doesn't go through).
-- **Can't** (out of scope for now): edit or even display the ChatGPT Project URL (`chat-url`) — that setting lives only on the machine running the local bridge, not on the Worker; log in with the shared hub token; view more than one workspace at once; push/live updates over WebSocket or SSE (the dashboard already refreshes itself without a manual page reload — it just does so by polling roughly every 10 seconds, not a server push).
+- **Can**: view queued/acked messages and task history, ack a `to_local` message, discard a message or a whole task, edit guidance and the message body limit, and start a new task (which best-effort-nudges your local bridge to open/submit it in Chrome, same as `gpt-worker task`, but never fails to queue the task itself if that nudge doesn't go through) — all of this from either dashboard, single-workspace or hub.
+- **Can't** (out of scope for now): edit or even display the ChatGPT Project URL (`chat-url`) — that setting lives only on the machine running the local bridge, not on the Worker; push/live updates over WebSocket or SSE (the dashboard already refreshes itself without a manual page reload — it just does so by polling roughly every 10 seconds, not a server push).
 - Follows the same [retention](#data-retention) as everything else on the Worker: an acked message disappears after 7 days, a finished (done/blocked) task's history after 30 — the dashboard doesn't keep anything longer than the CLI/ChatGPT side already does.
 
-A dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`) — see [Data Retention](#data-retention).
+A workspace's own dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`). A hub dashboard session is revoked immediately if you rotate the shared hub token (`gpt-worker rotate --hub`) — see [Data Retention](#data-retention).
 
 ### Resuming After a Timeout
 The default timeout for `wait` is 15 minutes. If a timeout occurs, you can resume waiting without re-submitting the task:
@@ -410,7 +422,7 @@ To allow background script execution in an existing tab:
 Your Cloudflare Worker (deployed to your own account in Step 3) durably stores task traffic, which is more retention than a pure chat/local setup:
 - **Task message bodies** (goal text, plans, execution reports) are automatically deleted from the Worker 7 days after being delivered and acknowledged.
 - **Task history** (goal text and outcome summary, used to give ChatGPT context on past tasks) is automatically deleted from the Worker 30 days after the task reaches a final outcome (done or blocked). An in-progress task is never deleted while it's active.
-- **[Web dashboard](#web-dashboard) sessions** expire after 24 hours and are then swept automatically; they're also revoked immediately by rotating that workspace's owner token or removing the workspace.
+- **[Web dashboard](#web-dashboard) sessions** expire after 24 hours and are then swept automatically; a workspace's own dashboard session is also revoked immediately by rotating that workspace's owner token or removing the workspace, and the shared hub dashboard's session is revoked immediately by rotating the shared hub token.
 - To permanently wipe all task/queue records for a workspace from your Cloudflare account, run `gpt-worker remove -w <dir> --yes` (see [Deregistering a Workspace](#deregistering-a-workspace)). There is no way to delete a single past task's history short of removing the whole workspace.
 
 ---
