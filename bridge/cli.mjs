@@ -1372,6 +1372,11 @@ async function cmdContinue(args) {
 }
 
 async function reportRound(args, handoff) {
+  if (Object.hasOwn(args, "title") && typeof args.title !== "string") {
+    console.error("Invalid title: --title requires a string value.");
+    process.exit(1);
+  }
+
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
   await migrateLegacyStateIfNeeded(root, cfg);
@@ -1426,11 +1431,6 @@ async function reportRound(args, handoff) {
       exit_status: args["exit-status"],
       created_at: Date.now(),
     });
-  }
-
-  if (Object.hasOwn(args, "title") && typeof args.title !== "string") {
-    console.error("Invalid title: --title requires a string value.");
-    process.exit(1);
   }
 
   const body = buildExecutedBody({ changed, tests, handoff });

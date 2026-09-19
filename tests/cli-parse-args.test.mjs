@@ -6,6 +6,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
+import os from "node:os";
+import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   buildChatOpenUrl,
@@ -383,13 +385,40 @@ describe("CLI title option validation", () => {
   });
 
   test("gpt-worker report rejects bare --title before -w", () => {
-    assert.throws(
-      () => execFileSync(process.execPath, [cliPath, "report", "--title", "-w", "."], { encoding: "utf8", stdio: "pipe" }),
-      (err) => {
-        assert.equal(err.status, 1);
-        assert.match(err.stderr, /Invalid title: --title requires a string value/);
-        return true;
-      }
-    );
+    // Uses an isolated, unprovisioned temp workspace rather than "-w .": the
+    // check must reject the malformed flag before any workspace/config/remote
+    // task-state inspection, so it must pass regardless of whether this
+    // repository's own gpt-worker workspace currently has an active task.
+    const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "gw-title-test-"));
+    try {
+      assert.throws(
+        () => execFileSync(process.execPath, [cliPath, "report", "--title", "-w", tmpWorkspace], { encoding: "utf8", stdio: "pipe" }),
+        (err) => {
+          assert.equal(err.status, 1);
+          assert.match(err.stderr, /Invalid title: --title requires a string value/);
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+
+  test("gpt-worker handoff rejects bare --title before -w", () => {
+    // handoff shares reportRound() with report, so this exercises the same
+    // ordering guarantee via the other caller.
+    const tmpWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "gw-title-test-"));
+    try {
+      assert.throws(
+        () => execFileSync(process.execPath, [cliPath, "handoff", "--title", "-w", tmpWorkspace], { encoding: "utf8", stdio: "pipe" }),
+        (err) => {
+          assert.equal(err.status, 1);
+          assert.match(err.stderr, /Invalid title: --title requires a string value/);
+          return true;
+        }
+      );
+    } finally {
+      fs.rmSync(tmpWorkspace, { recursive: true, force: true });
+    }
   });
 });
