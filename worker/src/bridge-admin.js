@@ -12,10 +12,13 @@
 // cross-domain needs (token generation, wiping protocol/OAuth/dashboard
 // state on deprovision, and revoking OAuth/dashboard state on a gpt_token or
 // hub_gpt_token rotation) are received as narrow capability callbacks from
-// createBridgeAdmin's caller (BridgeDO's constructor) instead. OAuth and
-// dashboard state itself still lives in index.js as of this extraction
-// (Phase 2C/2E move those); this module never touches their tables
-// directly, only through the injected callbacks.
+// createBridgeAdmin's caller (BridgeDO's constructor) instead. OAuth state
+// moved to bridge-oauth.js in Phase 2C; dashboard state still lives in
+// index.js as of this extraction (Phase 2E moves that). Either way this
+// module never touches their tables directly, only through the injected
+// callbacks (revokeOAuthTokens/clearOAuthState below are BridgeDO's own
+// same-named methods, themselves thin delegates onto this.oauth — see that
+// module's header for why the indirection through BridgeDO stays).
 
 import { constantTimeEqual, isValidWorkspaceId, byteLength, readJsonWithLimit, json } from "./worker-http.js";
 
@@ -114,12 +117,14 @@ function areSameProject(projectInfo, conversationInfo) {
  *    deprovision() only. Protocol state is owned by bridge-protocol.js, not
  *    this module, so it is never touched with a direct `sql.exec` here.
  *  - revokeOAuthTokens(): () => void — revokes every OAuth authorization
- *    code/access/refresh token this DO has issued (index.js's
+ *    code/access/refresh token this DO has issued (BridgeDO's
+ *    revokeAllOAuthTokens, a thin delegate onto bridge-oauth.js's own
  *    revokeAllOAuthTokens), used on gpt_token/hub_gpt_token rotation.
  *  - clearOAuthState(): () => void — wipes all OAuth server state including
- *    the DCR client registry (index.js's clearOAuthState), used by
- *    deprovision() only — rotation must not lose registered clients, so it
- *    uses revokeOAuthTokens() instead.
+ *    the DCR client registry (BridgeDO's clearOAuthState, a thin delegate
+ *    onto bridge-oauth.js's own clearOAuthState), used by deprovision()
+ *    only — rotation must not lose registered clients, so it uses
+ *    revokeOAuthTokens() instead.
  *  - revokeDashboardSessions(): () => void — wipes every dashboard session
  *    (index.js's revokeAllDashboardSessions), used on rotation and
  *    deprovision. Dashboard session state is owned by index.js's dashboard

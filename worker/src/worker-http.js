@@ -83,10 +83,9 @@ async function readJsonWithLimit(request, maxBytes) {
 }
 
 // Generic base64url codecs. Used directly by OAuth's PKCE challenge
-// derivation (index.js's pkceChallengeFromVerifier) and, downstream, by
-// worker-dashboard-http.js's opaque pagination cursors — kept here rather
-// than duplicated so dashboard code can depend downward without importing
-// index.js.
+// derivation (bridge-oauth.js's pkceChallengeFromVerifier) and, downstream,
+// by worker-dashboard-http.js's opaque pagination cursors — kept here rather
+// than duplicated so both can depend downward without importing index.js.
 function base64UrlEncode(bytes) {
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);

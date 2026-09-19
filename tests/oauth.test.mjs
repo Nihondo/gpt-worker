@@ -1107,3 +1107,76 @@ describe("rotating gpt_token/hub_gpt_token revokes already-issued OAuth grants",
     assert.equal(res.status, 200);
   });
 });
+
+// Phase 2C regression: bridge-admin.js's deprovision() never touches OAuth
+// tables itself — it calls back into BridgeDO's clearOAuthState(), which is
+// now a thin delegate onto bridge-oauth.js's own clearOAuthState(). This
+// doesn't re-test clearOAuthState's private implementation (already covered
+// above); it guards the admin -> BridgeDO -> oauth callback wiring itself,
+// including the one piece rotation deliberately doesn't clear: registered
+// DCR clients (oauth_clients) — see clearOAuthState's own doc comment for
+// why deprovision must clear that too, unlike revokeAllOAuthTokens.
+describe("deprovision clears OAuth state via the admin -> oauth callback wiring", () => {
+  const RESOURCE = `${ORIGIN}/mcp`;
+  const REDIRECT_URI = "https://client.example/callback";
+
+  test("registered DCR client and an already-issued access token are both gone after deprovision; the hub can be re-provisioned fresh", async () => {
+    const { instanceFor, env } = makeRealBridgeDoEnv();
+    const hubDo = instanceFor("gpt-worker-hub");
+    const { gptToken: hubOwnerToken } = hubDo.provisionHub();
+
+    const registerRes = await worker.fetch(jsonReq("/oauth/register", { redirect_uris: [REDIRECT_URI] }), env);
+    assert.equal(registerRes.status, 201);
+    const { client_id: clientId } = await registerRes.json();
+    assert.ok(hubDo.getOAuthClientLocal(clientId));
+
+    const { verifier, challenge } = await pkcePair();
+    const authRes = await worker.fetch(
+      formReq("/oauth/authorize", {
+        resource: RESOURCE,
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+        response_type: "code",
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        owner_token: hubOwnerToken,
+      }),
+      env,
+    );
+    const code = codeFromRedirect(authRes).searchParams.get("code");
+    const tokenRes = await worker.fetch(
+      formReq(
+        "/oauth/token",
+        { grant_type: "authorization_code", code, client_id: clientId, redirect_uri: REDIRECT_URI, resource: RESOURCE, code_verifier: verifier },
+      ),
+      env,
+    );
+    const { access_token: accessToken } = await tokenRes.json();
+
+    const mcpCall = () =>
+      worker.fetch(
+        req("/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping", params: {} }),
+        }),
+        env,
+      );
+
+    assert.equal((await mcpCall()).status, 200);
+
+    const result = hubDo.deprovision();
+    assert.equal(result.ok, true);
+
+    // Unlike a plain gpt_token/hub_gpt_token rotation (revokeAllOAuthTokens,
+    // covered above), deprovision also wipes the DCR client registry.
+    assert.equal(hubDo.getOAuthClientLocal(clientId), null);
+
+    // The access token issued before deprovision no longer validates.
+    assert.equal((await mcpCall()).status, 401);
+
+    // The hub can be re-provisioned fresh afterward (new token, not the old one).
+    const fresh = hubDo.provisionHub();
+    assert.notEqual(fresh.gptToken, hubOwnerToken);
+  });
+});
