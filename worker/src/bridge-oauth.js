@@ -36,7 +36,7 @@
 //    admin's token generation).
 //  - hashValue(value): (string) => Promise<string> — index.js's own
 //    sha256Hex, injected for the same reason (also used by dashboard session
-//    hashing).
+//    hashing — bridge-dashboard.js's hashSessionToken).
 //  - renderConsentHtml(fields): (object) => Response — index.js's own
 //    renderOAuthConsentHtml, a stateless HTML renderer that stays in
 //    index.js's public-HTTP layer and is injected here rather than moved,
@@ -597,8 +597,10 @@ function createBridgeOAuth({
     /** Sweeps expired authorization codes and expired-or-revoked access/
      *  refresh tokens — the OAuth-table portion of BridgeDO.alarm()'s daily
      *  retention pass, moved here so index.js no longer touches these tables
-     *  directly. Dashboard session cleanup and msgs/tasks retention are a
-     *  different domain's concern and stay in index.js's own alarm(). */
+     *  directly. Dashboard session cleanup (bridge-dashboard.js's
+     *  cleanupExpiredDashboardSessions) and msgs/tasks retention are
+     *  different domains' concerns; index.js's own alarm() remains the
+     *  lifecycle orchestrator that calls each of them. */
     cleanupExpiredOAuthState(now) {
       sql.exec(`DELETE FROM oauth_authorization_codes WHERE expires_at < ?`, now);
       sql.exec(`DELETE FROM oauth_access_tokens WHERE expires_at < ? OR revoked_at IS NOT NULL`, now);

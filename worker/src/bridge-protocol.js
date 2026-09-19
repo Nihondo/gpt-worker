@@ -664,6 +664,65 @@ function createBridgeProtocol({ sql, maxBodyBytes, notifyPlanPushed, toolOk, too
       return { task: this.taskView(this.getTask(taskId)), migrated: true };
     },
 
+    // Read-only queries backing the Web dashboard's history/ack APIs
+    // (bridge-dashboard.js). They live here — not in the dashboard module —
+    // because `msgs`/`tasks` are this domain's tables; the dashboard reaches
+    // them only through these purpose-fixed capabilities and keeps the
+    // response shaping/cursor encoding itself. None of them mutate state.
+
+    /** Keyset-paginated (created_at DESC, message_id DESC) message rows,
+     *  acked included. Returns up to `limit + 1` raw rows so the caller can
+     *  tell whether another page exists. `cursor` is an already-decoded
+     *  `{ t, id }` (or null). */
+    dashboardMessageRows({ taskId, cursor, includeBody, limit }) {
+      const conditions = [];
+      const args = [];
+      if (taskId) {
+        conditions.push("task_id = ?");
+        args.push(taskId);
+      }
+      if (cursor) {
+        conditions.push("(created_at < ? OR (created_at = ? AND message_id < ?))");
+        args.push(cursor.t, cursor.t, cursor.id);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      return sql
+        .exec(
+          includeBody
+            ? `SELECT message_id, dir, task_id, iteration, kind, title, body, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`
+            : `SELECT message_id, dir, task_id, iteration, kind, title, state, lease_until, created_at FROM msgs ${where} ORDER BY created_at DESC, message_id DESC LIMIT ?`,
+          ...args,
+          limit + 1
+        )
+        .toArray();
+    },
+
+    /** Keyset-paginated (updated_at DESC, task_id DESC) task rows — every
+     *  protocol state, not just terminal. Returns up to `limit + 1` raw rows. */
+    dashboardTaskRows({ cursor, limit }) {
+      const conditions = [];
+      const args = [];
+      if (cursor) {
+        conditions.push("(updated_at < ? OR (updated_at = ? AND task_id < ?))");
+        args.push(cursor.t, cursor.t, cursor.id);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      return sql
+        .exec(
+          `SELECT task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary FROM tasks ${where} ORDER BY updated_at DESC, task_id DESC LIMIT ?`,
+          ...args,
+          limit + 1
+        )
+        .toArray();
+    },
+
+    /** A message's direction ("to_gpt"/"to_local"), or null when no such
+     *  message exists — the dashboard's ack precondition check. */
+    messageDirection(messageId) {
+      const rows = sql.exec(`SELECT dir FROM msgs WHERE message_id = ?`, messageId).toArray();
+      return rows.length === 0 ? null : rows[0].dir;
+    },
+
     /** Counts of not-yet-acked messages per direction — the queue half of
      *  the /local "status" answer (the connection half is transport's own
      *  state; see bridge-transport.js's localStatus()). */

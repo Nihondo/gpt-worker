@@ -13,8 +13,8 @@
 // state on deprovision, and revoking OAuth/dashboard state on a gpt_token or
 // hub_gpt_token rotation) are received as narrow capability callbacks from
 // createBridgeAdmin's caller (BridgeDO's constructor) instead. OAuth state
-// moved to bridge-oauth.js in Phase 2C; dashboard state still lives in
-// index.js as of this extraction (Phase 2E moves that). Either way this
+// moved to bridge-oauth.js in Phase 2C and dashboard state to
+// bridge-dashboard.js in Phase 2E. Either way this
 // module never touches their tables directly, only through the injected
 // callbacks (revokeOAuthTokens/clearOAuthState below are BridgeDO's own
 // same-named methods, themselves thin delegates onto this.oauth — see that
@@ -126,18 +126,19 @@ function areSameProject(projectInfo, conversationInfo) {
  *    only — rotation must not lose registered clients, so it uses
  *    revokeOAuthTokens() instead.
  *  - revokeDashboardSessions(): () => void — wipes every dashboard session
- *    (index.js's revokeAllDashboardSessions), used on rotation and
- *    deprovision. Dashboard session state is owned by index.js's dashboard
- *    code, not this module.
+ *    (BridgeDO's revokeAllDashboardSessions, a thin delegate onto
+ *    bridge-dashboard.js's own), used on rotation and deprovision.
+ *    Dashboard session state is owned by the dashboard domain, not this
+ *    module.
  *
  * Methods call each other through `this` (e.g. handleAdmin calling
  * this.provision), which works because every call site invokes them as
  * `this.admin.<method>(...)` from BridgeDO — a plain dot-call binds `this`
  * to the returned object itself, no class/prototype needed. The pure
  * browser-URL helpers (parseProjectUrl/parseConversationUrl/areSameProject)
- * are exposed on the returned object too, so BridgeDO can offer a narrow
- * delegate to dashboard code that still lives in index.js as of this
- * extraction, instead of that code importing this module directly.
+ * are exposed on the returned object too, so BridgeDO can hand them to the
+ * dashboard domain (bridge-dashboard.js) as narrow injected capabilities,
+ * instead of that module importing this one directly.
  */
 function createBridgeAdmin({ sql, generateToken, maxAdminRequestBytes, clearProtocolState, revokeOAuthTokens, clearOAuthState, revokeDashboardSessions }) {
   return {

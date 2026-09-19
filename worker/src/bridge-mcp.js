@@ -19,8 +19,8 @@
 //    invokeTool() and isActiveTaskWindow().
 //  - workspaceGuidance() / registeredWorkspaces() / maxWorkspaceRequestBytes():
 //    admin/settings/registry domain reads (bridge-admin.js). registeredWorkspaces()
-//    is also used by the dashboard, which is why it stays a BridgeDO
-//    delegate rather than moving here.
+//    is also used by the dashboard (bridge-dashboard.js), which is why it
+//    stays a BridgeDO delegate rather than moving here.
 //  - relayWorkspaceTool(name, params): transport's callLocal — the one
 //    call-through to the local bridge over the WebSocket link, used for the
 //    workspace-inspection tools (list_directory, read_file, ...). Not a

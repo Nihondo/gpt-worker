@@ -242,6 +242,12 @@ describe("dashboard: session lifecycle", () => {
     assert.equal(await doo.verifyDashboardSession(session.raw), false);
   });
 
+  test("BridgeDO keeps its dashboardApiDispatch compatibility delegate after the dashboard extraction", () => {
+    const { instanceFor } = makeRealBridgeDoEnv();
+    const doo = instanceFor("0123456789abcdef");
+    assert.equal(typeof doo.dashboardApiDispatch, "function");
+  });
+
   test("no ambient CSRF: a session cookie alone (missing Origin) cannot perform a mutation", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
