@@ -51,7 +51,7 @@ export async function adminCall(worker, op, extra = {}) {
 }
 
 export async function remoteActiveTask(cfg) {
-  const state = await localCall(cfg, "task_state");
+  const state = await localCall(cfg, "active_task");
   if (state.error) throw new Error(state.error);
   return state.task || null;
 }
