@@ -4,6 +4,8 @@
 
 **Stop Copy-Pasting ChatGPT Web Text into AI Agents**
 
+![gpt-worker](images/gpt-worker_lead.png)
+
 **gpt-worker** is a developer workflow tool designed to ease your coding agent's 5-hour and weekly usage limits. It uses the web version of ChatGPT as the planning and review "brain", while pairing with local coding agents (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files and run tests.
 
 Supported ChatGPT plans include Plus, Business, Pro, or any plan supporting Projects, Developer mode, and custom MCP connectors.

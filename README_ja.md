@@ -4,6 +4,8 @@
 
 **ChatGPT Web のテキストをAIエージェントにコピペするのをやめよう**
 
+![gpt-worker](images/gpt-worker_lead.png)
+
 **gpt-worker** は、エージェントの5h / 週ごとの利用制限を軽減するため、Web ブラウザ版の ChatGPT を「計画・レビュー役」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
 
 利用できる ChatGPT は、Plus、Business、Pro など、Projects・Developer mode・カスタム MCP コネクタが利用可能なプランです。
