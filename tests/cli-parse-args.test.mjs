@@ -106,6 +106,33 @@ describe("complete and continue command dispatch", () => {
   });
 });
 
+describe("CLI module boundaries", () => {
+  test("keeps cli.mjs as the compatibility facade and executable dispatcher", () => {
+    const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
+    assert.match(cliSource, /from "\.\/cli-provision\.mjs"/);
+    assert.match(cliSource, /from "\.\/cli-browser\.mjs"/);
+    assert.match(cliSource, /from "\.\/cli-daemon\.mjs"/);
+    assert.match(cliSource, /from "\.\/cli-task\.mjs"/);
+    assert.match(cliSource, /from "\.\/cli-settings\.mjs"/);
+    assert.doesNotMatch(cliSource, /async function cmdTask\(/);
+  });
+
+  test("command modules never depend on the facade", () => {
+    for (const name of ["cli-browser", "cli-provision", "cli-daemon", "cli-task", "cli-settings"]) {
+      const source = fs.readFileSync(new URL(`../bridge/${name}.mjs`, import.meta.url), "utf8");
+      assert.doesNotMatch(source, /from "\.\/cli\.mjs"/, `${name} must not import the facade`);
+    }
+  });
+
+  test("retains the active_task RPC and the facade daemon entrypoint", () => {
+    const runtime = fs.readFileSync(new URL("../bridge/cli-runtime.mjs", import.meta.url), "utf8");
+    const daemon = fs.readFileSync(new URL("../bridge/cli-daemon.mjs", import.meta.url), "utf8");
+    assert.match(runtime, /localCall\(cfg, "active_task"\)/);
+    assert.match(daemon, /new URL\("\.\/cli\.mjs", import\.meta\.url\)/);
+    assert.doesNotMatch(daemon, /\[fileURLToPath\(import\.meta\.url\), "start"/);
+  });
+});
+
 describe("buildChatOpenUrl", () => {
   test("adds the default connector mention to a plain Project URL", () => {
     const url = buildChatOpenUrl("https://chatgpt.com/g/g-p-example/project", "task-123");
