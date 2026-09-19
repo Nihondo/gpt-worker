@@ -6,7 +6,9 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { BridgeLink } from "../bridge/link.mjs";
 
 /** A minimal fake WebSocket: readyState OPEN and a send() that records every
@@ -96,5 +98,228 @@ describe("BridgeLink: dashboard_task_created", () => {
     await link.handleMessage(JSON.stringify({ rid: "r4", method: "dashboard_task_created", params: { taskId: "t4" } }));
     assert.equal(ws.sent[0].ok, true);
     assert.deepEqual(received, { taskId: "t4" });
+  });
+});
+
+describe("BridgeLink: workspace_batch", () => {
+  function makeTestWorkspace() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-batch-test-"));
+    fs.writeFileSync(path.join(dir, "hello.txt"), "hello world\n");
+    fs.writeFileSync(path.join(dir, "notes.txt"), "some notes\n");
+    return dir;
+  }
+
+  test("returns one reply for one WS request, preserving order and ids", async () => {
+    const root = makeTestWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    const ws = attachFakeSocket(link);
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "b1",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          calls: [
+            { id: "call-info", name: "workspace_info" },
+            { id: "call-read-1", name: "read_file", arguments: { path: "hello.txt" } },
+            { id: "call-read-2", name: "read_file", arguments: { path: "notes.txt" } },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    const reply = ws.sent[0];
+    assert.equal(reply.rid, "b1");
+    assert.equal(reply.ok, true);
+    assert.ok(reply.result);
+    assert.equal(Array.isArray(reply.result.results), true);
+    assert.equal(reply.result.results.length, 3);
+
+    assert.equal(reply.result.results[0].id, "call-info");
+    assert.equal(reply.result.results[0].name, "workspace_info");
+    assert.equal(reply.result.results[0].ok, true);
+
+    assert.equal(reply.result.results[1].id, "call-read-1");
+    assert.equal(reply.result.results[1].name, "read_file");
+    assert.equal(reply.result.results[1].ok, true);
+    assert.equal(reply.result.results[1].result.text, "hello world\n");
+
+    assert.equal(reply.result.results[2].id, "call-read-2");
+    assert.equal(reply.result.results[2].name, "read_file");
+    assert.equal(reply.result.results[2].ok, true);
+    assert.equal(reply.result.results[2].result.text, "some notes\n");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("returns no_active_task when task is not active", async () => {
+    const root = makeTestWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    const ws = attachFakeSocket(link);
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "b2",
+        method: "workspace_batch",
+        params: {
+          calls: [{ id: "c1", name: "workspace_info" }],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    assert.equal(ws.sent[0].rid, "b2");
+    assert.equal(ws.sent[0].ok, true);
+    assert.deepEqual(ws.sent[0].result, { status: "no_active_task" });
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rejects invalid top-level schema (not array, empty, exceeds limit)", async () => {
+    const root = makeTestWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+
+    // 1. calls not an array
+    let ws = attachFakeSocket(link);
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "err1",
+        method: "workspace_batch",
+        params: { __gptWorkerActiveTask: true, calls: "not-array" },
+      })
+    );
+    assert.equal(ws.sent[0].result.status, "error");
+    assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+
+    // 2. calls empty
+    ws = attachFakeSocket(link);
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "err2",
+        method: "workspace_batch",
+        params: { __gptWorkerActiveTask: true, calls: [] },
+      })
+    );
+    assert.equal(ws.sent[0].result.status, "error");
+    assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+
+    // 3. calls exceeds limit (MAX_BATCH_CALLS = 8, pass 9)
+    ws = attachFakeSocket(link);
+    const nineCalls = Array.from({ length: 9 }, (_, i) => ({ id: `c${i}`, name: "workspace_info" }));
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "err3",
+        method: "workspace_batch",
+        params: { __gptWorkerActiveTask: true, calls: nineCalls },
+      })
+    );
+    assert.equal(ws.sent[0].result.status, "error");
+    assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rejects non-whitelisted tools, recursive batch, and push methods as INVALID_ARGS", async () => {
+    const root = makeTestWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+
+    const invalidTools = ["workspace_batch", "workspace_guidance", "plan_pushed", "dashboard_task_created", "non_existent"];
+    for (const tool of invalidTools) {
+      const ws = attachFakeSocket(link);
+      await link.handleMessage(
+        JSON.stringify({
+          rid: `rej-${tool}`,
+          method: "workspace_batch",
+          params: { __gptWorkerActiveTask: true, calls: [{ id: "c1", name: tool }] },
+        })
+      );
+      assert.equal(ws.sent[0].result.status, "error", `Expected error for ${tool}`);
+      assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+    }
+
+    // Invalid call structure: empty id or non-object arguments
+    let ws = attachFakeSocket(link);
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "bad-id",
+        method: "workspace_batch",
+        params: { __gptWorkerActiveTask: true, calls: [{ id: "", name: "read_file" }] },
+      })
+    );
+    assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+
+    ws = attachFakeSocket(link);
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "bad-args",
+        method: "workspace_batch",
+        params: { __gptWorkerActiveTask: true, calls: [{ id: "c1", name: "read_file", arguments: "not-obj" }] },
+      })
+    );
+    assert.equal(ws.sent[0].result.code, "INVALID_ARGS");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("subcall error does not fail the entire batch", async () => {
+    const root = makeTestWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    const ws = attachFakeSocket(link);
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "sub-err",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          calls: [
+            { id: "c-fail", name: "read_file", arguments: { path: "does-not-exist.txt" } },
+            { id: "c-ok", name: "read_file", arguments: { path: "hello.txt" } },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    const reply = ws.sent[0];
+    assert.equal(reply.ok, true);
+    assert.equal(reply.result.results.length, 2);
+
+    assert.equal(reply.result.results[0].id, "c-fail");
+    assert.equal(reply.result.results[0].ok, false);
+    assert.equal(reply.result.results[0].error.error, "NOT_FOUND");
+
+    assert.equal(reply.result.results[1].id, "c-ok");
+    assert.equal(reply.result.results[1].ok, true);
+    assert.equal(reply.result.results[1].result.text, "hello world\n");
+
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });

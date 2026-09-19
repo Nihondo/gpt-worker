@@ -15,7 +15,30 @@ import { sanitizeText, redactLocalPaths } from "./sanitize.mjs";
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
-const GATED_METHODS = new Set(["workspace_overview", "list_directory", "read_file", "search_workspace", "git_status", "git_diff", "git_log", "execution_output"]);
+const GATED_METHODS = new Set([
+  "workspace_overview",
+  "list_directory",
+  "read_file",
+  "search_workspace",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "execution_output",
+  "workspace_batch",
+]);
+
+const MAX_BATCH_CALLS = 8;
+const BATCH_WHITELIST = new Set([
+  "workspace_info",
+  "workspace_overview",
+  "list_directory",
+  "read_file",
+  "search_workspace",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "execution_output",
+]);
 
 // Internal-only join marker used while batching every string field of one
 // reply into a single scanner invocation (see sanitizeResult() below). A
@@ -286,9 +309,63 @@ export class BridgeLink {
         return this.tools.gitLog(params);
       case "execution_output":
         return this.tools.executionOutput(params);
+      case "workspace_batch":
+        return this.executeBatch(params);
       default:
         return { status: "unknown_method", method };
     }
+  }
+
+  executeBatch(params) {
+    if (!params || typeof params !== "object" || !Array.isArray(params.calls)) {
+      return { status: "error", code: "INVALID_ARGS", message: "calls must be an array" };
+    }
+    if (params.calls.length === 0) {
+      return { status: "error", code: "INVALID_ARGS", message: "calls cannot be empty" };
+    }
+    if (params.calls.length > MAX_BATCH_CALLS) {
+      return { status: "error", code: "INVALID_ARGS", message: `calls exceeds maximum limit of ${MAX_BATCH_CALLS}` };
+    }
+
+    for (let i = 0; i < params.calls.length; i++) {
+      const call = params.calls[i];
+      if (!call || typeof call !== "object" || Array.isArray(call)) {
+        return { status: "error", code: "INVALID_ARGS", message: `calls[${i}] must be an object` };
+      }
+      if (typeof call.id !== "string" || call.id.trim() === "") {
+        return { status: "error", code: "INVALID_ARGS", message: `calls[${i}].id must be a non-empty string` };
+      }
+      if (typeof call.name !== "string" || !BATCH_WHITELIST.has(call.name)) {
+        return { status: "error", code: "INVALID_ARGS", message: `calls[${i}].name '${call && call.name}' is not in allowed batch methods` };
+      }
+      if (call.arguments !== undefined && (typeof call.arguments !== "object" || call.arguments === null || Array.isArray(call.arguments))) {
+        return { status: "error", code: "INVALID_ARGS", message: `calls[${i}].arguments must be an object` };
+      }
+    }
+
+    const results = [];
+    for (const call of params.calls) {
+      const callArgs = { ...(call.arguments || {}) };
+      delete callArgs.__gptWorkerActiveTask;
+
+      try {
+        const subResult = this.dispatch(call.name, callArgs);
+        if (subResult && typeof subResult === "object" && ("error" in subResult || subResult.status === "error")) {
+          results.push({ id: call.id, name: call.name, ok: false, error: subResult });
+        } else {
+          results.push({ id: call.id, name: call.name, ok: true, result: subResult });
+        }
+      } catch (err) {
+        results.push({
+          id: call.id,
+          name: call.name,
+          ok: false,
+          error: { error: "INTERNAL_ERROR", message: String((err && err.message) || err) },
+        });
+      }
+    }
+
+    return { results };
   }
 
   /** The single egress point for everything this bridge sends to the

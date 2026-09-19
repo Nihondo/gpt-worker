@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { WorkspaceTools, parseGitHubRemote } from "../bridge/tools.mjs";
+import { BridgeLink } from "../bridge/link.mjs";
 import { workspaceStateDir, recordsDir } from "../bridge/state.mjs";
 
 function git(cwd, args) {
@@ -303,5 +304,100 @@ describe("execution_output: scoped to one task_id, never merged across tasks", (
 
   test("an unknown task_id is simply not found", () => {
     assert.equal(tools.executionOutput({ task_id: "no-such-task" }).found, false);
+  });
+});
+
+describe("BridgeLink: workspace_batch containment", () => {
+  function fakeSocket() {
+    const sent = [];
+    return {
+      readyState: 1,
+      send: (data) => sent.push(JSON.parse(data)),
+      sent,
+    };
+  }
+
+  test("applies path traversal, sensitive file, and gitignored file containment in batch calls", async () => {
+    const { workspace } = trackedParentRepo();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: workspace,
+    });
+    const ws = fakeSocket();
+    link.ws = ws;
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "b-containment",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          calls: [
+            { id: "c-normal", name: "read_file", arguments: { path: "README.md" } },
+            { id: "c-traversal", name: "read_file", arguments: { path: "../sibling/secret-plan.md" } },
+            { id: "c-sensitive", name: "read_file", arguments: { path: ".ssh/id_rsa" } },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    const results = ws.sent[0].result.results;
+    assert.equal(results.length, 3);
+
+    // Normal file succeeds
+    assert.equal(results[0].id, "c-normal");
+    assert.equal(results[0].ok, true);
+    assert.equal(results[0].result.text, "hello\n");
+
+    // Traversal is denied
+    assert.equal(results[1].id, "c-traversal");
+    assert.equal(results[1].ok, false);
+    assert.equal(results[1].error.error, "OUT_OF_WORKSPACE");
+
+    // Sensitive file is denied
+    assert.equal(results[2].id, "c-sensitive");
+    assert.equal(results[2].ok, false);
+    assert.equal(results[2].error.error, "ACCESS_DENIED_SENSITIVE_FILE");
+  });
+
+  test("denies gitignored file in batch calls unless allowed", async () => {
+    const root = ignoredWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    const ws = fakeSocket();
+    link.ws = ws;
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "b-ignored",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          calls: [
+            { id: "c-normal", name: "read_file", arguments: { path: "README.md" } },
+            { id: "c-ignored", name: "read_file", arguments: { path: "ignored.txt" } },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    const results = ws.sent[0].result.results;
+    assert.equal(results.length, 2);
+
+    assert.equal(results[0].id, "c-normal");
+    assert.equal(results[0].ok, true);
+    assert.equal(results[0].result.text, "visible\n");
+
+    assert.equal(results[1].id, "c-ignored");
+    assert.equal(results[1].ok, false);
+    assert.equal(results[1].error.error, "ACCESS_DENIED_GITIGNORED_FILE");
   });
 });

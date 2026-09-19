@@ -95,12 +95,17 @@ describe("shared connector hub", () => {
     const info = body.result.tools.find((tool) => tool.name === "workspace_info");
     const overview = body.result.tools.find((tool) => tool.name === "workspace_overview");
     const setTitle = body.result.tools.find((tool) => tool.name === "set_title");
+    const batch = body.result.tools.find((tool) => tool.name === "workspace_batch");
     assert.ok(list);
     assert.equal(info.inputSchema.properties.workspace_id.type, "string");
     assert.ok(info.inputSchema.required.includes("workspace_id"));
     assert.equal(overview.inputSchema.properties.workspace_id.type, "string");
     assert.ok(overview.inputSchema.required.includes("workspace_id"));
     assert.equal(overview.annotations.readOnlyHint, true);
+    assert.ok(batch);
+    assert.equal(batch.inputSchema.properties.workspace_id.type, "string");
+    assert.ok(batch.inputSchema.required.includes("workspace_id"));
+    assert.equal(batch.annotations.readOnlyHint, true);
     assert.ok(setTitle);
     assert.equal(setTitle.inputSchema.properties.workspace_id.type, "string");
     assert.ok(setTitle.inputSchema.required.includes("workspace_id"));
@@ -150,6 +155,15 @@ describe("shared connector hub", () => {
     });
     assert.equal((await rejected.json()).result.structuredContent.error, "UNKNOWN_WORKSPACE");
     assert.equal(workspaceB.getTask("b-task").title, null);
+  });
+
+  test("shared workspace_batch refuses unregistered workspace", async () => {
+    const { hub } = makeHubAndWorkspaceEnv();
+    const rejected = await hub.handleHubToolCall(1, {
+      name: "workspace_batch",
+      arguments: { workspace_id: "unregistered1234", calls: [{ id: "c1", name: "workspace_info" }] },
+    });
+    assert.equal((await rejected.json()).result.structuredContent.error, "UNKNOWN_WORKSPACE");
   });
 
   test("initialize carries the connector-appropriate operating instructions", async () => {

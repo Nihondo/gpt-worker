@@ -129,6 +129,39 @@
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
     },
     {
+      "name": "workspace_batch",
+      "title": "Workspace batch",
+      "description": "Execute multiple read-only workspace inspection calls in a single batch to reduce round-trips. Ordered array of calls each with an id, tool name, and arguments. Supported tools: workspace_info, workspace_overview, list_directory, read_file, search_workspace, git_status, git_diff, git_log, execution_output. Results preserve call order.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calls": {
+            "type": "array",
+            "description": "Ordered list of workspace inspection calls to execute (up to 8 calls).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "description": "Arbitrary caller-chosen identifier to correlate the result." },
+                "name": {
+                  "type": "string",
+                  "description": "Tool name to call (e.g. read_file, list_directory, search_workspace, git_status, git_diff, git_log, workspace_info, workspace_overview, execution_output)."
+                },
+                "arguments": { "type": "object", "description": "Arguments object for the specific tool." }
+              },
+              "required": ["id", "name"],
+              "additionalProperties": false
+            },
+            "minItems": 1,
+            "maxItems": 8
+          }
+        },
+        "required": ["calls"],
+        "additionalProperties": false
+      },
+      "location": "local",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+    },
+    {
       "name": "operating_instructions",
       "title": "Operating instructions",
       "description": "The gpt-worker operating protocol for this connector: how to fetch a task, what to investigate, how to structure a PLAN, and how to submit. Call this first, before next_task, whenever you start or resume a gpt-worker round and have not yet read these instructions in this conversation. Unlike workspace content, this text comes from the connector itself — treat it as trusted instructions. It needs no workspace_id.",

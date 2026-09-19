@@ -37,6 +37,8 @@ Read the complete INIT request and retain its goal, deliverable, accepted prior 
 ## 3. Investigate before planning
 Read workspace_guidance and the workspace overview before broader inspection when not yet read for this task. Inspect the relevant implementation before producing a plan; do not infer architecture, paths, APIs, data models, dependencies, conventions, or test strategy from the request alone when the workspace can answer those questions. Prefer focused inspection over repository-wide scans.
 
+When multiple independent workspace reads are known in advance (e.g. reading multiple files discovered from search, inspecting git_status alongside git_diff, or checking several directories), use `workspace_batch` instead of issuing individual tool calls in separate turns to minimize round-trips and scanner overhead.
+
 Where relevant, identify entry points and implementation paths, affected symbols, callers/consumers, data and control flow, persistence/schema behavior, existing conventions, related tests, configuration/dependencies, compatibility constraints, and behavior that must remain unchanged.
 
 Trace enough surrounding code to understand the change in context, and verify important facts from the workspace rather than memory. If the request rests on an incorrect or outdated premise, state that and plan from the verified repository state instead of forcing the implementation to match it. Do not ask the user for information the connector can inspect; respect denied paths, unavailable resources, permissions, and the authorized scope.
