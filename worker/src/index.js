@@ -32,10 +32,8 @@
 // See ~/.agents/skills/gpt-worker/SKILL.md for the operating protocol and
 // ~/.agents/skills/gpt-worker/reference/protocol.md for message formats.
 
-import TOOLS from "./tools.json" with { type: "json" };
-import { operatingInstructions } from "./instructions.js";
 // Dashboard browser assets: same Wrangler Text-module mechanism as
-// instructions.md above (see wrangler.jsonc's `rules`), not bundled/built —
+// instructions.md (imported by instructions.js; see wrangler.jsonc's `rules`), not bundled/built —
 // these are the literal bytes served at .../app.js and .../app.css, and the literal HTML
 // markup rendered by renderDashboard*Html/renderHubDashboard*Html below.
 // The .js assets embed no server-side interpolation (workspaceId is read
@@ -74,41 +72,9 @@ import { initializeBridgeSchema } from "./bridge-schema.js";
 import { createBridgeProtocol } from "./bridge-protocol.js";
 import { createBridgeAdmin, MAX_BODY_BYTES_CEILING, REQUEST_ENVELOPE_OVERHEAD_BYTES } from "./bridge-admin.js";
 import { createBridgeOAuth } from "./bridge-oauth.js";
+import { createBridgeMcp, toolOk, toolError } from "./bridge-mcp.js";
+import { createBridgeTransport } from "./bridge-transport.js";
 
-// Tools answered locally by the hub (no workspace_id involved) instead of
-// being relayed to a workspace's Durable Object. Excluded from the
-// workspace_id injection below for that reason.
-const HUB_LOCAL_TOOLS = new Set(["operating_instructions"]);
-
-const HUB_TOOLS = [
-  {
-    name: "list_workspaces",
-    title: "List workspaces",
-    description: "List every workspace registered with this shared gpt-worker connector. Choose one workspace_id, then pass it to every other gpt-worker tool call.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false },
-    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-  },
-  ...TOOLS.tools.map((tool) =>
-    HUB_LOCAL_TOOLS.has(tool.name)
-      ? { ...tool }
-      : {
-          ...tool,
-          description: `${tool.description} In the shared connector, pass workspace_id from list_workspaces for this call.`,
-          inputSchema: {
-            ...tool.inputSchema,
-            properties: {
-              ...tool.inputSchema.properties,
-              workspace_id: { type: "string", description: "Workspace ID returned by list_workspaces." },
-            },
-            required: [...new Set([...(tool.inputSchema.required || []), "workspace_id"])],
-          },
-        }
-  ),
-];
-
-const PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
-const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-const RPC_TIMEOUT_MS = 20_000; // local WS round-trip budget
 const MAX_REQUEST_BYTES = 32 * 1024; // the whole JSON-RPC/CLI envelope around it
 // Used only where the target workspace isn't known yet (the shared
 // connector's hub-level envelope parse, before it has read which workspace
@@ -126,7 +92,6 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // message-delivery transport and don't need that longevity.
 const TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const ALARM_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const ACTIVE_WINDOW_MS = 60 * 60 * 1000;
 // docs/plans/queue-dashboard.md: workspace-owner-only Web dashboard.
 // Session lifecycle (§"dashboard session のライフサイクル"): 24h TTL, hashed
 // storage (never the raw token), swept by alarm(), revoked wholesale on
@@ -295,12 +260,6 @@ function randomHex(bytes) {
   const arr = new Uint8Array(bytes);
   crypto.getRandomValues(arr);
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function checkProtocolVersion(request) {
-  const v = request.headers.get("mcp-protocol-version");
-  if (!v) return DEFAULT_PROTOCOL_VERSION;
-  return PROTOCOL_VERSIONS.has(v) ? v : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -733,19 +692,6 @@ function handleOAuthMetadataRoute(request, parts) {
   return new Response("not found", { status: 404 });
 }
 
-function rpcError(id, code, message) {
-  return json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
-}
-
-function toolOk(data) {
-  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], structuredContent: data };
-}
-
-function toolError(code, message) {
-  const data = { error: code, message };
-  return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: true };
-}
-
 // ---------------------------------------------------------------------------
 // Durable Object: queue + WebSocket relay.
 // ---------------------------------------------------------------------------
@@ -755,8 +701,6 @@ export class BridgeDO {
     this.ctx = ctx;
     this.env = env;
     this.sql = ctx.storage.sql;
-    this.pending = new Map(); // rid -> { resolve, timer }
-    this.rateBuckets = new Map(); // key -> number[] (best-effort; resets on hibernation restart)
 
     initializeBridgeSchema(this.sql);
 
@@ -846,6 +790,88 @@ export class BridgeDO {
       hashValue: (value) => sha256Hex(value),
       renderConsentHtml: (fields) => renderOAuthConsentHtml(fields),
       maxOAuthRequestBytes: MAX_REQUEST_BYTES,
+    });
+
+    // Local transport domain (the /link WebSocket, /local CLI dispatch, the
+    // pending-RPC table, and rate limiting — see bridge-transport.js's own
+    // header for its full method list and the dependency/capability matrix
+    // it follows). Constructed once here and reused by every thin BridgeDO
+    // delegate below, so `callLocal` (which registers a pending RPC) and
+    // `webSocketMessage`/`webSocketClose`/`webSocketError` (which resolve
+    // it) always share the one `pending` map this object owns. Its
+    // cross-domain capabilities are all narrow callbacks, never a direct
+    // import of another bridge-*.js domain module or a raw sql/env handle:
+    // token checks reuse this file's own checkToken (bridge-admin.js state),
+    // and every /local op routes onto the same-named BridgeDO delegate
+    // (protocol/admin operations), each a lazy arrow so this constructor's
+    // ordering never matters and the transport never sees those domain
+    // objects themselves. `ctx` itself is handed over only because the
+    // transport owns the WebSocket lifecycle (getWebSockets/acceptWebSocket).
+    this.transport = createBridgeTransport({
+      ctx,
+      checkLinkToken: (token) => this.checkToken("link_token", token),
+      checkCliToken: (token) => this.checkToken("cli_token", token),
+      maxRequestBytes: () => this.maxRequestBytes(),
+      pendingMessageCounts: () => this.protocol.pendingMessageCounts(),
+      localOperations: {
+        enqueue: (body) => this.localEnqueue(body),
+        start_task: (body) => this.localStartTask(body),
+        report_task: (body) => this.localReportTask(body),
+        active_task: () => ({ task: this.taskView(this.activeTask()) }),
+        migrate_legacy_state: (body) => this.localMigrateLegacyState(body),
+        settings_get: () => this.localSettingsGet(),
+        settings_set: (body) => this.localSettingsSet(body),
+        browser_settings_get: () => this.localBrowserSettingsGet(),
+        browser_settings_set: (body) => this.localBrowserSettingsSet(body),
+        max_body_bytes_get: () => this.localMaxBodyBytesGet(),
+        max_body_bytes_set: (body) => this.localMaxBodyBytesSet(body),
+        guidance_set: (body) => this.localGuidanceSet(body),
+        guidance_get: () => this.workspaceGuidance(),
+        guidance_clear: () => this.localGuidanceClear(),
+        poll: (body) => this.localPoll(body),
+        ack: (body) => this.localAck(body),
+        list: (body) => this.localList(body),
+        discard_task: (body) => this.localDiscardTask(body),
+        discard: (body) => this.localDiscard(body),
+        complete_task: (body) => this.localCompleteTask(body),
+        continue_task: (body) => this.localContinueTask(body),
+      },
+    });
+
+    // MCP dispatch + tool invocation domain (dedicated/shared connector
+    // variants, list_workspaces, the binding-only /hub relay — see
+    // bridge-mcp.js's own header for its full method list and the
+    // dependency/capability matrix it follows). Constructed once here and
+    // reused by every thin BridgeDO delegate below. Its cross-domain
+    // capabilities are all narrow, purpose-fixed callbacks, never a direct
+    // import of another bridge-*.js domain module: protocol/admin reads go
+    // through this file's own same-named delegates, workspace-tool relay goes
+    // through callLocal, the oauth-mcp rate-limit bucket goes through
+    // rateLimit, and the only place the hub's tool relay touches
+    // env.BRIDGE_DO (the binding-only /hub call, forwarding just the tool
+    // name/arguments — never a hub credential or session) is the callback
+    // below, inside this file, never inside bridge-mcp.js itself.
+    this.mcp = createBridgeMcp({
+      queueNext: (taskId) => this.queueNext(taskId),
+      queueSubmit: (args) => this.queueSubmit(args),
+      queueSetTitle: (args) => this.queueSetTitle(args),
+      taskHistory: (args) => this.taskHistory(args),
+      activeTask: () => this.activeTask(),
+      workspaceGuidance: () => this.workspaceGuidance(),
+      registeredWorkspaces: () => this.registeredWorkspaces(),
+      maxWorkspaceRequestBytes: () => this.maxRequestBytes(),
+      relayWorkspaceTool: (name, params) => this.callLocal(name, params),
+      allowOAuthMcpRequest: (useHubHandler) => this.rateLimit(useHubHandler ? "oauth-hub-mcp" : "oauth-mcp", 60),
+      relayHubToolToWorkspace: async (workspaceId, name, args) => {
+        const stub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(workspaceId));
+        const response = await stub.fetch(new Request("https://gpt-worker.internal/hub", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, arguments: args }),
+        }));
+        return response.json();
+      },
+      maxSharedRequestBytes: MAX_REQUEST_BYTES_CEILING,
     });
 
     ctx.blockConcurrencyWhile(async () => {
@@ -1040,102 +1066,41 @@ export class BridgeDO {
   }
 
   // ---- rate limiting (sliding window, best-effort across hibernation) ----
+  // Thin delegates onto the local transport domain (bridge-transport.js),
+  // which owns the rate-limit buckets and the pending-RPC table. The three
+  // webSocket* methods are Cloudflare Durable Object runtime entrypoints
+  // (WebSocket Hibernation API) and must stay defined on BridgeDO itself —
+  // they only delegate.
 
   rateLimit(key, maxPerMinute) {
-    const now = Date.now();
-    const windowStart = now - 60_000;
-    const arr = (this.rateBuckets.get(key) || []).filter((t) => t > windowStart);
-    if (arr.length >= maxPerMinute) {
-      this.rateBuckets.set(key, arr);
-      return false;
-    }
-    arr.push(now);
-    this.rateBuckets.set(key, arr);
-    return true;
+    return this.transport.rateLimit(key, maxPerMinute);
   }
 
   // ======================= /link : local bridge WebSocket =======================
 
   async handleLink(request, token) {
-    if (!this.checkToken("link_token", token)) return new Response("not found", { status: 404 });
-    if (request.headers.get("upgrade") !== "websocket") {
-      return new Response("expected websocket", { status: 426 });
-    }
-    if (!this.rateLimit("link", 10)) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    }
-
-    // Single-connection constraint: the newest connection wins. Closing the old
-    // one lets a local bridge restart (crash, reboot, network blip) reconnect
-    // without any manual cleanup.
-    for (const ws of this.ctx.getWebSockets("local")) {
-      try {
-        ws.close(1008, "superseded by new connection");
-      } catch {
-        /* already closing */
-      }
-    }
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    this.ctx.acceptWebSocket(server, ["local"]);
-    server.serializeAttachment({ connected_at: Date.now() });
-
-    return new Response(null, { status: 101, webSocket: client });
+    return this.transport.handleLink(request, token);
   }
 
-  webSocketMessage(_ws, message) {
-    let msg;
-    try {
-      msg = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
-    } catch {
-      return;
-    }
-    const pending = this.pending.get(msg.rid);
-    if (!pending) return; // stale or unsolicited; ignore
-    clearTimeout(pending.timer);
-    this.pending.delete(msg.rid);
-    pending.resolve(msg);
+  webSocketMessage(ws, message) {
+    return this.transport.webSocketMessage(ws, message);
   }
 
-  webSocketClose() {
-    this.failAllPending();
+  webSocketClose(...args) {
+    return this.transport.webSocketClose(...args);
   }
 
-  webSocketError() {
-    this.failAllPending();
+  webSocketError(...args) {
+    return this.transport.webSocketError(...args);
   }
 
   failAllPending() {
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.resolve({ ok: false, error: { status: "local_disconnected" } });
-    }
-    this.pending.clear();
+    return this.transport.failAllPending();
   }
 
-  /** Send a request to the local bridge over the WS link and await its reply.
-   *  Uses our own `rid`, never the MCP request `id` (which ChatGPT may reuse
-   *  across concurrent tool calls). */
+  /** Send a request to the local bridge over the WS link and await its reply. */
   async callLocal(method, params) {
-    const sockets = this.ctx.getWebSockets("local");
-    if (sockets.length === 0) return { ok: false, error: { status: "local_offline" } };
-    const rid = crypto.randomUUID();
-    const ws = sockets[0];
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(rid);
-        resolve({ ok: false, error: { status: "timeout" } });
-      }, RPC_TIMEOUT_MS);
-      this.pending.set(rid, { resolve, timer });
-      try {
-        ws.send(JSON.stringify({ rid, method, params }));
-      } catch {
-        clearTimeout(timer);
-        this.pending.delete(rid);
-        resolve({ ok: false, error: { status: "local_offline" } });
-      }
-    });
+    return this.transport.callLocal(method, params);
   }
 
   // ======================= OAuth: authorization server + resource validation =======================
@@ -1261,68 +1226,15 @@ export class BridgeDO {
   }
 
   /** POST /oauth-mcp or /oauth-hub-mcp (internal). Reached only after
-   *  handleOAuthMcpResource has Bearer-authenticated the caller; this parses
-   *  the JSON-RPC envelope and dispatches into the resource's handler. */
+   *  handleOAuthMcpResource has Bearer-authenticated the caller. Thin
+   *  delegates onto the MCP dispatch domain (bridge-mcp.js) — see its own
+   *  header for the capability/dependency matrix this extraction follows. */
   async handleOAuthMcpDispatch(request, useHubHandler) {
-    if (!this.rateLimit(useHubHandler ? "oauth-hub-mcp" : "oauth-mcp", 60)) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    }
-    const contentType = request.headers.get("content-type") || "";
-    if (!contentType.includes("application/json")) {
-      return new Response("unsupported media type", { status: 415 });
-    }
-    if (checkProtocolVersion(request) === null) {
-      return new Response("unsupported MCP-Protocol-Version", { status: 400 });
-    }
-
-    // The hub-level dispatch (useHubHandler) runs on the shared hub DO, which
-    // doesn't own any workspace's `max_body_bytes` setting and can't yet know
-    // which workspace this call names — that isn't resolved until
-    // handleHubToolCall parses `arguments.workspace_id` below. So this first
-    // gate is generously fixed at the global ceiling; the real, per-workspace
-    // limit is enforced once the call reaches that workspace's own DO (see
-    // handleHubRelay). The dedicated per-workspace dispatch runs on that
-    // workspace's own DO already, so it can size-check precisely up front.
-    const requestLimit = useHubHandler ? MAX_REQUEST_BYTES_CEILING : this.maxRequestBytes();
-    const parsed = await readJsonWithLimit(request, requestLimit);
-    if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
-    if (parsed.parseError) return rpcError(null, -32700, "Parse error");
-    const payload = parsed.value;
-
-    if (Array.isArray(payload)) return new Response("JSON-RPC batching is not supported", { status: 400 });
-    if (!payload || typeof payload !== "object" || payload.jsonrpc !== "2.0") {
-      return rpcError(payload && payload.id, -32600, "Invalid Request");
-    }
-    if (!("method" in payload) || !("id" in payload)) return new Response(null, { status: 202 });
-
-    return useHubHandler ? this.handleHubMcpRequest(payload) : this.handleMcpRequest(payload);
+    return this.mcp.handleOAuthMcpDispatch(request, useHubHandler);
   }
 
-  async handleHubMcpRequest({ id, method, params }) {
-    switch (method) {
-      case "ping":
-        return json({ jsonrpc: "2.0", id, result: {} });
-      case "initialize": {
-        const clientVersion = params && params.protocolVersion;
-        const version = PROTOCOL_VERSIONS.has(clientVersion) ? clientVersion : "2025-06-18";
-        return json({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: version,
-            capabilities: { tools: {} },
-            serverInfo: { name: "gpt-worker", version: "1.2.0" },
-            instructions: operatingInstructions("shared"),
-          },
-        });
-      }
-      case "tools/list":
-        return json({ jsonrpc: "2.0", id, result: { tools: HUB_TOOLS.map(({ name, title, description, inputSchema, annotations }) => ({ name, title, description, inputSchema, annotations })) } });
-      case "tools/call":
-        return this.handleHubToolCall(id, params);
-      default:
-        return rpcError(id, -32601, `Method not found: ${method}`);
-    }
+  async handleHubMcpRequest(rpc) {
+    return this.mcp.handleHubMcpRequest(rpc);
   }
 
   registeredWorkspaces() {
@@ -1330,128 +1242,27 @@ export class BridgeDO {
   }
 
   async handleHubToolCall(id, params) {
-    if (!params || typeof params.name !== "string") return rpcError(id, -32602, "Invalid params: missing tool name");
-    const { name, arguments: args = {} } = params;
-    if (name === "list_workspaces") return json({ jsonrpc: "2.0", id, result: toolOk({ workspaces: this.registeredWorkspaces() }) });
-    if (name === "operating_instructions") {
-      return json({ jsonrpc: "2.0", id, result: toolOk({ instructions: operatingInstructions("shared") }) });
-    }
-    if (!HUB_TOOLS.some((tool) => tool.name === name)) {
-      return json({ jsonrpc: "2.0", id, result: toolError("UNKNOWN_TOOL", `No such tool: ${name}`) });
-    }
-    const workspaceId = args && args.workspace_id;
-    if (!isValidWorkspaceId(workspaceId) || !this.registeredWorkspaces().some((w) => w.workspace_id === workspaceId)) {
-      return json({ jsonrpc: "2.0", id, result: toolError("UNKNOWN_WORKSPACE", "Call list_workspaces and pass one returned workspace_id.") });
-    }
-    const forwardedArgs = { ...args };
-    delete forwardedArgs.workspace_id;
-    try {
-      const stub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(workspaceId));
-      const response = await stub.fetch(new Request("https://gpt-worker.internal/hub", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, arguments: forwardedArgs }),
-      }));
-      const result = await response.json();
-      return json({ jsonrpc: "2.0", id, result });
-    } catch (err) {
-      return json({ jsonrpc: "2.0", id, result: toolError("WORKSPACE_UNAVAILABLE", String((err && err.message) || err)) });
-    }
+    return this.mcp.handleHubToolCall(id, params);
   }
 
   /** Internal, binding-only entry point used by the hub to preserve the
-   * existing workspace task queues and read gating. Reachable only from
-   * handleHubToolCall (this file), so reaching here always means the
+   * existing workspace task queues and read gating. Reachable only from the
+   * hub's own handleHubToolCall relay, so reaching here always means the
    * shared connector. */
   async handleHubRelay(request) {
-    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    // Reached only after handleHubToolCall has already resolved which
-    // workspace this call is for and forwarded it to that workspace's own
-    // DO — `this` here is that DO, so its configured limit applies.
-    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
-    if (parsed.tooLarge) return json(toolError("PAYLOAD_TOO_LARGE", "request exceeds size limit"), 413);
-    const body = parsed.value || {};
-    if (parsed.parseError || typeof body.name !== "string") return json(toolError("INVALID_ARGS", "tool name is required"), 400);
-    return json(await this.invokeTool(body.name, body.arguments || {}, { connector: "shared" }));
+    return this.mcp.handleHubRelay(request);
   }
 
-  async handleMcpRequest({ id, method, params }) {
-    switch (method) {
-      case "ping":
-        return json({ jsonrpc: "2.0", id, result: {} });
-
-      case "initialize": {
-        const clientVersion = params && params.protocolVersion;
-        const version = PROTOCOL_VERSIONS.has(clientVersion) ? clientVersion : "2025-06-18";
-        return json({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: version,
-            capabilities: { tools: {} },
-            serverInfo: { name: "gpt-worker", version: "1.1.0" },
-            instructions: operatingInstructions("dedicated"),
-          },
-        });
-      }
-
-      case "tools/list": {
-        const tools = TOOLS.tools.map((t) => ({
-          name: t.name,
-          title: t.title,
-          description: t.description,
-          inputSchema: t.inputSchema,
-          annotations: t.annotations,
-        }));
-        return json({ jsonrpc: "2.0", id, result: { tools } });
-      }
-
-      case "tools/call":
-        return this.handleToolCall(id, params);
-
-      default:
-        return rpcError(id, -32601, `Method not found: ${method}`);
-    }
+  async handleMcpRequest(rpc) {
+    return this.mcp.handleMcpRequest(rpc);
   }
 
   async handleToolCall(id, params) {
-    if (!params || typeof params.name !== "string") {
-      return rpcError(id, -32602, "Invalid params: missing tool name");
-    }
-    const { name, arguments: args = {} } = params;
-    return json({ jsonrpc: "2.0", id, result: await this.invokeTool(name, args) });
+    return this.mcp.handleToolCall(id, params);
   }
 
-  async invokeTool(name, args = {}, { connector = "dedicated" } = {}) {
-    const tool = TOOLS.tools.find((t) => t.name === name);
-    if (!tool) return toolError("UNKNOWN_TOOL", `No such tool: ${name}`);
-    try {
-      if (tool.location === "instructions") return toolOk({ instructions: operatingInstructions(connector) });
-      if (tool.location === "queue_next") {
-        const next = this.queueNext(args && args.task_id);
-        // Worker-owned static protocol text, not queue data (see
-        // instructions.js). next_task is the one call guaranteed to happen
-        // at the start of a round, so it is the reliable delivery point if
-        // the connector drops InitializeResult.instructions.
-        return toolOk(next.empty ? next : { operating_instructions: operatingInstructions(connector), ...next });
-      }
-      if (tool.location === "queue_submit") return this.queueSubmit(args);
-      if (tool.location === "queue_set_title") return this.queueSetTitle(args);
-      if (tool.location === "queue_history") return toolOk(this.taskHistory(args));
-      if (tool.location === "workspace_guidance") return toolOk(this.workspaceGuidance());
-      const relay = await this.callLocal(name, {
-        ...args,
-        // The bridge treats this as Worker-authenticated control metadata,
-        // never as a value supplied by ChatGPT. It keeps workspace reads
-        // gated by the Worker-owned task state without persisting a local
-        // copy of the active task ID.
-        __gptWorkerActiveTask: this.isActiveTaskWindow(),
-      });
-      if (!relay.ok) return toolOk(relay.error);
-      return toolOk(relay.result);
-    } catch (err) {
-      return toolError("INTERNAL_ERROR", String((err && err.message) || err));
-    }
+  async invokeTool(name, args = {}, options = {}) {
+    return this.mcp.invokeTool(name, args, options);
   }
 
   // ---- postbox: to_gpt / to_local queues, backed by SQLite ----
@@ -1501,8 +1312,7 @@ export class BridgeDO {
   }
 
   isActiveTaskWindow() {
-    const task = this.activeTask();
-    return !!task && Date.now() - task.task_started_at < ACTIVE_WINDOW_MS;
+    return this.mcp.isActiveTaskWindow();
   }
 
   workspaceGuidance() {
@@ -2266,63 +2076,7 @@ export class BridgeDO {
   // ======================= /local : CLI-facing HTTP =======================
 
   async handleLocalRoute(request, token) {
-    if (!this.checkToken("cli_token", token)) return new Response("not found", { status: 404 });
-    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    if (!this.rateLimit("local", 120)) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-    }
-    const parsed = await readJsonWithLimit(request, this.maxRequestBytes());
-    if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
-    if (parsed.parseError) return json({ error: "PARSE_ERROR" }, 400);
-    const body = parsed.value;
-    switch (body && body.op) {
-      case "enqueue":
-        return json(this.localEnqueue(body));
-      case "start_task":
-        return json(this.localStartTask(body));
-      case "report_task":
-        return json(this.localReportTask(body));
-      case "active_task":
-        return json({ task: this.taskView(this.activeTask()) });
-      case "migrate_legacy_state":
-        return json(this.localMigrateLegacyState(body));
-      case "settings_get":
-        return json(this.localSettingsGet());
-      case "settings_set":
-        return json(this.localSettingsSet(body));
-      case "browser_settings_get":
-        return json(this.localBrowserSettingsGet());
-      case "browser_settings_set":
-        return json(this.localBrowserSettingsSet(body));
-      case "max_body_bytes_get":
-        return json(this.localMaxBodyBytesGet());
-      case "max_body_bytes_set":
-        return json(this.localMaxBodyBytesSet(body));
-      case "guidance_set":
-        return json(this.localGuidanceSet(body));
-      case "guidance_get":
-        return json(this.workspaceGuidance());
-      case "guidance_clear":
-        return json(this.localGuidanceClear());
-      case "poll":
-        return json(await this.localPoll(body));
-      case "ack":
-        return json(this.localAck(body));
-      case "status":
-        return json(this.localStatus());
-      case "list":
-        return json(this.localList(body));
-      case "discard_task":
-        return json(this.localDiscardTask(body));
-      case "discard":
-        return json(this.localDiscard(body));
-      case "complete_task":
-        return json(this.localCompleteTask(body));
-      case "continue_task":
-        return json(this.localContinueTask(body));
-      default:
-        return json({ error: "UNKNOWN_OP" }, 400);
-    }
+    return this.transport.handleLocalRoute(request, token);
   }
 
   /** Ad-hoc cleanup of one message by id, either direction — for manually
@@ -2350,20 +2104,7 @@ export class BridgeDO {
   }
 
   localMigrateLegacyState(body) {
-    const { taskId, goal, iteration, protocolState, waitingFor, taskStartedAt } = body || {};
-    if (this.activeTask()) return { task: this.taskView(this.activeTask()), migrated: false };
-    if (
-      typeof taskId !== "string" || typeof goal !== "string" || !Number.isInteger(iteration) ||
-      !["WAITING_PLAN", "EXECUTING", "WAITING_REVIEW"].includes(protocolState)
-    ) return { error: "INVALID_ARGS" };
-    const now = Date.now();
-    this.sql.exec(
-      `INSERT OR IGNORE INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      taskId, goal, iteration, protocolState, typeof waitingFor === "string" ? waitingFor : "none",
-      Number.isFinite(taskStartedAt) ? taskStartedAt : now, now
-    );
-    return { task: this.taskView(this.getTask(taskId)), migrated: true };
+    return this.protocol.localMigrateLegacyState(body);
   }
 
   // Thin delegates onto the admin/settings/registry domain (bridge-admin.js)
@@ -2449,10 +2190,7 @@ export class BridgeDO {
   }
 
   localStatus() {
-    const connected = this.ctx.getWebSockets("local").length > 0;
-    const pendingToGpt = this.sql.exec(`SELECT COUNT(*) AS n FROM msgs WHERE dir='to_gpt' AND state != 'acked'`).toArray()[0].n;
-    const pendingToLocal = this.sql.exec(`SELECT COUNT(*) AS n FROM msgs WHERE dir='to_local' AND state != 'acked'`).toArray()[0].n;
-    return { connected, pendingToGpt, pendingToLocal };
+    return this.transport.localStatus();
   }
 
   // ======================= maintenance =======================

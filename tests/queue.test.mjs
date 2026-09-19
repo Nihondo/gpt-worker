@@ -1185,3 +1185,94 @@ describe("localBrowserSettings", () => {
     assert.equal(doo.localList({}).messages.length, 0);
   });
 });
+
+// Transport seam (bridge-transport.js): BridgeDO keeps the Cloudflare runtime
+// entrypoints (webSocketMessage/webSocketClose/webSocketError) and the
+// callLocal/localStatus/handleLocalRoute compatibility methods as thin
+// delegates, so these go through BridgeDO only — never the transport's
+// closure state directly.
+describe("local transport delegates", () => {
+  function makeDOWithSockets() {
+    const ctx = makeFakeCtx();
+    const sockets = [];
+    ctx.getWebSockets = () => sockets;
+    return { doo: new BridgeDO(ctx, makeFakeEnv()), sockets };
+  }
+
+  test("callLocal resolves through the webSocketMessage runtime entrypoint (shared pending state)", async () => {
+    const { doo, sockets } = makeDOWithSockets();
+    const frames = [];
+    sockets.push({ send: (frame) => frames.push(JSON.parse(frame)) });
+
+    const call = doo.callLocal("read_file", { path: "a.txt" });
+    assert.equal(frames.length, 1);
+    assert.equal(frames[0].method, "read_file");
+    assert.deepEqual(frames[0].params, { path: "a.txt" });
+
+    // Stale/unsolicited and unparseable frames are ignored, not resolved.
+    doo.webSocketMessage(null, JSON.stringify({ rid: "unknown", ok: true }));
+    doo.webSocketMessage(null, "not json");
+    const reply = { rid: frames[0].rid, ok: true, result: { content: "hello" } };
+    doo.webSocketMessage(null, JSON.stringify(reply));
+    assert.deepEqual(await call, reply);
+  });
+
+  test("webSocketClose and webSocketError resolve pending calls as local_disconnected", async () => {
+    for (const entrypoint of ["webSocketClose", "webSocketError"]) {
+      const { doo, sockets } = makeDOWithSockets();
+      sockets.push({ send() {} });
+      const call = doo.callLocal("x", {});
+      doo[entrypoint]();
+      assert.deepEqual(await call, { ok: false, error: { status: "local_disconnected" } }, entrypoint);
+    }
+  });
+
+  test("callLocal reports local_offline with no socket or when send throws", async () => {
+    const { doo, sockets } = makeDOWithSockets();
+    assert.deepEqual(await doo.callLocal("x", {}), { ok: false, error: { status: "local_offline" } });
+    sockets.push({ send() { throw new Error("closed"); } });
+    assert.deepEqual(await doo.callLocal("x", {}), { ok: false, error: { status: "local_offline" } });
+  });
+
+  test("localStatus combines connection state with protocol queue counts", () => {
+    const { doo, sockets } = makeDOWithSockets();
+    assert.deepEqual(doo.localStatus(), { connected: false, pendingToGpt: 0, pendingToLocal: 0 });
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    sockets.push({});
+    assert.deepEqual(doo.localStatus(), { connected: true, pendingToGpt: 1, pendingToLocal: 0 });
+  });
+
+  test("localMigrateLegacyState migrates one valid legacy task and is a no-op while a task is active", () => {
+    const doo = makeDO();
+    const migrated = doo.localMigrateLegacyState({
+      taskId: "legacy-1", goal: "old goal", iteration: 2, protocolState: "EXECUTING", waitingFor: "none", taskStartedAt: 1234,
+    });
+    assert.equal(migrated.migrated, true);
+    assert.equal(migrated.task.taskId, "legacy-1");
+    assert.equal(migrated.task.goal, "old goal");
+    assert.equal(migrated.task.iteration, 2);
+    assert.equal(migrated.task.protocolState, "EXECUTING");
+    assert.equal(migrated.task.taskStartedAt, 1234);
+
+    const again = doo.localMigrateLegacyState({ taskId: "legacy-2", goal: "g", iteration: 0, protocolState: "WAITING_PLAN" });
+    assert.equal(again.migrated, false);
+    assert.equal(again.task.taskId, "legacy-1");
+    assert.equal(doo.getTask("legacy-2"), null);
+
+    assert.equal(makeDO().localMigrateLegacyState({ taskId: "x", goal: "g", iteration: 0, protocolState: "DONE" }).error, "INVALID_ARGS");
+  });
+
+  test("handleLocalRoute dispatches ops through the transport with token/method/op checks", async () => {
+    const doo = makeDO();
+    const { cliToken } = doo.provision();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    const post = (token, body) =>
+      doo.handleLocalRoute(new Request("https://x/local", { method: "POST", body: JSON.stringify(body) }), token);
+
+    assert.equal((await post("wrong-token", { op: "status" })).status, 404);
+    assert.equal((await doo.handleLocalRoute(new Request("https://x/local", { method: "GET" }), cliToken)).status, 405);
+    assert.equal((await post(cliToken, { op: "no_such_op" })).status, 400);
+    assert.deepEqual(await (await post(cliToken, { op: "status" })).json(), { connected: false, pendingToGpt: 1, pendingToLocal: 0 });
+    assert.equal((await (await post(cliToken, { op: "active_task" })).json()).task.taskId, "t1");
+  });
+});

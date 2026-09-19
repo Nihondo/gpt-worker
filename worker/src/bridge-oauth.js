@@ -47,9 +47,9 @@
 //    by bridge-admin.js).
 //
 // handleOAuthMcpDispatch (Bearer-authenticated JSON-RPC envelope parsing and
-// dispatch into handleMcpRequest/handleHubMcpRequest) stays in index.js
-// despite its name — it belongs to Phase 2D's bridge-mcp.js, not this
-// domain. The public HTTP layer (handleOAuthAuthorizeRoute/
+// dispatch into handleMcpRequest/handleHubMcpRequest) lives in bridge-mcp.js
+// (Phase 2D) despite its name — it belongs to the MCP domain, not this one.
+// The public HTTP layer (handleOAuthAuthorizeRoute/
 // handleOAuthTokenRoute/handleOAuthRegisterRoute/handleOAuthMcpResource,
 // discovery metadata, Bearer challenge/DO selection, and the stateless
 // helpers only they use — resolveOAuthResource/extractBearerToken/

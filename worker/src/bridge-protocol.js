@@ -90,8 +90,9 @@ function sleep(ms) {
  *    CLI's /local poll remains the real delivery path — so a caller-side
  *    rejection here must never surface as a queueSubmit() failure.
  *  - toolOk(data) / toolError(code, message): MCP tool-result formatters,
- *    reused as-is so queueSetTitle/queueSubmit keep returning the exact
- *    response shape invokeTool() in index.js already expects.
+ *    reused as-is (they are owned by bridge-mcp.js and injected by
+ *    index.js) so queueSetTitle/queueSubmit keep returning the exact
+ *    response shape invokeTool() already expects.
  *
  * Methods call each other through `this` (e.g. queueNext calling
  * this.getTask), which works because every call site invokes them as
@@ -644,6 +645,32 @@ function createBridgeProtocol({ sql, maxBodyBytes, notifyPlanPushed, toolOk, too
         }
       }
       return { ok: true };
+    },
+
+    localMigrateLegacyState(body) {
+      const { taskId, goal, iteration, protocolState, waitingFor, taskStartedAt } = body || {};
+      if (this.activeTask()) return { task: this.taskView(this.activeTask()), migrated: false };
+      if (
+        typeof taskId !== "string" || typeof goal !== "string" || !Number.isInteger(iteration) ||
+        !["WAITING_PLAN", "EXECUTING", "WAITING_REVIEW"].includes(protocolState)
+      ) return { error: "INVALID_ARGS" };
+      const now = Date.now();
+      sql.exec(
+        `INSERT OR IGNORE INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        taskId, goal, iteration, protocolState, typeof waitingFor === "string" ? waitingFor : "none",
+        Number.isFinite(taskStartedAt) ? taskStartedAt : now, now
+      );
+      return { task: this.taskView(this.getTask(taskId)), migrated: true };
+    },
+
+    /** Counts of not-yet-acked messages per direction — the queue half of
+     *  the /local "status" answer (the connection half is transport's own
+     *  state; see bridge-transport.js's localStatus()). */
+    pendingMessageCounts() {
+      const pendingToGpt = sql.exec(`SELECT COUNT(*) AS n FROM msgs WHERE dir='to_gpt' AND state != 'acked'`).toArray()[0].n;
+      const pendingToLocal = sql.exec(`SELECT COUNT(*) AS n FROM msgs WHERE dir='to_local' AND state != 'acked'`).toArray()[0].n;
+      return { pendingToGpt, pendingToLocal };
     },
   };
 }
