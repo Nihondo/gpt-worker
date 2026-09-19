@@ -4,6 +4,8 @@
 
 **Stop Copy-Pasting ChatGPT Web Text into AI Agents**
 
+When you instruct AI agents like Codex, Claude Code, or Antigravity with "Plan with gpt-worker" or "Review with gpt-worker", the web version of ChatGPT opens and automatically executes the investigation tasks. Once the results reach the agent, implementation begins. gpt-worker acts as a message hub in this workflow.
+
 ![gpt-worker](images/gpt-worker_lead.png)
 
 **gpt-worker** is a developer workflow tool designed to ease your coding agent's 5-hour and weekly usage limits. It uses the web version of ChatGPT as the planning and review "brain", while pairing with local coding agents (such as Claude Code, Antigravity, or Codex) or yourself as the execution "hands" to edit files and run tests.

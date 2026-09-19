@@ -4,6 +4,8 @@
 
 **ChatGPT Web のテキストをAIエージェントにコピペするのをやめよう**
 
+Codex, Claude Code, Antigravity などの AI エージェントに「gpt-workerで計画して」「gpt-workerでレビューして」と依頼すると、Web 版 ChatGPT が開いて、調査タスクが自動実行されます。エージェントに結果が届きしだい、実装を開始します。gpt-worker はメッセージハブとして機能します。
+
 ![gpt-worker](images/gpt-worker_lead.png)
 
 **gpt-worker** は、エージェントの5h / 週ごとの利用制限を軽減するため、Web ブラウザ版の ChatGPT を「計画・レビュー役」として使い、手元のローカルエージェント（Claude Code、Antigravity、Codex など）やあなた自身が「実行役（手足）」としてコードを編集・テストする開発支援ツールです。
