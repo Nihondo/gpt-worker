@@ -2,7 +2,7 @@
 // compatible fallback). Skips entirely when neither is on PATH, since CI or
 // a contributor's machine may not have one installed — betterleaks/gitleaks
 // is a required *runtime* dependency for gpt-worker itself (see
-// bridge/cli.mjs's cmdStart, which refuses to start without it), but is not
+// bridge/cli-daemon.mjs's cmdStart, which refuses to start without it), but is not
 // declared a required *dev/test* dependency here.
 //
 // The fail-closed behavior when no scanner is available (the case this

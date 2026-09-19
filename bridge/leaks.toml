@@ -8,7 +8,7 @@
 # was implemented from for the corpus and results. Do not add a rule here
 # that duplicates a built-in one (e.g. an OpenAI/Anthropic/GitHub key
 # pattern); that only produces duplicate findings and a second place for the
-# pattern to go stale. `bridge/cli.mjs`'s startup check enforces that the
+# pattern to go stale. `bridge/cli-daemon.mjs`'s startup check enforces that the
 # resolved rule count does not regress below what useDefault alone provides.
 
 title = "gpt-worker egress rules"

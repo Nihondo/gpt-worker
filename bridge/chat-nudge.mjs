@@ -1,19 +1,19 @@
 // Browser "nudge" orchestration: everything involved in getting ChatGPT to
-// notice a queued task/report, extracted out of bridge/cli.mjs
+// notice a queued task/report, kept separate from the CLI facade
 // (docs/plans/queue-dashboard.md, step 9) so it can be called from two
 // places with identical semantics:
-//   - bridge/cli.mjs's cmdTask/cmdHandoff (the existing CLI path, stdout
+//   - bridge/cli-task.mjs's cmdTask/cmdHandoff (the existing CLI path, stdout
 //     visible to whoever ran the command directly), and
 //   - the daemon's dashboard_task_created RPC handler (bridge/link.mjs),
 //     reached when a task is created through the Web dashboard rather than
 //     the CLI — stdout there is discarded (detached process), so its
-//     `log` callback routes through appendLog() instead. See cmdStart's
-//     `--__daemon` wiring in cli.mjs.
+//     `log` callback routes through appendLog() instead. See
+//     cli-daemon.mjs's cmdStart `--__daemon` wiring.
 //
 // Every pure helper here is unit-tested via tests/cli-parse-args.test.mjs,
-// which imports them by name from bridge/cli.mjs — cli.mjs re-exports this
-// module's public names verbatim (`export * from "./chat-nudge.mjs"`) so
-// that import path keeps working unchanged.
+// which imports them by name from bridge/cli.mjs — the facade explicitly
+// re-exports this module's public names so that import path keeps working
+// unchanged.
 
 import { execFileSync } from "node:child_process";
 import { updateWorkerConfigAtomic } from "./state.mjs";

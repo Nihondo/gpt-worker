@@ -227,13 +227,13 @@ export class BridgeLink {
     // or failed nudge is never visible to the DO as an RPC timeout, and
     // never reverses the already-authoritative task creation. Any callback
     // failure is the callback's own responsibility to log (see
-    // cmdStart's --__daemon wiring in cli.mjs); it is never surfaced back
+    // cli-daemon.mjs's cmdStart --__daemon wiring); it is never surfaced back
     // through this RPC.
     if (method === "dashboard_task_created") {
       this.reply(rid, true, {});
       try {
         // Swallow both a synchronous throw and an async rejection here —
-        // the real callback (cli.mjs's handleDashboardTaskCreated) already
+        // the real callback (cli-daemon.mjs's handleDashboardTaskCreated) already
         // catches its own errors and logs them via appendLog(), but this
         // handler must not depend on every caller doing that: a callback
         // that throws must never turn into an unhandled rejection on this
