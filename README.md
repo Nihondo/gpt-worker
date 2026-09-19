@@ -331,7 +331,7 @@ Open the `WebUI URL` (`https://<your-worker>.workers.dev/dashboard/hub`) and log
 
 What it can and can't do:
 - **Can do**: browse pending messages and full task exchange history with timestamps, ack or discard messages, view and edit guidance or body limits, view/edit/clear browser settings (shared ChatGPT Project URL, workspace override, conversation URL), start new tasks from the browser (available from both the per-workspace and hub dashboards).
-- **Can't do (current design)**: real-time push updates (the dashboard auto-polls every ~10s; it does not hold a WebSocket open to the browser).
+- **Can't do (current design)**: real-time push updates (the dashboard uses adaptive polling when visible: ~30s while active, ~2m when idle, and ~60s for the Hub workspace list, paused while hidden; it does not hold an open WebSocket push connection to the browser yet).
 - Retention follows standard policies: an acked message is removed after 7 days, and completed task history after 30 days.
 
 A workspace's own dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`). A hub dashboard session is revoked immediately if you rotate the shared hub token (`gpt-worker rotate --hub`) — see [Data Retention](#data-retention).

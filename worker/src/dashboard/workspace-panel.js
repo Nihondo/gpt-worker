@@ -51,6 +51,7 @@ export function createWorkspacePanel(adapter) {
   }
 
   function setActivityTab(which) {
+    var changed = state.activitySubview !== which;
     state.activitySubview = which;
     node("tab-tasks").setAttribute("aria-selected", which === "tasks" ? "true" : "false");
     node("tab-messages").setAttribute("aria-selected", which === "messages" ? "true" : "false");
@@ -59,11 +60,16 @@ export function createWorkspacePanel(adapter) {
     node("messages-list-col").hidden = which !== "messages";
     node("messages-detail").hidden = which !== "messages";
     closeDetail();
+    if (changed && currentTarget) {
+      if (which === "tasks") loadTasks(currentTarget, false);
+      else if (which === "messages") loadMessages(currentTarget, false);
+    }
   }
   node("tab-tasks").addEventListener("click", function () { setActivityTab("tasks"); });
   node("tab-messages").addEventListener("click", function () { setActivityTab("messages"); });
 
   function renderOverview(data) {
+    var prevActive = Boolean(state.activeTaskId);
     var overview = node("overview"); clearEl(overview);
     var row = el("div", { className: "row" });
     row.appendChild(el("span", { text: "Bridge: " + (data.connected ? "connected" : "not connected") }));
@@ -74,6 +80,9 @@ export function createWorkspacePanel(adapter) {
     else { state.activeTaskId = null; taskLine.textContent = "No active task."; }
     overview.appendChild(taskLine);
     overview.appendChild(el("p", { className: "meta", text: "Guidance set: " + (data.guidanceSet ? "yes" : "no") + " · Body limit: " + data.maxBodyBytes + " bytes" }));
+    if (adapter.onActivityStateChanged && prevActive !== Boolean(state.activeTaskId)) {
+      adapter.onActivityStateChanged(Boolean(state.activeTaskId), currentTarget);
+    }
   }
   function loadOverview(target) { return request(target, "/overview").then(function (res) { if (res.ok && isCurrent(target)) renderOverview(res.body); }); }
   function loadGuidance(target) { return request(target, "/guidance").then(function (res) { if (res.ok && isCurrent(target)) node("guidance-text").value = res.body.guidance || ""; }); }
@@ -180,8 +189,14 @@ export function createWorkspacePanel(adapter) {
   node("messages-load-more").addEventListener("click", function () { if (currentTarget) loadMessages(currentTarget, true); });
 
   function loadAll() { var target = currentTarget; if (!target) return; return Promise.all([loadOverview(target), loadGuidance(target), loadLimits(target), loadBrowserSettings(target), loadMessages(target, false), loadTasks(target, false)]); }
-  function pollActivity() { var target = currentTarget; if (!target) return; return Promise.all([loadOverview(target), loadMessages(target, false), loadTasks(target, false)]); }
+  function pollActivity() {
+    var target = currentTarget;
+    if (!target) return;
+    var subview = state.activitySubview === "messages" ? loadMessages(target, false) : loadTasks(target, false);
+    return Promise.all([loadOverview(target), subview]);
+  }
   function refreshAll() { return loadAll(); }
+  function hasActiveTask() { return Boolean(state.activeTaskId); }
   function activate(target, options) { currentTarget = target; reset(); if (options && options.clearView) clearPanel(); setActivityTab("tasks"); return loadAll(); }
-  return { activate: activate, loadAll: loadAll, pollActivity: pollActivity, refreshAll: refreshAll };
+  return { activate: activate, loadAll: loadAll, pollActivity: pollActivity, refreshAll: refreshAll, hasActiveTask: hasActiveTask };
 }

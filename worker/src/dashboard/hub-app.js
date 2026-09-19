@@ -1,7 +1,9 @@
 (function () {
   "use strict";
   var HUB_BASE = "/dashboard/hub";
-  var POLL_MS = 10000;
+  var LIST_POLL_MS = 60000;
+  var ACTIVE_POLL_MS = 30000;
+  var IDLE_POLL_MS = 120000;
   function api(base, path, options) {
     return fetch(base + path, Object.assign({ credentials: "same-origin" }, options || {})).then(function (res) {
       return res.json().catch(function () { return {}; }).then(function (body) { return { ok: res.ok, status: res.status, body: body }; });
@@ -58,6 +60,64 @@
       onTaskStarted: function () { loadWorkspaceList(); },
       discardMessageRefresh: "all",
     });
+
+    var listTimer = null;
+    var listPolling = false;
+    function clearListTimer() {
+      if (listTimer) { clearTimeout(listTimer); listTimer = null; }
+    }
+    function scheduleNextList() {
+      clearListTimer();
+      if (document.hidden) return;
+      listTimer = setTimeout(function () { runListPoll(); }, LIST_POLL_MS);
+    }
+    function runListPoll() {
+      clearListTimer();
+      if (document.hidden || listPolling) return;
+      listPolling = true;
+      Promise.resolve(loadWorkspaceList()).then(function () {
+        listPolling = false;
+        if (!document.hidden) scheduleNextList();
+      }, function () {
+        listPolling = false;
+        if (!document.hidden) scheduleNextList();
+      });
+    }
+
+    var activityTimer = null;
+    var activityPolling = false;
+    function clearActivityTimer() {
+      if (activityTimer) { clearTimeout(activityTimer); activityTimer = null; }
+    }
+    function scheduleNextActivity() {
+      clearActivityTimer();
+      if (document.hidden || !state.workspaceId) return;
+      var delay = panel.hasActiveTask() ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+      activityTimer = setTimeout(function () { runActivityPoll(); }, delay);
+    }
+    function runActivityPoll() {
+      clearActivityTimer();
+      if (document.hidden || !state.workspaceId || activityPolling) return;
+      activityPolling = true;
+      Promise.resolve(panel.pollActivity()).then(function () {
+        activityPolling = false;
+        if (!document.hidden && state.workspaceId) scheduleNextActivity();
+      }, function () {
+        activityPolling = false;
+        if (!document.hidden && state.workspaceId) scheduleNextActivity();
+      });
+    }
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        clearListTimer();
+        clearActivityTimer();
+      } else {
+        runListPoll();
+        if (state.workspaceId) runActivityPoll();
+      }
+    });
+
     function selectWorkspace(id, name) {
       state.workspaceId = id; updateWorkspaceSelection(id); state.selectionGen += 1;
       var target = Object.freeze({ workspaceId: id, generation: state.selectionGen });
@@ -65,7 +125,17 @@
       document.getElementById("guidance-text").value = ""; document.getElementById("limits-value").value = ""; document.getElementById("chat-project-override").value = ""; document.getElementById("conversation-url").value = ""; document.getElementById("new-task-status").textContent = "";
       document.getElementById("chat-project-override-error").hidden = true; document.getElementById("conversation-url-error").hidden = true;
       Array.prototype.forEach.call(document.querySelectorAll(".hub-gated"), function (gated) { gated.hidden = false; });
-      panel.activate(target, { clearView: true });
+      clearActivityTimer();
+      var activation = panel.activate(target, { clearView: true });
+      activation.then(function () {
+        if (state.workspaceId === id && state.selectionGen === target.generation) {
+          if (!document.hidden) scheduleNextActivity();
+        }
+      }, function () {
+        if (state.workspaceId === id && state.selectionGen === target.generation) {
+          if (!document.hidden) scheduleNextActivity();
+        }
+      });
     }
     function loadHubBrowserSettings() { return hubApi("/api/browser-settings").then(function (res) { if (res.ok) document.getElementById("hub-shared-project-url").value = res.body.chatUrl || ""; }); }
     function saveHubBrowserSettings(value, failure) {
@@ -76,7 +146,11 @@
     }
     document.getElementById("hub-shared-project-save").addEventListener("click", function () { saveHubBrowserSettings(document.getElementById("hub-shared-project-url").value.trim() || null, "Failed to save shared project URL."); });
     document.getElementById("hub-shared-project-clear").addEventListener("click", function () { saveHubBrowserSettings(null, "Failed to clear shared project URL."); });
-    loadWorkspaceList(); loadHubBrowserSettings();
-    setInterval(function () { loadWorkspaceList(); if (state.workspaceId) panel.refreshAll(); }, POLL_MS);
+    loadWorkspaceList().then(function () {
+      if (!document.hidden) scheduleNextList();
+    }, function () {
+      if (!document.hidden) scheduleNextList();
+    });
+    loadHubBrowserSettings();
   });
 })();

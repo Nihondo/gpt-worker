@@ -1526,7 +1526,33 @@ describe("dashboard: Phase 4 browser ESM/controller boundaries", () => {
     assert.match(WORKSPACE_DASHBOARD_APP_JS, /panel\.pollActivity\(\)/);
     assert.match(HUB_DASHBOARD_APP_JS, /discardMessageRefresh: "all"/);
     assert.match(HUB_DASHBOARD_APP_JS, /onTaskStarted: function \(\) \{ loadWorkspaceList\(\); \}/);
-    assert.match(HUB_DASHBOARD_APP_JS, /loadWorkspaceList\(\); if \(state\.workspaceId\) panel\.refreshAll\(\);/);
+    assert.match(HUB_DASHBOARD_APP_JS, /panel\.pollActivity\(\)/);
+    assert.doesNotMatch(HUB_DASHBOARD_APP_JS, /panel\.refreshAll\(\)/);
+  });
+
+  test("direct and hub entries adapt cadence to visibility and task activity using completion-driven scheduling", () => {
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      assert.match(js, /visibilitychange/);
+      assert.match(js, /document\.hidden/);
+      assert.match(js, /ACTIVE_POLL_MS\s*=\s*30000/);
+      assert.match(js, /IDLE_POLL_MS\s*=\s*120000/);
+      assert.match(js, /setTimeout\(/);
+      assert.doesNotMatch(js, /setInterval\(/);
+      assert.match(js, /panel\.hasActiveTask\(\)/);
+    });
+    assert.match(HUB_DASHBOARD_APP_JS, /LIST_POLL_MS\s*=\s*60000/);
+    assert.match(HUB_DASHBOARD_APP_JS, /scheduleNextList/);
+    assert.match(HUB_DASHBOARD_APP_JS, /scheduleNextActivity/);
+  });
+
+  test("shared panel optimizes activity polling by subview and immediately catches up on tab switch", () => {
+    assert.match(WORKSPACE_PANEL_JS, /function pollActivity\(\)/);
+    assert.match(WORKSPACE_PANEL_JS, /state\.activitySubview === "messages"/);
+    assert.match(WORKSPACE_PANEL_JS, /function hasActiveTask\(\)/);
+    assert.match(WORKSPACE_PANEL_JS, /Boolean\(state\.activeTaskId\)/);
+    const tabSwitchBody = WORKSPACE_PANEL_JS.slice(WORKSPACE_PANEL_JS.indexOf("function setActivityTab"), WORKSPACE_PANEL_JS.indexOf('node("tab-tasks").addEventListener'));
+    assert.match(tabSwitchBody, /loadTasks\(currentTarget, false\)/);
+    assert.match(tabSwitchBody, /loadMessages\(currentTarget, false\)/);
   });
 
   test("panel applies adapter and task-history request generations together, including recursive pages", () => {
