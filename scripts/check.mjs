@@ -10,8 +10,15 @@ const files = [
     .readdirSync("bridge")
     .filter((f) => f.endsWith(".mjs"))
     .map((f) => path.join("bridge", f)),
-  "worker/src/index.js",
-  "worker/src/instructions.js",
+  // worker/src root: index.js, instructions.js, and every worker-*.js /
+  // bridge-schema.js helper module extracted from index.js. Enumerated
+  // dynamically (not a fixed path list) so a future root-level module is
+  // covered automatically, without also picking up the dashboard/
+  // subdirectory handled separately below.
+  ...fs
+    .readdirSync("worker/src", { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+    .map((entry) => path.join("worker/src", entry.name)),
   // Browser-side dashboard assets: imported as opaque Text-module strings
   // (see worker/wrangler.jsonc's `rules`), so nothing else parses these as
   // JS — check their syntax here instead.

@@ -48,6 +48,22 @@ import WORKSPACE_DASHBOARD_LOGIN_HTML from "./dashboard/workspace-login.html";
 import WORKSPACE_DASHBOARD_SHELL_HTML from "./dashboard/workspace-shell.html";
 import HUB_DASHBOARD_LOGIN_HTML from "./dashboard/hub-login.html";
 import HUB_DASHBOARD_SHELL_HTML from "./dashboard/hub-shell.html";
+// Stateless helpers extracted from this file (see each module's own header
+// comment for its scope and dependency rules) — index.js depends on them,
+// never the reverse.
+import { isValidWorkspaceId, constantTimeEqual, checkOrigin, json, byteLength, readJsonWithLimit, base64UrlEncode } from "./worker-http.js";
+import { oauthResourceUrl, oauthProtectedResourceMetadataUrl, oauthProtectedResourceMetadata, oauthAuthorizationServerMetadata } from "./worker-oauth-http.js";
+import {
+  checkDashboardOrigin,
+  dashboardHtmlHeaders,
+  dashboardJsHeaders,
+  dashboardCssHeaders,
+  dashboardApiHeaders,
+  encodeDashboardCursor,
+  decodeDashboardCursor,
+  fillDashboardTemplate,
+} from "./worker-dashboard-http.js";
+import { initializeBridgeSchema } from "./bridge-schema.js";
 
 // Tools answered locally by the hub (no workspace_id involved) instead of
 // being relayed to a workspace's Durable Object. Excluded from the
@@ -82,7 +98,6 @@ const HUB_TOOLS = [
 
 const PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-const ALLOWED_ORIGINS = new Set(["https://chatgpt.com", "https://chat.openai.com"]);
 const RPC_TIMEOUT_MS = 20_000; // local WS round-trip budget
 const POLL_MAX_MS = 20_000; // CLI long-poll budget
 const LEASE_MS = 120_000; // next_task lease before it can be re-claimed
@@ -132,21 +147,12 @@ const DASHBOARD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const DASHBOARD_COOKIE_NAME = "gw_dash_session";
 const DASHBOARD_HISTORY_DEFAULT_LIMIT = 50;
 const DASHBOARD_HISTORY_MAX_LIMIT = 100;
-const WORKSPACE_ID_RE = /^[0-9a-f]{16}$/;
 const OAUTH_CODE_TTL_MS = 5 * 60 * 1000; // authorization code: 5 min
 const OAUTH_ACCESS_TTL_MS = 60 * 60 * 1000; // access token: 1 hour
 const OAUTH_REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000; // refresh token: 30 days
 const PKCE_CHALLENGE_RE = /^[A-Za-z0-9\-_]{43}$/; // base64url(SHA-256(...)), unpadded, always 43 chars
 const PKCE_VERIFIER_RE = /^[A-Za-z0-9\-._~]{43,128}$/; // RFC 7636 unreserved charset
 const HUB_DO_NAME = "gpt-worker-hub";
-// "default" is the one pre-existing exception: the original single-tenant
-// deployment's Durable Object was idFromName("default") verbatim, so the
-// migration path (see BridgeDO.migrateDefault) must be able to address that
-// exact same instance under the new multi-tenant routing. Every workspace
-// provisioned from here on gets a fresh 16-hex-char id instead.
-function isValidWorkspaceId(id) {
-  return id === "default" || WORKSPACE_ID_RE.test(id);
-}
 
 // ---------------------------------------------------------------------------
 // Top-level Worker: validate path shape, then hand off to the right
@@ -355,31 +361,10 @@ function randomHex(bytes) {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function constantTimeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string") return false;
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-function checkOrigin(request) {
-  const origin = request.headers.get("origin");
-  if (!origin) return true; // server-to-server calls (ChatGPT backend, curl, CLI) send none
-  return ALLOWED_ORIGINS.has(origin);
-}
-
 function checkProtocolVersion(request) {
   const v = request.headers.get("mcp-protocol-version");
   if (!v) return DEFAULT_PROTOCOL_VERSION;
   return PROTOCOL_VERSIONS.has(v) ? v : null;
-}
-
-function json(body, status = 200, headers = {}) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...headers },
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -395,45 +380,6 @@ function json(body, status = 200, headers = {}) {
 // BridgeDO.fetch), never exposed at a public URL directly. The JSON-RPC
 // handlers remain separate from OAuth routing.
 // ---------------------------------------------------------------------------
-
-function oauthResourceUrl(requestUrl, workspaceId) {
-  const u = new URL(requestUrl);
-  u.pathname = workspaceId ? `/mcp/${workspaceId}` : "/mcp";
-  u.search = "";
-  u.hash = "";
-  return u.toString();
-}
-
-function oauthProtectedResourceMetadataUrl(requestUrl, workspaceId) {
-  const u = new URL(requestUrl);
-  u.pathname = workspaceId ? `/.well-known/oauth-protected-resource/mcp/${workspaceId}` : "/.well-known/oauth-protected-resource/mcp";
-  u.search = "";
-  u.hash = "";
-  return u.toString();
-}
-
-function oauthProtectedResourceMetadata(requestUrl, workspaceId) {
-  const origin = new URL(requestUrl).origin;
-  return {
-    resource: oauthResourceUrl(requestUrl, workspaceId),
-    authorization_servers: [origin],
-  };
-}
-
-function oauthAuthorizationServerMetadata(requestUrl) {
-  const origin = new URL(requestUrl).origin;
-  return {
-    issuer: origin,
-    authorization_endpoint: `${origin}/oauth/authorize`,
-    token_endpoint: `${origin}/oauth/token`,
-    registration_endpoint: `${origin}/oauth/register`,
-    response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256"],
-    token_endpoint_auth_methods_supported: ["none"],
-    authorization_response_iss_parameter_supported: true,
-  };
-}
 
 /** Parses an OAuth `resource` parameter (RFC 8707) into the Durable Object
  *  that owns it. Only this Worker's own canonical resource URLs are valid:
@@ -463,12 +409,6 @@ function resolveOAuthResource(resourceParam, requestUrl) {
 async function sha256Hex(value) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function base64UrlEncode(bytes) {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /** RFC 7636 S256: BASE64URL(SHA256(ASCII(code_verifier))). */
@@ -681,73 +621,6 @@ function dashboardSessionCookie(workspaceId, value, maxAgeSeconds) {
   ].join("; ");
 }
 
-/** Strict same-origin check for dashboard mutations (§"状態変更 API の CSRF
- *  対策"). Deliberately not the existing checkOrigin(): that one treats a
- *  missing Origin header as "allow" (fine for server-to-server callers with
- *  no ambient credential — see its own comment), but the dashboard's
- *  session cookie *is* ambient browser-sent authority, so a missing Origin
- *  here must fail closed instead. */
-function checkDashboardOrigin(request) {
-  const origin = request.headers.get("origin");
-  if (!origin) return false;
-  try {
-    return origin === new URL(request.url).origin;
-  } catch {
-    return false;
-  }
-}
-
-function dashboardHtmlHeaders() {
-  return {
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": "no-store",
-    "referrer-policy": "no-referrer",
-    // script-src 'self' (not the OAuth consent page's script-less CSP,
-    // which can't run the dashboard's polling/kanban JS) — see
-    // Dashboard scripts and styles are fixed same-origin Text modules.
-    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-  };
-}
-
-function dashboardJsHeaders() {
-  return { "content-type": "application/javascript; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
-}
-
-function dashboardCssHeaders() {
-  return { "content-type": "text/css; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
-}
-
-function dashboardApiHeaders() {
-  return { "cache-control": "no-store", "referrer-policy": "no-referrer" };
-}
-
-function base64UrlDecode(str) {
-  const normalized = String(str).replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-/** Opaque keyset-pagination cursor (§"pagination の API 契約", U4): encodes
- *  the (timestamp, tie-breaker id) of the last row on a page. Callers pass it
- *  straight back; nothing outside this file interprets its contents. */
-function encodeDashboardCursor(t, id) {
-  return base64UrlEncode(new TextEncoder().encode(JSON.stringify({ t, id })));
-}
-
-function decodeDashboardCursor(raw) {
-  if (typeof raw !== "string" || !raw) return null;
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(base64UrlDecode(raw)));
-    if (!parsed || !Number.isFinite(parsed.t) || typeof parsed.id !== "string" || !parsed.id) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
 /** The GET /oauth/authorize consent form (see
  *  BridgeDO.renderOAuthAuthorizeForm): a plain, dependency-free HTML page —
  *  no framework, no external script/style. Every already-validated OAuth
@@ -878,22 +751,6 @@ ${hiddenFields}
 // page this one needs browser assets (polling plus styles), so its CSP allows
 // same-origin script/style modules, served separately rather than inlined.
 // ---------------------------------------------------------------------------
-
-// Fills a dashboard HTML Text-module template's `{{MARKER}}` placeholders.
-// Uses split/join (never String#replace with a pattern string) so a `$`
-// inside a value (e.g. `$&`) can never be reinterpreted as a replacement
-// pattern. Throws if any `{{`/`}}` marker syntax remains unresolved, so a
-// mistyped/missing marker can never reach the browser silently.
-function fillDashboardTemplate(template, values) {
-  let out = template;
-  for (const [marker, value] of Object.entries(values)) {
-    out = out.split(`{{${marker}}}`).join(value);
-  }
-  if (out.includes("{{") || out.includes("}}")) {
-    throw new Error("dashboard template: unresolved {{marker}} after fill");
-  }
-  return out;
-}
 
 function renderDashboardLoginHtml(workspaceId) {
   return fillDashboardTemplate(WORKSPACE_DASHBOARD_LOGIN_HTML, {
@@ -1065,10 +922,6 @@ function toolError(code, message) {
   return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: true };
 }
 
-function byteLength(str) {
-  return new TextEncoder().encode(str).length;
-}
-
 /** Validates and makes a title safe for compact, one-line list rendering. */
 function normalizeTaskTitle(raw) {
   if (typeof raw !== "string") return null;
@@ -1126,49 +979,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Reads and JSON-parses a request body while enforcing maxBytes *during*
- *  the read — not just by checking Content-Length (absent for chunked
- *  requests, and not to be trusted anyway) and not just by inspecting a
- *  field's length after the whole body has already been buffered and
- *  parsed. Returns { tooLarge } if the cap is hit, aborting the read early;
- *  otherwise { value } (parsed JSON) or { parseError: true }. */
-async function readJsonWithLimit(request, maxBytes) {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength && Number(contentLength) > maxBytes) return { tooLarge: true };
-
-  const reader = request.body ? request.body.getReader() : null;
-  if (!reader) return { value: undefined };
-
-  let total = 0;
-  const chunks = [];
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      try {
-        await reader.cancel();
-      } catch {
-        /* best-effort */
-      }
-      return { tooLarge: true };
-    }
-    chunks.push(value);
-  }
-
-  const buf = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    buf.set(c, offset);
-    offset += c.byteLength;
-  }
-  try {
-    return { value: JSON.parse(new TextDecoder().decode(buf)) };
-  } catch {
-    return { parseError: true };
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Durable Object: queue + WebSocket relay.
 // ---------------------------------------------------------------------------
@@ -1181,170 +991,7 @@ export class BridgeDO {
     this.pending = new Map(); // rid -> { resolve, timer }
     this.rateBuckets = new Map(); // key -> number[] (best-effort; resets on hibernation restart)
 
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS msgs (
-        message_id  TEXT PRIMARY KEY,
-        dir         TEXT NOT NULL,       -- 'to_gpt' | 'to_local'
-        task_id     TEXT NOT NULL,
-        iteration   INTEGER NOT NULL,
-        kind        TEXT NOT NULL,       -- INIT/EXECUTED/PLAN/DONE/BLOCKED
-        title       TEXT,
-        body        TEXT NOT NULL,
-        state       TEXT NOT NULL,       -- 'pending' | 'leased' | 'acked'
-        lease_until INTEGER,
-        created_at  INTEGER NOT NULL
-      )
-    `);
-    // Existing Durable Objects already have the pre-title `msgs` table.
-    const msgColumns = this.sql.exec(`PRAGMA table_info('msgs')`).toArray();
-    let needsMsgTitleBackfill = false;
-    if (!msgColumns.some((column) => column.name === "title")) {
-      this.sql.exec(`ALTER TABLE msgs ADD COLUMN title TEXT`);
-      needsMsgTitleBackfill = true;
-    }
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_q ON msgs(dir, state, created_at)`);
-
-    // Workflow state is deliberately separate from the delivery queue. Queue
-    // rows are short-lived transport records; tasks are the durable source of
-    // truth that a new local bridge uses to resume after a restart.
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        task_id          TEXT PRIMARY KEY,
-        goal             TEXT NOT NULL,
-        title            TEXT,
-        iteration        INTEGER NOT NULL,
-        protocol_state   TEXT NOT NULL,
-        waiting_for      TEXT NOT NULL,
-        task_started_at  INTEGER NOT NULL,
-        updated_at       INTEGER NOT NULL,
-        terminal_summary TEXT
-      )
-    `);
-    // Existing Durable Objects already have the pre-title `tasks` table.
-    // SQLite's CREATE TABLE IF NOT EXISTS does not add columns, so migrate
-    // only those instances. Old rows intentionally remain NULL and use the
-    // goal preview fallback in every read surface.
-    const taskColumns = this.sql.exec(`PRAGMA table_info('tasks')`).toArray();
-    if (!taskColumns.some((column) => column.name === "title")) {
-      this.sql.exec(`ALTER TABLE tasks ADD COLUMN title TEXT`);
-    }
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(protocol_state, updated_at DESC)`);
-
-    // Backfill INIT messages from tasks.title only after both msgs.title and
-    // tasks.title are guaranteed to exist, protecting direct upgrades from
-    // dormant DO instances that lacked title in both tables.
-    if (needsMsgTitleBackfill) {
-      this.sql.exec(`
-        UPDATE msgs
-        SET title = (SELECT title FROM tasks WHERE tasks.task_id = msgs.task_id)
-        WHERE kind = 'INIT' AND title IS NULL AND (SELECT title FROM tasks WHERE tasks.task_id = msgs.task_id) IS NOT NULL
-      `);
-    }
-
-    // Non-secret, Workspace-scoped preferences. Keeping these here avoids
-    // using state.json as an accidental second task-state store. Secrets stay
-    // in the dedicated secrets table above.
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)`);
-
-    // This instance's own gpt/link/cli tokens (one workspace = one DO = one
-    // row per key here). Set once via /admin's provision or migrate_default;
-    // never a Worker Secret, since a Worker Secret is shared by every
-    // workspace's DO instance and these must not be.
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS secrets (k TEXT PRIMARY KEY, v TEXT NOT NULL)`);
-
-    // OAuth 2.1 resource-server state (Phase 2 of
-    // docs/plans/oauth-mcp-authentication.md). Raw codes/tokens are never
-    // stored — only their SHA-256 hash — and the raw value is returned to
-    // the caller exactly once, at issuance time.
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
-        code_hash      TEXT PRIMARY KEY,
-        client_id      TEXT NOT NULL,
-        redirect_uri   TEXT NOT NULL,
-        resource       TEXT NOT NULL,
-        scope          TEXT NOT NULL,
-        code_challenge TEXT NOT NULL,
-        expires_at     INTEGER NOT NULL,
-        created_at     INTEGER NOT NULL
-      )
-    `);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS oauth_access_tokens (
-        token_hash  TEXT PRIMARY KEY,
-        client_id   TEXT NOT NULL,
-        resource    TEXT NOT NULL,
-        scope       TEXT NOT NULL,
-        family_id   TEXT NOT NULL,
-        expires_at  INTEGER NOT NULL,
-        created_at  INTEGER NOT NULL,
-        revoked_at  INTEGER
-      )
-    `);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_oauth_access_family ON oauth_access_tokens(family_id)`);
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
-        token_hash  TEXT PRIMARY KEY,
-        family_id   TEXT NOT NULL,
-        client_id   TEXT NOT NULL,
-        resource    TEXT NOT NULL,
-        scope       TEXT NOT NULL,
-        expires_at  INTEGER NOT NULL,
-        created_at  INTEGER NOT NULL,
-        used_at     INTEGER,
-        revoked_at  INTEGER
-      )
-    `);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_oauth_refresh_family ON oauth_refresh_tokens(family_id)`);
-
-    // Dynamic Client Registration records (Phase 3). Public clients only —
-    // no client secret, since this Worker authenticates the resource owner
-    // (see checkResourceOwnerToken), not the OAuth client itself.
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS oauth_clients (
-        client_id                  TEXT PRIMARY KEY,
-        redirect_uris_json         TEXT NOT NULL,
-        token_endpoint_auth_method TEXT NOT NULL,
-        client_name                TEXT,
-        created_at                 INTEGER NOT NULL
-      )
-    `);
-
-    // Used only by the dedicated hub Durable Object. Keeping the registry in
-    // the same class makes it easy to evolve without another Worker binding;
-    // individual workspace instances simply leave this table empty.
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS workspace_registry (
-        workspace_id TEXT PRIMARY KEY,
-        name         TEXT NOT NULL,
-        registered_at INTEGER NOT NULL
-      )
-    `);
-
-    // Web dashboard sessions (docs/plans/queue-dashboard.md). Deliberately a
-    // separate table from `secrets`: this holds short-lived, hashed,
-    // revocable session tokens issued *after* a one-time owner-token login
-    // (see checkResourceOwnerToken / createDashboardSession), never the
-    // owner token itself. Swept by alarm() (expired rows), deprovision()
-    // (all rows) and rotateSecret("gpt_token") (all rows, since a leaked
-    // owner token rotation should also cut off dashboard sessions already
-    // issued under the old value).
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS dashboard_sessions (
-        session_hash TEXT PRIMARY KEY,
-        expires_at   INTEGER NOT NULL,
-        created_at   INTEGER NOT NULL
-      )
-    `);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expiry ON dashboard_sessions(expires_at)`);
-
-    // Keyset-pagination index for the dashboard's message/task history APIs
-    // (§"pagination の API 契約", U4) — the existing idx_q/idx_tasks_active
-    // indices are shaped for the live queue/active-task lookups, not a
-    // direction-agnostic, all-states history scan ordered by
-    // (created_at/updated_at, tie-breaker id).
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_history ON msgs(created_at DESC, message_id DESC)`);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_task_history ON msgs(task_id, created_at DESC, message_id DESC)`);
-    this.sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(updated_at DESC, task_id DESC)`);
+    initializeBridgeSchema(this.sql);
 
     ctx.blockConcurrencyWhile(async () => {
       const current = await ctx.storage.getAlarm();
