@@ -16,8 +16,8 @@ body {
 .dashboard-header, .workspace-context, .card { background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line); box-shadow: 0 16px 35px rgb(50 57 100 / 8%); }
 .dashboard-header { border-radius: 22px; padding: 18px 22px; margin-bottom: 18px; }
 .hub-settings-body { padding-top: 10px; }
-.brand-lockup { display: flex; align-items: center; gap: 12px; }
-.brand-mark { display: grid; place-items: center; inline-size: 36px; block-size: 36px; border-radius: 12px; color: white; font-weight: 800; background: linear-gradient(135deg, var(--primary), var(--accent)); box-shadow: 0 8px 20px rgb(91 92 226 / 32%); }
+.brand-lockup { display: flex; align-items: center; gap: 14px; }
+.brand-mark { display: block; inline-size: 52px; block-size: 52px; border-radius: 13px; flex-shrink: 0; object-fit: contain; box-shadow: 0 4px 14px rgb(0 0 0 / 18%); }
 h1 { font-size: clamp(1.05rem, 2vw, 1.38rem); letter-spacing: -.03em; margin: 0; }
 h1 span { color: var(--primary); font-weight: 550; }
 h2 { font-size: 1rem; margin: 0; letter-spacing: -.015em; }

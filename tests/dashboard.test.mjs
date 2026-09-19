@@ -947,14 +947,46 @@ describe("dashboard: rate-limit bucket isolation", () => {
 describe("dashboard: response headers", () => {
   test("the HTML shell permits only same-origin scripts and styles, with no-store and no-referrer", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
     const res = await worker.fetch(req(`/dashboard/${workspaceId}`), env);
     assert.equal(res.headers.get("cache-control"), "no-store");
     assert.equal(res.headers.get("referrer-policy"), "no-referrer");
     const csp = res.headers.get("content-security-policy");
     assert.match(csp, /script-src 'self'/);
     assert.match(csp, /style-src 'self'/);
+    assert.match(csp, /img-src 'self'/);
     assert.doesNotMatch(csp, /(?:script|style)-src[^;]*unsafe-inline/);
+    const loginHtml = await res.text();
+    assert.match(loginHtml, /<link rel="icon" type="image\/png"/);
+
+    // Authenticated shell carries the header brand icon image
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const shellRes = await worker.fetch(req(`/dashboard/${workspaceId}`, { headers: { cookie } }), env);
+    const shellHtml = await shellRes.text();
+    assert.match(shellHtml, /<img class="brand-mark"/);
+    assert.match(shellHtml, /<link rel="icon" type="image\/png"/);
+  });
+
+  test("serves brand icon as image/png with public cache headers on workspace and hub routes", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+
+    // Workspace icon route
+    const wsIconRes = await worker.fetch(req(`/dashboard/${workspaceId}/icon.png`), env);
+    assert.equal(wsIconRes.status, 200);
+    assert.equal(wsIconRes.headers.get("content-type"), "image/png");
+    assert.equal(wsIconRes.headers.get("cache-control"), "public, max-age=86400");
+    const wsBytes = new Uint8Array(await wsIconRes.arrayBuffer());
+    assert.equal(wsBytes[0], 0x89);
+    assert.equal(wsBytes[1], 0x50); // 'P'
+    assert.equal(wsBytes[2], 0x4e); // 'N'
+    assert.equal(wsBytes[3], 0x47); // 'G'
+
+    // Hub icon route
+    const hubIconRes = await worker.fetch(req(`/dashboard/hub/icon.png`), env);
+    assert.equal(hubIconRes.status, 200);
+    assert.equal(hubIconRes.headers.get("content-type"), "image/png");
+    assert.equal(hubIconRes.headers.get("cache-control"), "public, max-age=86400");
   });
 
   test("api responses are no-store", async () => {

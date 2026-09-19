@@ -92,6 +92,7 @@ import WORKSPACE_DASHBOARD_SHELL_HTML from "./dashboard/workspace-shell.html";
 import HUB_DASHBOARD_LOGIN_HTML from "./dashboard/hub-login.html";
 import HUB_DASHBOARD_SHELL_HTML from "./dashboard/hub-shell.html";
 import { isValidWorkspaceId, json, byteLength, readJsonWithLimit } from "./worker-http.js";
+import { brandIconPngBytes } from "./brand-icon.js";
 import {
   checkDashboardOrigin,
   readDashboardSessionCookie,
@@ -101,6 +102,7 @@ import {
   dashboardHtmlHeaders,
   dashboardJsHeaders,
   dashboardCssHeaders,
+  dashboardPngHeaders,
   dashboardApiHeaders,
   encodeDashboardCursor,
   decodeDashboardCursor,
@@ -186,6 +188,7 @@ function createBridgeDashboard({
       WORKSPACE_ID: escapeHtmlValue(workspaceId),
       APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
       APP_CSS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.css`,
+      APP_ICON_URL: `/dashboard/${encodeURIComponent(workspaceId)}/icon.png`,
     });
   }
 
@@ -194,6 +197,7 @@ function createBridgeDashboard({
       WORKSPACE_ID: escapeHtmlValue(workspaceId),
       APP_JS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.js`,
       APP_CSS_URL: `/dashboard/${encodeURIComponent(workspaceId)}/app.css`,
+      APP_ICON_URL: `/dashboard/${encodeURIComponent(workspaceId)}/icon.png`,
     });
   }
 
@@ -207,11 +211,17 @@ function createBridgeDashboard({
   // -------------------------------------------------------------------------
 
   function renderHubDashboardLoginHtml() {
-    return fillDashboardTemplate(HUB_DASHBOARD_LOGIN_HTML, { APP_CSS_URL: "/dashboard/hub/app.css" });
+    return fillDashboardTemplate(HUB_DASHBOARD_LOGIN_HTML, {
+      APP_CSS_URL: "/dashboard/hub/app.css",
+      APP_ICON_URL: "/dashboard/hub/icon.png",
+    });
   }
 
   function renderHubDashboardShellHtml() {
-    return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, { APP_CSS_URL: "/dashboard/hub/app.css" });
+    return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, {
+      APP_CSS_URL: "/dashboard/hub/app.css",
+      APP_ICON_URL: "/dashboard/hub/icon.png",
+    });
   }
 
   // Dashboard sessions: lexical so the mechanism helpers below and the returned
@@ -410,6 +420,7 @@ function createBridgeDashboard({
       if (subParts.length === 1 && subParts[0] === "common-app.js") return serveDashboardAsset(request, { bucket: "dashboard-public", body: COMMON_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "workspace-panel.js") return serveDashboardAsset(request, { bucket: "dashboard-public", body: WORKSPACE_PANEL_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleDashboardAppCss(request);
+      if (subParts.length === 1 && subParts[0] === "icon.png") return serveDashboardAsset(request, { bucket: "dashboard-public", body: brandIconPngBytes(), makeHeaders: dashboardPngHeaders });
       if (subParts.length === 1 && subParts[0] === "login") return this.handleDashboardLogin(request, workspaceId);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleDashboardLogout(request, workspaceId);
       if (subParts.length === 1 && subParts[0] === "ws") return this.handleDashboardWs(request, workspaceId);
@@ -834,6 +845,7 @@ function createBridgeDashboard({
       if (subParts.length === 1 && subParts[0] === "common-app.js") return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: COMMON_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "workspace-panel.js") return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: WORKSPACE_PANEL_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleHubDashboardAppCss(request);
+      if (subParts.length === 1 && subParts[0] === "icon.png") return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: brandIconPngBytes(), makeHeaders: dashboardPngHeaders });
       if (subParts.length === 1 && subParts[0] === "login") return this.handleHubDashboardLogin(request);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleHubDashboardLogout(request);
       if (subParts.length === 1 && subParts[0] === "ws") return this.handleHubDashboardWs(request);
