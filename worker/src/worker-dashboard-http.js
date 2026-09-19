@@ -1,10 +1,58 @@
 // Dashboard support helpers (docs/plans/queue-dashboard.md): CSRF origin
-// check, fixed response header sets, opaque keyset-pagination cursors, and
+// check, session-cookie parse/build, shared 405/429 responses, fixed response header sets, opaque keyset-pagination cursors, and
 // the HTML template filler. No env/sql/BridgeDO ownership. Depends only on
 // worker-http.js's generic base64url codecs — never imports index.js (see
 // CLAUDE.md's "index.js -> domain -> pure helpers" dependency direction).
 
 import { base64UrlEncode, base64UrlDecode } from "./worker-http.js";
+
+const DASHBOARD_COOKIE_NAME = "gw_dash_session";
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (!k) continue;
+    try {
+      out[k] = decodeURIComponent(v);
+    } catch {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** The request's dashboard session cookie value (raw, unverified), or undefined. */
+function readDashboardSessionCookie(request) {
+  return parseCookies(request.headers.get("cookie"))[DASHBOARD_COOKIE_NAME];
+}
+
+/** HttpOnly + Secure + SameSite=Strict, scoped to one dashboard's path
+ *  (`/dashboard/<workspace_id>` or `/dashboard/hub`) so two dashboards'
+ *  sessions can never collide in the same browser even though the cookie name
+ *  is shared. `value: ""` + `maxAgeSeconds: 0` clears it (logout). */
+function dashboardSessionCookie(scope, value, maxAgeSeconds) {
+  return [
+    `${DASHBOARD_COOKIE_NAME}=${value}`,
+    `Path=/dashboard/${scope}`,
+    "HttpOnly",
+    "Secure",
+    "SameSite=Strict",
+    `Max-Age=${maxAgeSeconds}`,
+  ].join("; ");
+}
+
+function methodNotAllowed(allow) {
+  return new Response(null, { status: 405, headers: { allow } });
+}
+
+function rateLimitedResponse() {
+  return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
+}
 
 /** Strict same-origin check for dashboard mutations (§"状態変更 API の CSRF
  *  対策"). Deliberately not the existing checkOrigin(): that one treats a
@@ -81,6 +129,10 @@ function fillDashboardTemplate(template, values) {
 }
 
 export {
+  readDashboardSessionCookie,
+  dashboardSessionCookie,
+  methodNotAllowed,
+  rateLimitedResponse,
   checkDashboardOrigin,
   dashboardHtmlHeaders,
   dashboardJsHeaders,

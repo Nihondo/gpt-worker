@@ -62,13 +62,20 @@
 //    RETENTION_MS / TASK_RETENTION_MS (scalars, shared with alarm()),
 //    reported by dashboardOverview().
 //
-// The workspace dashboard and the hub dashboard are parallel implementations
-// in this one module: they may share mechanism (session table, cookie name,
-// dispatcher) but never authority — separate rate-limit buckets, separate
-// cookie Paths, separate DO instances/dashboard_sessions tables, and the hub
-// reaches a workspace only via the binding-only relay after its own
-// session/CSRF/rate-limit/registry-membership checks. Do not merge them here
-// (that is a later phase's job).
+// The workspace dashboard and the hub dashboard share *mechanism* but never
+// *authority*. The mechanism — asset/shell serving, login, logout, and the
+// authenticated-API gate — lives once in the lexical helpers serveDashboardAsset/
+// serveDashboardShell/loginDashboardSession/logoutDashboardSession/
+// gateDashboardApi below, alongside the session table, cookie name and
+// dispatcher. The authority provenance stays explicit and separate in the
+// handleDashboard* / handleHubDashboard* wrappers, each passing its own literal
+// rate-limit bucket names and cookie scope (workspace_id vs "hub") into those
+// helpers: separate buckets, separate cookie Paths, separate DO
+// instances/dashboard_sessions tables, and the hub reaches a workspace only via
+// the binding-only relay after its own session/CSRF/rate-limit/registry-
+// membership checks. handleDashboard and handleHubDashboard are deliberately
+// two separate routers, not one generic one; helpers never default a bucket or
+// cookie scope, so a caller can't silently inherit the wrong authority.
 //
 // dashboardApiDispatch is the one dispatcher for every per-workspace
 // dashboard operation and performs no auth itself — it must only ever be
@@ -85,6 +92,10 @@ import HUB_DASHBOARD_SHELL_HTML from "./dashboard/hub-shell.html";
 import { isValidWorkspaceId, json, byteLength, readJsonWithLimit } from "./worker-http.js";
 import {
   checkDashboardOrigin,
+  readDashboardSessionCookie,
+  dashboardSessionCookie,
+  methodNotAllowed,
+  rateLimitedResponse,
   dashboardHtmlHeaders,
   dashboardJsHeaders,
   dashboardCssHeaders,
@@ -101,46 +112,8 @@ import {
 // (see dashboardSessionCookie) so two workspaces' dashboards never collide in
 // the same browser even though they share this one cookie name.
 const DASHBOARD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-const DASHBOARD_COOKIE_NAME = "gw_dash_session";
 const DASHBOARD_HISTORY_DEFAULT_LIMIT = 50;
 const DASHBOARD_HISTORY_MAX_LIMIT = 100;
-
-// ---------------------------------------------------------------------------
-// Dashboard support helpers (docs/plans/queue-dashboard.md): cookies.
-// ---------------------------------------------------------------------------
-
-function parseCookies(header) {
-  const out = {};
-  if (!header) return out;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    const k = part.slice(0, eq).trim();
-    const v = part.slice(eq + 1).trim();
-    if (!k) continue;
-    try {
-      out[k] = decodeURIComponent(v);
-    } catch {
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
-/** HttpOnly + Secure + SameSite=Strict, scoped to this one workspace's
- *  dashboard path (see the routing comment above) so two workspaces' sessions
- *  can never collide in the same browser even though the cookie name is
- *  shared. `value: ""` + `maxAgeSeconds: 0` clears it (logout). */
-function dashboardSessionCookie(workspaceId, value, maxAgeSeconds) {
-  return [
-    `${DASHBOARD_COOKIE_NAME}=${value}`,
-    `Path=/dashboard/${workspaceId}`,
-    "HttpOnly",
-    "Secure",
-    "SameSite=Strict",
-    `Max-Age=${maxAgeSeconds}`,
-  ].join("; ");
-}
 
 /**
  * Builds the dashboard domain's operations against the narrow capabilities
@@ -236,6 +209,120 @@ function createBridgeDashboard({
     return fillDashboardTemplate(HUB_DASHBOARD_SHELL_HTML, { APP_CSS_URL: "/dashboard/hub/app.css" });
   }
 
+  // Dashboard sessions: lexical so the mechanism helpers below and the returned
+  // object's public methods (BridgeDO's delegates) share one implementation with
+  // no `this` dependency. Each DO (workspace or hub) has its own
+  // dashboard_sessions table; the same code in two DOs never shares state.
+
+  async function createSession() {
+    const raw = generateSessionToken();
+    const hash = await hashSessionToken(raw);
+    const now = Date.now();
+    sql.exec(`INSERT INTO dashboard_sessions (session_hash, expires_at, created_at) VALUES (?, ?, ?)`, hash, now + DASHBOARD_SESSION_TTL_MS, now);
+    return { raw, expiresAt: now + DASHBOARD_SESSION_TTL_MS };
+  }
+
+  /** Also opportunistically deletes an already-expired row it happens to hit,
+   *  rather than waiting for the next alarm() sweep — cheap, and keeps a
+   *  just-expired session from working until the next 24h alarm cycle runs. */
+  async function verifySession(raw) {
+    if (typeof raw !== "string" || !raw) return false;
+    const hash = await hashSessionToken(raw);
+    const rows = sql.exec(`SELECT expires_at FROM dashboard_sessions WHERE session_hash = ?`, hash).toArray();
+    if (rows.length === 0) return false;
+    if (rows[0].expires_at < Date.now()) {
+      sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+      return false;
+    }
+    return true;
+  }
+
+  async function revokeSession(raw) {
+    if (typeof raw !== "string" || !raw) return;
+    const hash = await hashSessionToken(raw);
+    sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+  }
+
+  // Shared dashboard *mechanism* (workspace and hub). Bucket names and cookie
+  // scope are required arguments, never defaults, so each wrapper's authority
+  // choice stays visible at its call site. Rate limiting has **no bucket in
+  // common** between an unauthenticated and an authenticated path (workspace_id
+  // is a routing key, not a secret, so an uncredentialed flood must never 429
+  // the owner's own calls): public shell/assets/logout use `*-public`, login
+  // its own tight `*-login`, and the API gate picks `*-api-unauth` vs `*-api`
+  // strictly by that call's own session-verification outcome. Check order in
+  // each helper is a behavior contract: method -> Origin (POST) -> rate limit.
+
+  const DASHBOARD_PUBLIC_RATE_LIMIT = 120;
+  const DASHBOARD_LOGIN_RATE_LIMIT = 10;
+  const DASHBOARD_API_RATE_LIMIT = 120;
+
+  /** Fixed same-origin browser asset (app.js / app.css): GET-only, public bucket. */
+  async function serveDashboardAsset(request, { bucket, body, makeHeaders }) {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!consumeDashboardRateLimit(bucket, DASHBOARD_PUBLIC_RATE_LIMIT)) return rateLimitedResponse();
+    return new Response(body, { status: 200, headers: makeHeaders() });
+  }
+
+  /** Root HTML: the shell for a valid session, the login page otherwise. */
+  async function serveDashboardShell(request, { bucket, renderLogin, renderShell }) {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    if (!consumeDashboardRateLimit(bucket, DASHBOARD_PUBLIC_RATE_LIMIT)) return rateLimitedResponse();
+    const authed = await verifySession(readDashboardSessionCookie(request));
+    return new Response(authed ? renderShell() : renderLogin(), { status: 200, headers: dashboardHtmlHeaders() });
+  }
+
+  /** Exchanges this DO's owner token (checkResourceOwnerToken: gpt_token on a
+   *  workspace DO, hub_gpt_token on the hub DO) for a session cookie scoped to
+   *  `cookieScope` (workspace_id, or "hub"). */
+  async function loginDashboardSession(request, { bucket, cookieScope }) {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    // Credential-guessing surface: its own tight bucket, far below polling caps.
+    if (!consumeDashboardRateLimit(bucket, DASHBOARD_LOGIN_RATE_LIMIT)) return rateLimitedResponse();
+    const parsed = await readJsonWithLimit(request, maxFixedRequestBytes);
+    if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+    if (parsed.parseError || !parsed.value || typeof parsed.value.ownerToken !== "string" || !parsed.value.ownerToken) {
+      return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+    }
+    if (!checkResourceOwnerToken(parsed.value.ownerToken)) {
+      return json({ error: "INVALID_CREDENTIAL" }, 403, dashboardApiHeaders());
+    }
+    const session = await createSession();
+    return json({ ok: true }, 200, {
+      ...dashboardApiHeaders(),
+      "set-cookie": dashboardSessionCookie(cookieScope, session.raw, Math.floor(DASHBOARD_SESSION_TTL_MS / 1000)),
+    });
+  }
+
+  async function logoutDashboardSession(request, { bucket, cookieScope }) {
+    if (request.method !== "POST") return methodNotAllowed("POST");
+    if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    if (!consumeDashboardRateLimit(bucket, DASHBOARD_PUBLIC_RATE_LIMIT)) return rateLimitedResponse();
+    await revokeSession(readDashboardSessionCookie(request));
+    return json({ ok: true }, 200, { ...dashboardApiHeaders(), "set-cookie": dashboardSessionCookie(cookieScope, "", 0) });
+  }
+
+  /** Every /api/* route requires a valid session; every POST also requires a
+   *  strict same-origin Origin (checkDashboardOrigin; `SameSite=Strict` alone
+   *  is not sufficient CSRF protection, §"状態変更 API の CSRF 対策"). Returns
+   *  a denial Response, or null once authenticated, rate-limited under
+   *  `authBucket` and origin-checked; it never dispatches. `unauthBucket` only
+   *  ever accounts for a request that just failed verification, `authBucket`
+   *  only one whose session just verified. */
+  async function gateDashboardApi(request, { unauthBucket, authBucket }) {
+    const authed = await verifySession(readDashboardSessionCookie(request));
+    if (!authed) {
+      if (!consumeDashboardRateLimit(unauthBucket, DASHBOARD_API_RATE_LIMIT)) return rateLimitedResponse();
+      return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
+    }
+    if (!consumeDashboardRateLimit(authBucket, DASHBOARD_API_RATE_LIMIT)) return rateLimitedResponse();
+    if (request.method === "POST" && !checkDashboardOrigin(request)) {
+      return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    }
+    return null;
+  }
+
   return {
     // ======================= /dashboard : Web dashboard =======================
     // docs/plans/queue-dashboard.md. Workspace-owner-only: login exchanges the
@@ -246,34 +333,9 @@ function createBridgeDashboard({
     // the constructor). Every mutation reuses the same local* methods the CLI
     // uses, so the two surfaces can never disagree about what's allowed.
 
-    async createDashboardSession() {
-      const raw = generateSessionToken();
-      const hash = await hashSessionToken(raw);
-      const now = Date.now();
-      sql.exec(`INSERT INTO dashboard_sessions (session_hash, expires_at, created_at) VALUES (?, ?, ?)`, hash, now + DASHBOARD_SESSION_TTL_MS, now);
-      return { raw, expiresAt: now + DASHBOARD_SESSION_TTL_MS };
-    },
-
-    /** Also opportunistically deletes an already-expired row it happens to hit,
-     *  rather than waiting for the next alarm() sweep — cheap, and keeps a
-     *  just-expired session from working until the next 24h alarm cycle runs. */
-    async verifyDashboardSession(raw) {
-      if (typeof raw !== "string" || !raw) return false;
-      const hash = await hashSessionToken(raw);
-      const rows = sql.exec(`SELECT expires_at FROM dashboard_sessions WHERE session_hash = ?`, hash).toArray();
-      if (rows.length === 0) return false;
-      if (rows[0].expires_at < Date.now()) {
-        sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
-        return false;
-      }
-      return true;
-    },
-
-    async revokeDashboardSession(raw) {
-      if (typeof raw !== "string" || !raw) return;
-      const hash = await hashSessionToken(raw);
-      sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
-    },
+    createDashboardSession: createSession,
+    verifyDashboardSession: verifySession,
+    revokeDashboardSession: revokeSession,
 
     /** Called from rotateSecret("gpt_token") and deprovision() — see their own
      *  comments for why a leaked-token rotation must also cut off sessions
@@ -310,99 +372,35 @@ function createBridgeDashboard({
     },
 
     async handleDashboardShell(request, workspaceId) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const cookies = parseCookies(request.headers.get("cookie"));
-      const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      const html = authed ? renderDashboardShellHtml(workspaceId) : renderDashboardLoginHtml(workspaceId);
-      return new Response(html, { status: 200, headers: dashboardHtmlHeaders() });
-    },
-
-    async handleDashboardAppJs(request) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      return new Response(WORKSPACE_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
-    },
-
-    async handleDashboardAppCss(request) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      return new Response(DASHBOARD_CSS, { status: 200, headers: dashboardCssHeaders() });
-    },
-
-    async handleDashboardLogin(request, workspaceId) {
-      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-      if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      // Its own tight bucket, distinct from dashboard-public/dashboard-api —
-      // this is the credential-guessing surface, so it stays far below the
-      // generous polling caps regardless of what happens to those.
-      if (!consumeDashboardRateLimit("dashboard-login", 10)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const parsed = await readJsonWithLimit(request, maxFixedRequestBytes);
-      if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
-      if (parsed.parseError || !parsed.value || typeof parsed.value.ownerToken !== "string" || !parsed.value.ownerToken) {
-        return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
-      }
-      if (!checkResourceOwnerToken(parsed.value.ownerToken)) {
-        return json({ error: "INVALID_CREDENTIAL" }, 403, dashboardApiHeaders());
-      }
-      const session = await this.createDashboardSession();
-      return json({ ok: true }, 200, {
-        ...dashboardApiHeaders(),
-        "set-cookie": dashboardSessionCookie(workspaceId, session.raw, Math.floor(DASHBOARD_SESSION_TTL_MS / 1000)),
+      return serveDashboardShell(request, {
+        bucket: "dashboard-public",
+        renderLogin: () => renderDashboardLoginHtml(workspaceId),
+        renderShell: () => renderDashboardShellHtml(workspaceId),
       });
     },
 
-    async handleDashboardLogout(request, workspaceId) {
-      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-      if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      if (!consumeDashboardRateLimit("dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const cookies = parseCookies(request.headers.get("cookie"));
-      await this.revokeDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      return json({ ok: true }, 200, { ...dashboardApiHeaders(), "set-cookie": dashboardSessionCookie(workspaceId, "", 0) });
+    async handleDashboardAppJs(request) {
+      return serveDashboardAsset(request, { bucket: "dashboard-public", body: WORKSPACE_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
     },
 
-    /** Every /api/* route requires a valid session; every mutating (POST) one
-     *  also requires a strict same-origin Origin (see checkDashboardOrigin) —
-     *  `SameSite=Strict` alone is not treated as sufficient CSRF protection
-     *  (§"状態変更 API の CSRF 対策"). Rate limiting is deliberately two-tier
-     *  and, on purpose, uses **no bucket in common** with the public
-     *  shell/app.js/logout routes (`dashboard-public`) or login
-     *  (`dashboard-login`) — sharing a bucket anywhere on this path would let
-     *  a flood against one of those unauthenticated routes 429 the legitimate
-     *  owner's authenticated calls too, exactly the isolation problem this
-     *  split exists to prevent. Which bucket applies is decided by the
-     *  session check's own outcome, not checked unconditionally up front:
-     *  `dashboard-api-unauth` only ever accounts for a request that just
-     *  failed `verifyDashboardSession()` (bounding the cost of a flood of
-     *  missing/invalid cookies); `dashboard-api` only ever accounts for a
-     *  request whose session just verified. A caller with a currently-valid
-     *  session therefore can never be rate-limited by unauthenticated
-     *  traffic — it only ever competes against its own bucket. */
+    async handleDashboardAppCss(request) {
+      return serveDashboardAsset(request, { bucket: "dashboard-public", body: DASHBOARD_CSS, makeHeaders: dashboardCssHeaders });
+    },
+
+    async handleDashboardLogin(request, workspaceId) {
+      return loginDashboardSession(request, { bucket: "dashboard-login", cookieScope: workspaceId });
+    },
+
+    async handleDashboardLogout(request, workspaceId) {
+      return logoutDashboardSession(request, { bucket: "dashboard-public", cookieScope: workspaceId });
+    },
+
+    /** Workspace authority: `dashboard-api-unauth` / `dashboard-api` buckets
+     *  (see gateDashboardApi). Past the gate, everything goes through
+     *  dashboardApiDispatch. */
     async handleDashboardApi(request, subParts) {
-      const cookies = parseCookies(request.headers.get("cookie"));
-      const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      if (!authed) {
-        if (!consumeDashboardRateLimit("dashboard-api-unauth", 120)) {
-          return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-        }
-        return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
-      }
-      if (!consumeDashboardRateLimit("dashboard-api", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      if (request.method === "POST" && !checkDashboardOrigin(request)) {
-        return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      }
+      const denied = await gateDashboardApi(request, { unauthBucket: "dashboard-api-unauth", authBucket: "dashboard-api" });
+      if (denied) return denied;
 
       const name = subParts.join("/");
       const url = new URL(request.url);
@@ -768,86 +766,38 @@ function createBridgeDashboard({
     },
 
     async handleHubDashboardShell(request) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("hub-dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const cookies = parseCookies(request.headers.get("cookie"));
-      const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      const html = authed ? renderHubDashboardShellHtml() : renderHubDashboardLoginHtml();
-      return new Response(html, { status: 200, headers: dashboardHtmlHeaders() });
-    },
-
-    async handleHubDashboardAppJs(request) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("hub-dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      return new Response(HUB_DASHBOARD_APP_JS, { status: 200, headers: dashboardJsHeaders() });
-    },
-
-    async handleHubDashboardAppCss(request) {
-      if (request.method !== "GET") return new Response(null, { status: 405, headers: { allow: "GET" } });
-      if (!consumeDashboardRateLimit("hub-dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      return new Response(DASHBOARD_CSS, { status: 200, headers: dashboardCssHeaders() });
-    },
-
-    async handleHubDashboardLogin(request) {
-      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-      if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      if (!consumeDashboardRateLimit("hub-dashboard-login", 10)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const parsed = await readJsonWithLimit(request, maxFixedRequestBytes);
-      if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
-      if (parsed.parseError || !parsed.value || typeof parsed.value.ownerToken !== "string" || !parsed.value.ownerToken) {
-        return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
-      }
-      // The hub DO never holds a gpt_token (only a workspace DO does — see
-      // checkResourceOwnerToken's own doc comment), so reusing it here is
-      // equivalent to checking hub_gpt_token alone; reused rather than adding
-      // a second owner-credential check for the same disjoint-secret reason.
-      if (!checkResourceOwnerToken(parsed.value.ownerToken)) {
-        return json({ error: "INVALID_CREDENTIAL" }, 403, dashboardApiHeaders());
-      }
-      const session = await this.createDashboardSession();
-      return json({ ok: true }, 200, {
-        ...dashboardApiHeaders(),
-        "set-cookie": dashboardSessionCookie("hub", session.raw, Math.floor(DASHBOARD_SESSION_TTL_MS / 1000)),
+      return serveDashboardShell(request, {
+        bucket: "hub-dashboard-public",
+        renderLogin: renderHubDashboardLoginHtml,
+        renderShell: renderHubDashboardShellHtml,
       });
     },
 
-    async handleHubDashboardLogout(request) {
-      if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-      if (!checkDashboardOrigin(request)) return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      if (!consumeDashboardRateLimit("hub-dashboard-public", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      const cookies = parseCookies(request.headers.get("cookie"));
-      await this.revokeDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      return json({ ok: true }, 200, { ...dashboardApiHeaders(), "set-cookie": dashboardSessionCookie("hub", "", 0) });
+    async handleHubDashboardAppJs(request) {
+      return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: HUB_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
     },
 
-    /** Same two-tier rate-limit isolation reasoning as handleDashboardApi,
-     *  with its own bucket names so hub traffic never shares a bucket with
-     *  any workspace's own dashboard (or another feature's hub-* bucket). */
+    async handleHubDashboardAppCss(request) {
+      return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: DASHBOARD_CSS, makeHeaders: dashboardCssHeaders });
+    },
+
+    // The hub DO never holds a gpt_token (only a workspace DO does — see
+    // checkResourceOwnerToken's own doc comment), so the shared login mechanism's
+    // checkResourceOwnerToken call is equivalent to checking hub_gpt_token
+    // alone here; cookie scope is the literal "hub" (Path=/dashboard/hub).
+    async handleHubDashboardLogin(request) {
+      return loginDashboardSession(request, { bucket: "hub-dashboard-login", cookieScope: "hub" });
+    },
+
+    async handleHubDashboardLogout(request) {
+      return logoutDashboardSession(request, { bucket: "hub-dashboard-public", cookieScope: "hub" });
+    },
+
+    /** Hub authority: its own `hub-dashboard-api-unauth` / `hub-dashboard-api`
+     *  buckets, never shared with any workspace's dashboard (see gateDashboardApi). */
     async handleHubDashboardApi(request, subParts) {
-      const cookies = parseCookies(request.headers.get("cookie"));
-      const authed = await this.verifyDashboardSession(cookies[DASHBOARD_COOKIE_NAME]);
-      if (!authed) {
-        if (!consumeDashboardRateLimit("hub-dashboard-api-unauth", 120)) {
-          return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-        }
-        return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
-      }
-      if (!consumeDashboardRateLimit("hub-dashboard-api", 120)) {
-        return new Response("rate limited", { status: 429, headers: { "retry-after": "60" } });
-      }
-      if (request.method === "POST" && !checkDashboardOrigin(request)) {
-        return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
-      }
+      const denied = await gateDashboardApi(request, { unauthBucket: "hub-dashboard-api-unauth", authBucket: "hub-dashboard-api" });
+      if (denied) return denied;
 
       if (subParts.length === 1 && subParts[0] === "workspaces" && request.method === "GET") {
         return json(await this.hubDashboardWorkspaces(), 200, dashboardApiHeaders());
