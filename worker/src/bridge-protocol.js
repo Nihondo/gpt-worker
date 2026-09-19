@@ -84,7 +84,7 @@ function sleep(ms) {
  * Builds the protocol/queue domain's operations against a Durable Object's
  * own SQLite (`sql`) plus a small set of narrow capabilities:
  *  - maxBodyBytes(): () => number — this workspace's configured `body` size
- *    cap (owned by admin/settings; see BridgeDO#maxBodyBytes()).
+ *    cap (owned by admin/settings; see bridge-admin.js's maxBodyBytes()).
  *  - notifyPlanPushed(messageId): best-effort push to the local bridge that
  *    a PLAN/DONE/BLOCKED message was just queued. Never authoritative — the
  *    CLI's /local poll remains the real delivery path — so a caller-side
@@ -291,6 +291,15 @@ function createBridgeProtocol({ sql, maxBodyBytes, notifyPlanPushed, toolOk, too
     getTask(taskId) {
       const rows = sql.exec(`SELECT * FROM tasks WHERE task_id = ?`, taskId).toArray();
       return rows.length ? rows[0] : null;
+    },
+
+    /** Wipes every queued message and task row — the protocol/queue domain's
+     *  entire durable state. Used only by admin's deprovision() (via a
+     *  narrow callback; see bridge-admin.js's own header comment), never
+     *  called directly from outside this module otherwise. */
+    clearProtocolState() {
+      sql.exec(`DELETE FROM msgs`);
+      sql.exec(`DELETE FROM tasks`);
     },
 
     activeTask() {

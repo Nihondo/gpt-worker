@@ -65,6 +65,7 @@ import {
 } from "./worker-dashboard-http.js";
 import { initializeBridgeSchema } from "./bridge-schema.js";
 import { createBridgeProtocol } from "./bridge-protocol.js";
+import { createBridgeAdmin, MAX_BODY_BYTES_CEILING, REQUEST_ENVELOPE_OVERHEAD_BYTES } from "./bridge-admin.js";
 
 // Tools answered locally by the hub (no workspace_id involved) instead of
 // being relayed to a workspace's Durable Object. Excluded from the
@@ -100,29 +101,15 @@ const HUB_TOOLS = [
 const PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const RPC_TIMEOUT_MS = 20_000; // local WS round-trip budget
-// `body`'s default cap. It exists so every message stays a summary — file
-// contents, diffs, and command output are never put in it (GPT re-reads the
-// workspace itself instead) — not because of any Cloudflare/SQLite ceiling;
-// a SQLite-backed DO row can hold up to 2 MiB. A workspace can raise its own
-// cap (`gpt-worker limits <bytes>`, stored in `settings.max_body_bytes`) up
-// to MAX_BODY_BYTES_CEILING for cases that outgrow it, like a HANDOFF_BRIEF —
-// see BridgeDO#maxBodyBytes(). Every ChatGPT round the shared connector's
-// conversation carries still grows by roughly this many tokens, so raising it
-// trades a longer per-round body for reaching that conversation's context
-// ceiling sooner; it is a deliberate per-workspace choice, not a free lunch.
-const MAX_BODY_BYTES = 16 * 1024;
-const MIN_BODY_BYTES = 4 * 1024; // floor for a configured override — small enough is useless, not unsafe
-const MAX_BODY_BYTES_CEILING = 256 * 1024; // well under SQLite's 2 MiB row ceiling, with margin to spare
-// Covers the JSON-RPC/CLI fields that wrap `body` (task_id, iteration, kind,
-// jsonrpc envelope, ...) — small and fixed regardless of the configured body
-// cap, so the request-size ceiling can simply track the body ceiling plus
-// this constant rather than needing its own separate override.
-const REQUEST_ENVELOPE_OVERHEAD_BYTES = 2 * 1024;
 const MAX_REQUEST_BYTES = 32 * 1024; // the whole JSON-RPC/CLI envelope around it
 // Used only where the target workspace isn't known yet (the shared
 // connector's hub-level envelope parse, before it has read which workspace
 // the call is for) — see handleOAuthMcpDispatch. The real, per-workspace
 // limit is enforced once the call reaches that workspace's own DO.
+// MAX_BODY_BYTES_CEILING/REQUEST_ENVELOPE_OVERHEAD_BYTES themselves are
+// owned by bridge-admin.js (the per-workspace `body` size cap is admin/
+// settings domain state) and imported above; this cross-target constant
+// stays defined here since it isn't specific to that domain.
 const MAX_REQUEST_BYTES_CEILING = MAX_BODY_BYTES_CEILING + REQUEST_ENVELOPE_OVERHEAD_BYTES;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // Longer than RETENTION_MS on purpose: `tasks` rows back the queue_history
@@ -291,64 +278,11 @@ async function handleAdminRoute(request, env, adminToken) {
   return stub.fetch(new Request(forwardUrl, request));
 }
 
-const GIZMO_SEGMENT_PATTERN = /^g-p-([0-9a-f]{32})(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$/i;
-
-function stableGizmoId(segment) {
-  const match = GIZMO_SEGMENT_PATTERN.exec(String(segment ?? ""));
-  return match ? match[1].toLowerCase() : null;
-}
-
-function parseProjectUrl(rawUrl) {
-  if (typeof rawUrl !== "string") return null;
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.username || parsed.password) return null;
-    if (parsed.protocol !== "https:") return null;
-    if (parsed.hostname !== "chatgpt.com") return null;
-    const pathname = parsed.pathname.replace(/\/+$/, "");
-    const match = pathname.match(/^\/g\/([^/]+)\/project$/);
-    if (!match || !match[1]) return null;
-    return {
-      origin: parsed.origin,
-      projectSegment: match[1],
-      gizmoId: stableGizmoId(match[1]),
-      canonicalUrl: `${parsed.origin}/g/${match[1]}/project${parsed.search}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseConversationUrl(rawUrl) {
-  if (typeof rawUrl !== "string") return null;
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.username || parsed.password) return null;
-    if (parsed.protocol !== "https:") return null;
-    if (parsed.hostname !== "chatgpt.com") return null;
-    const pathname = parsed.pathname.replace(/\/+$/, "");
-    const match = pathname.match(/^\/g\/([^/]+)\/c\/([^/]+)$/);
-    if (!match || !match[1] || !match[2]) return null;
-    return {
-      origin: parsed.origin,
-      projectSegment: match[1],
-      gizmoId: stableGizmoId(match[1]),
-      conversationId: match[2],
-      canonicalUrl: `${parsed.origin}/g/${match[1]}/c/${match[2]}`,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function areSameProject(projectInfo, conversationInfo) {
-  if (!projectInfo || !conversationInfo) return false;
-  if (projectInfo.origin !== conversationInfo.origin) return false;
-  if (projectInfo.gizmoId && conversationInfo.gizmoId) {
-    return projectInfo.gizmoId === conversationInfo.gizmoId;
-  }
-  return projectInfo.projectSegment === conversationInfo.projectSegment;
-}
+// stableGizmoId/parseProjectUrl/parseConversationUrl/areSameProject moved to
+// bridge-admin.js (admin/settings domain owns the browser Project/
+// conversation URL parsing) — see BridgeDO's parseProjectUrl/
+// parseConversationUrl/areSameProject thin delegates below for how
+// index.js's own dashboard code (not yet extracted) still reaches them.
 
 function randomHex(bytes) {
   const arr = new Uint8Array(bytes);
@@ -947,6 +881,27 @@ export class BridgeDO {
       toolError,
     });
 
+    // Admin/settings/registry domain (secrets, provisioning, hub registry,
+    // per-workspace settings/guidance — see bridge-admin.js's own header for
+    // its full method list and the dependency/capability matrix it follows).
+    // Constructed once here and reused by every thin BridgeDO delegate
+    // below. Its cross-domain capabilities are all narrow callbacks, never a
+    // direct import of another bridge-*.js domain module: token generation
+    // reuses this file's own randomHex, and wiping/revoking protocol/OAuth/
+    // dashboard state on deprovision or token rotation is delegated back to
+    // this file's own methods (clearProtocolState, revokeAllOAuthTokens,
+    // clearOAuthState, revokeAllDashboardSessions) rather than admin ever
+    // touching those tables itself.
+    this.admin = createBridgeAdmin({
+      sql: this.sql,
+      generateToken: () => randomHex(32),
+      maxAdminRequestBytes: MAX_REQUEST_BYTES,
+      clearProtocolState: () => this.clearProtocolState(),
+      revokeOAuthTokens: () => this.revokeAllOAuthTokens(),
+      clearOAuthState: () => this.clearOAuthState(),
+      revokeDashboardSessions: () => this.revokeAllDashboardSessions(),
+    });
+
     ctx.blockConcurrencyWhile(async () => {
       const current = await ctx.storage.getAlarm();
       if (current === null) await ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
@@ -994,108 +949,66 @@ export class BridgeDO {
   }
 
   // ======================= secrets (per-workspace tokens) =======================
+  // Thin delegates onto the admin/settings/registry domain — see
+  // bridge-admin.js's own header for the capability/dependency matrix this
+  // extraction follows. Method names, argument shapes, and return values are
+  // unchanged from before the extraction.
 
   getSecret(key) {
-    const rows = this.sql.exec(`SELECT v FROM secrets WHERE k = ?`, key).toArray();
-    return rows.length ? rows[0].v : null;
+    return this.admin.getSecret(key);
   }
 
   setSecret(key, value) {
-    this.sql.exec(`INSERT OR REPLACE INTO secrets (k, v) VALUES (?, ?)`, key, value);
+    return this.admin.setSecret(key, value);
   }
 
   hasSecrets() {
-    return this.sql.exec(`SELECT COUNT(*) AS n FROM secrets`).toArray()[0].n > 0;
+    return this.admin.hasSecrets();
   }
 
   checkToken(secretKey, token) {
-    const stored = this.getSecret(secretKey);
-    return !!stored && constantTimeEqual(token, stored);
+    return this.admin.checkToken(secretKey, token);
   }
 
   // ======================= /admin : provisioning (this workspace's own DO) =======================
 
   async handleAdmin(request) {
-    if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST" } });
-    const parsed = await readJsonWithLimit(request, MAX_REQUEST_BYTES);
-    if (parsed.tooLarge) return new Response("payload too large", { status: 413 });
-    if (parsed.parseError) return json({ error: "PARSE_ERROR" }, 400);
-    const body = parsed.value || {};
-    if (body.op === "provision_hub") return json(this.provisionHub());
-    if (body.op === "hub_browser_settings_get") return json(this.hubBrowserSettingsGet());
-    if (body.op === "hub_browser_settings_set") return json(this.hubBrowserSettingsSet(body));
-    if (body.op === "hub_owner_token_get") return json(this.hubOwnerTokenGet());
-    if (body.op === "owner_token_get") return json(this.ownerTokenGet());
-    if (body.op === "register_workspace") return json(this.registerWorkspace(body));
-    if (body.op === "unregister_workspace") return json(this.unregisterWorkspace(body));
-    if (body.op === "rotate_hub") return json(this.rotateHubToken());
-    if (body.op === "provision") return json(this.provision());
-    if (body.op === "migrate_default") return json(this.migrateDefault(body));
-    if (body.op === "rotate") return json(this.rotateSecret(body.key));
-    if (body.op === "deprovision") return json(this.deprovision());
-    return json({ error: "UNKNOWN_OP" }, 400);
+    return this.admin.handleAdmin(request);
   }
 
   hubBrowserSettingsGet() {
-    if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
-    const rows = this.sql
-      .exec(
-        `SELECT k, v FROM settings WHERE k IN ('browser_chat_url_default', 'browser_chat_url_default_initialized')`
-      )
-      .toArray();
-    const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
-    return {
-      initialized: values.browser_chat_url_default_initialized === "1",
-      chatUrl: values.browser_chat_url_default ? values.browser_chat_url_default : null,
-    };
+    return this.admin.hubBrowserSettingsGet();
   }
 
   hubBrowserSettingsSet(body) {
-    if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
-    const { chatUrl } = body || {};
-    if (chatUrl !== undefined) {
-      if (chatUrl === null || chatUrl === "") {
-        this.setSetting("browser_chat_url_default", "");
-      } else {
-        const parsed = parseProjectUrl(chatUrl);
-        if (!parsed) {
-          return { error: "INVALID_ARGS", message: "invalid project url" };
-        }
-        this.setSetting("browser_chat_url_default", parsed.canonicalUrl);
-      }
-    }
-    this.setSetting("browser_chat_url_default_initialized", "1");
-    return this.hubBrowserSettingsGet();
+    return this.admin.hubBrowserSettingsSet(body);
   }
 
   hubOwnerTokenGet() {
-    const token = this.getSecret("hub_gpt_token");
-    if (!token) return { error: "NOT_PROVISIONED" };
-    return { gptToken: token };
+    return this.admin.hubOwnerTokenGet();
   }
 
   ownerTokenGet() {
-    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
-    const token = this.getSecret("gpt_token");
-    return { gptToken: token };
+    return this.admin.ownerTokenGet();
   }
 
   /** Irreversibly wipes this workspace's tokens, queue, task state and settings — its Server URL
    *  and CLI/link tokens 404 immediately afterward, same as if it had never
    *  been provisioned. Used by `gpt-worker remove`. There is no "undo": a
    *  workspace_id can be re-provisioned later, but that starts a fresh
-   *  queue with fresh tokens, not a restore of what was here. */
+   *  queue with fresh tokens, not a restore of what was here. Delegates to
+   *  admin's deprovision(), which wipes secrets/settings itself and calls
+   *  back into clearProtocolState()/clearOAuthState()/
+   *  revokeAllDashboardSessions() below for the domains it doesn't own. */
   deprovision() {
-    this.sql.exec(`DELETE FROM secrets`);
-    this.sql.exec(`DELETE FROM msgs`);
-    this.sql.exec(`DELETE FROM tasks`);
-    this.sql.exec(`DELETE FROM settings`);
-    this.sql.exec(`DELETE FROM oauth_authorization_codes`);
-    this.sql.exec(`DELETE FROM oauth_access_tokens`);
-    this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
-    this.sql.exec(`DELETE FROM oauth_clients`);
-    this.sql.exec(`DELETE FROM dashboard_sessions`);
-    return { ok: true };
+    return this.admin.deprovision();
+  }
+
+  /** Wipes every queued message and task row (bridge-protocol.js's
+   *  clearProtocolState) — the narrow callback admin's deprovision() uses
+   *  instead of touching msgs/tasks itself. */
+  clearProtocolState() {
+    return this.protocol.clearProtocolState();
   }
 
   /** Revokes every OAuth authorization code/access token/refresh token this
@@ -1112,98 +1025,77 @@ export class BridgeDO {
     this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
   }
 
+  /** Wipes all OAuth server state for this DO — every issued authorization
+   *  code, access token, refresh token, and (unlike revokeAllOAuthTokens()
+   *  above) every registered DCR client too. Used only by admin's
+   *  deprovision(), which removes the workspace entirely; a token rotation
+   *  must not lose registered clients, so it uses revokeAllOAuthTokens()
+   *  instead. */
+  clearOAuthState() {
+    this.sql.exec(`DELETE FROM oauth_authorization_codes`);
+    this.sql.exec(`DELETE FROM oauth_access_tokens`);
+    this.sql.exec(`DELETE FROM oauth_refresh_tokens`);
+    this.sql.exec(`DELETE FROM oauth_clients`);
+  }
+
   /** Replaces one of this workspace's 3 tokens with a fresh random value.
    *  Only the named key changes; the other two (and every queued message)
    *  are untouched. Requires the workspace to already be provisioned. */
   rotateSecret(key) {
-    if (!["gpt_token", "link_token", "cli_token"].includes(key)) {
-      return { error: "INVALID_ARGS", message: "key must be gpt_token, link_token, or cli_token" };
-    }
-    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
-    const value = randomHex(32);
-    this.setSecret(key, value);
-    if (key === "gpt_token") {
-      this.revokeAllOAuthTokens();
-      // gpt_token doubles as the dashboard login credential (see
-      // checkResourceOwnerToken) — a deliberate rotation must also revoke
-      // sessions already issued under the old value, same reasoning as the
-      // OAuth grants above (docs/plans/queue-dashboard.md's "owner token
-      // rotation" row).
-      this.revokeAllDashboardSessions();
-    }
-    return { value };
+    return this.admin.rotateSecret(key);
   }
 
   /** Fresh workspace: generates all 3 tokens. Refuses if this workspace_id
    *  was already provisioned, so a routing collision (or a retried admin
    *  call) can never silently overwrite an existing workspace's tokens. */
   provision() {
-    if (this.hasSecrets()) return { error: "ALREADY_PROVISIONED" };
-    const gptToken = randomHex(32);
-    const linkToken = randomHex(32);
-    const cliToken = randomHex(32);
-    this.setSecret("gpt_token", gptToken);
-    this.setSecret("link_token", linkToken);
-    this.setSecret("cli_token", cliToken);
-    this.setSetting("browser_settings_initialized", "1");
-    return { gptToken, linkToken, cliToken };
+    return this.admin.provision();
   }
 
   /** Creates the one token embedded in the single ChatGPT connector URL. */
   provisionHub() {
-    const existing = this.getSecret("hub_gpt_token");
-    if (existing) return { gptToken: existing, alreadyProvisioned: true };
-    const gptToken = randomHex(32);
-    this.setSecret("hub_gpt_token", gptToken);
-    return { gptToken };
+    return this.admin.provisionHub();
   }
 
   rotateHubToken() {
-    if (!this.getSecret("hub_gpt_token")) return { error: "NOT_PROVISIONED" };
-    const value = randomHex(32);
-    this.setSecret("hub_gpt_token", value);
-    this.revokeAllOAuthTokens();
-    // hub_gpt_token doubles as the shared hub dashboard's login credential
-    // (see checkResourceOwnerToken and handleHubDashboardLogin) — same
-    // reasoning as rotateSecret("gpt_token") revoking that workspace's own
-    // dashboard sessions: a deliberate rotation must also cut off hub
-    // dashboard sessions already issued under the old value.
-    this.revokeAllDashboardSessions();
-    return { value };
+    return this.admin.rotateHubToken();
   }
 
-  registerWorkspace({ workspace_id: workspaceId, name } = {}) {
-    if (!isValidWorkspaceId(workspaceId) || typeof name !== "string" || !name.trim()) {
-      return { error: "INVALID_ARGS" };
-    }
-    this.sql.exec(
-      `INSERT OR REPLACE INTO workspace_registry (workspace_id, name, registered_at) VALUES (?, ?, ?)`,
-      workspaceId,
-      name.slice(0, 200),
-      Date.now()
-    );
-    return { ok: true };
+  registerWorkspace(body) {
+    return this.admin.registerWorkspace(body);
   }
 
-  unregisterWorkspace({ workspace_id: workspaceId } = {}) {
-    if (!isValidWorkspaceId(workspaceId)) return { error: "INVALID_ARGS" };
-    this.sql.exec(`DELETE FROM workspace_registry WHERE workspace_id = ?`, workspaceId);
-    return { ok: true };
+  unregisterWorkspace(body) {
+    return this.admin.unregisterWorkspace(body);
   }
 
   /** Adopts the exact token values from the pre-multi-tenant single-DO
    *  deployment (workspace_id "default") — never generates new ones, so
    *  the already-registered ChatGPT connector's tokens keep working once
    *  its Server URL gains the /default/ segment. */
-  migrateDefault({ gptToken, linkToken, cliToken } = {}) {
-    if (this.hasSecrets()) return { error: "ALREADY_PROVISIONED" };
-    if (typeof gptToken !== "string" || typeof linkToken !== "string" || typeof cliToken !== "string") {
-      return { error: "INVALID_ARGS" };
-    }
-    this.setSecret("gpt_token", gptToken);
-    this.setSecret("link_token", linkToken);
-    this.setSecret("cli_token", cliToken);
-    return { ok: true };
+  migrateDefault(body) {
+    return this.admin.migrateDefault(body);
+  }
+
+  // ======================= browser Project/conversation URL helpers =======================
+  // Thin delegates onto admin's pure parser/matcher (bridge-admin.js's
+  // parseProjectUrl/parseConversationUrl/areSameProject), used here by
+  // dashboardSetBrowserSettings() below — dashboard code hasn't been
+  // extracted to its own bridge-*.js module yet (Phase 2E), so it reaches
+  // these through BridgeDO rather than importing bridge-admin.js directly,
+  // keeping this call shape identical to what a future bridge-dashboard.js
+  // would receive as an injected capability.
+
+  parseProjectUrl(rawUrl) {
+    return this.admin.parseProjectUrl(rawUrl);
+  }
+
+  parseConversationUrl(rawUrl) {
+    return this.admin.parseConversationUrl(rawUrl);
+  }
+
+  areSameProject(projectInfo, conversationInfo) {
+    return this.admin.areSameProject(projectInfo, conversationInfo);
   }
 
   // ---- rate limiting (sliding window, best-effort across hibernation) ----
@@ -1792,7 +1684,7 @@ export class BridgeDO {
   }
 
   registeredWorkspaces() {
-    return this.sql.exec(`SELECT workspace_id, name, registered_at FROM workspace_registry ORDER BY name COLLATE NOCASE`).toArray();
+    return this.admin.registeredWorkspaces();
   }
 
   async handleHubToolCall(id, params) {
@@ -1972,9 +1864,7 @@ export class BridgeDO {
   }
 
   workspaceGuidance() {
-    const rows = this.sql.exec(`SELECT v FROM settings WHERE k = 'guidance'`).toArray();
-    const guidance = rows.length ? rows[0].v : "";
-    return guidance ? { set: true, guidance } : { set: false };
+    return this.admin.workspaceGuidance();
   }
 
   // ======================= /dashboard : Web dashboard =======================
@@ -2342,18 +2232,18 @@ export class BridgeDO {
       let targetProject = null;
       if (chatUrlOverride !== undefined) {
         if (chatUrlOverride !== null && chatUrlOverride !== "") {
-          targetProject = parseProjectUrl(chatUrlOverride);
+          targetProject = this.parseProjectUrl(chatUrlOverride);
           if (!targetProject) return { error: "INVALID_ARGS", message: "invalid project url" };
         }
       } else if (current.chatUrlOverride) {
-        targetProject = parseProjectUrl(current.chatUrlOverride);
+        targetProject = this.parseProjectUrl(current.chatUrlOverride);
       }
 
       if (!targetProject) {
         const hubSettings = await this.getHubBrowserSettings();
         const sharedChatUrl = hubSettings && hubSettings.chatUrl;
         if (sharedChatUrl) {
-          targetProject = parseProjectUrl(sharedChatUrl);
+          targetProject = this.parseProjectUrl(sharedChatUrl);
         }
       }
 
@@ -2361,9 +2251,9 @@ export class BridgeDO {
         return { error: "INVALID_ARGS", message: "cannot set conversation url without an effective project url" };
       }
 
-      const parsedConv = parseConversationUrl(conversationUrl);
+      const parsedConv = this.parseConversationUrl(conversationUrl);
       if (!parsedConv) return { error: "INVALID_ARGS", message: "invalid conversation url" };
-      if (!areSameProject(targetProject, parsedConv)) {
+      if (!this.areSameProject(targetProject, parsedConv)) {
         return { error: "INVALID_ARGS", message: "conversation does not match effective project url" };
       }
     }
@@ -2834,135 +2724,59 @@ export class BridgeDO {
     return { task: this.taskView(this.getTask(taskId)), migrated: true };
   }
 
+  // Thin delegates onto the admin/settings/registry domain (bridge-admin.js)
+  // — see that module's own header for the capability/dependency matrix
+  // this extraction follows. Method names, argument shapes, and return
+  // values are unchanged from before the extraction.
+
   localSettingsGet() {
-    const rows = this.sql.exec(`SELECT k, v FROM settings WHERE k IN ('chat_url', 'enter_delay_ms')`).toArray();
-    const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
-    return {
-      chatUrl: values.chat_url || null,
-      enterDelayMs: values.enter_delay_ms ? Number(values.enter_delay_ms) : null,
-    };
+    return this.admin.localSettingsGet();
   }
 
   localSettingsSet(body) {
-    const { chatUrl, enterDelayMs } = body || {};
-    if (chatUrl !== undefined) this.setSetting("chat_url", chatUrl || "");
-    if (enterDelayMs !== undefined) this.setSetting("enter_delay_ms", enterDelayMs === null ? "" : String(enterDelayMs));
-    return this.localSettingsGet();
+    return this.admin.localSettingsSet(body);
   }
 
   localBrowserSettingsGet() {
-    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
-    const rows = this.sql
-      .exec(
-        `SELECT k, v FROM settings WHERE k IN ('browser_chat_url_override', 'browser_conversation_url', 'browser_settings_initialized')`
-      )
-      .toArray();
-    const values = Object.fromEntries(rows.map((r) => [r.k, r.v]));
-    return {
-      initialized: values.browser_settings_initialized === "1",
-      chatUrlOverride: values.browser_chat_url_override ? values.browser_chat_url_override : null,
-      conversationUrl: values.browser_conversation_url ? values.browser_conversation_url : null,
-    };
+    return this.admin.localBrowserSettingsGet();
   }
 
   localBrowserSettingsSet(body) {
-    if (!this.hasSecrets()) return { error: "NOT_PROVISIONED" };
-    const current = this.localBrowserSettingsGet();
-    const { chatUrlOverride, conversationUrl } = body || {};
-
-    let nextOverride = current.chatUrlOverride;
-    let overrideChanged = false;
-
-    if (chatUrlOverride !== undefined) {
-      if (chatUrlOverride === null || chatUrlOverride === "") {
-        if (current.chatUrlOverride !== null) {
-          nextOverride = null;
-          overrideChanged = true;
-        }
-      } else {
-        const parsed = parseProjectUrl(chatUrlOverride);
-        if (!parsed) return { error: "INVALID_ARGS", message: "invalid project url" };
-        if (current.chatUrlOverride !== parsed.canonicalUrl) {
-          nextOverride = parsed.canonicalUrl;
-          overrideChanged = true;
-        }
-      }
-    }
-
-    let nextConversation = current.conversationUrl;
-    if (conversationUrl !== undefined) {
-      if (conversationUrl === null || conversationUrl === "") {
-        nextConversation = null;
-      } else {
-        const parsedConv = parseConversationUrl(conversationUrl);
-        if (!parsedConv) return { error: "INVALID_ARGS", message: "invalid conversation url" };
-        if (nextOverride) {
-          const parsedProject = parseProjectUrl(nextOverride);
-          if (!areSameProject(parsedProject, parsedConv)) {
-            return { error: "INVALID_ARGS", message: "conversation does not match project override" };
-          }
-        }
-        nextConversation = parsedConv.canonicalUrl;
-      }
-    } else if (overrideChanged) {
-      nextConversation = null;
-    }
-
-    this.setSetting("browser_chat_url_override", nextOverride || "");
-    this.setSetting("browser_conversation_url", nextConversation || "");
-    this.setSetting("browser_settings_initialized", "1");
-    return this.localBrowserSettingsGet();
+    return this.admin.localBrowserSettingsSet(body);
   }
 
   localGuidanceSet(body) {
-    if (!body || typeof body.text !== "string") return { error: "INVALID_ARGS" };
-    if (byteLength(body.text) > 8 * 1024) return { error: "BODY_TOO_LARGE" };
-    this.setSetting("guidance", body.text);
-    return { ok: true };
+    return this.admin.localGuidanceSet(body);
   }
 
   localGuidanceClear() {
-    this.setSetting("guidance", "");
-    return { ok: true };
+    return this.admin.localGuidanceClear();
   }
 
   setSetting(key, value) {
-    this.sql.exec(`INSERT OR REPLACE INTO settings (k, v) VALUES (?, ?)`, key, value);
+    return this.admin.setSetting(key, value);
   }
 
-  /** This workspace's configured `body` size cap, or MAX_BODY_BYTES if unset
+  /** This workspace's configured `body` size cap, or the default if unset
    *  or the stored value is no longer a valid integer in range (covers a
    *  never-configured workspace and a stale value from a lowered ceiling). */
   maxBodyBytes() {
-    const rows = this.sql.exec(`SELECT v FROM settings WHERE k = 'max_body_bytes'`).toArray();
-    const raw = rows.length ? rows[0].v : "";
-    const n = raw ? Number(raw) : NaN;
-    return Number.isInteger(n) && n >= MIN_BODY_BYTES && n <= MAX_BODY_BYTES_CEILING ? n : MAX_BODY_BYTES;
+    return this.admin.maxBodyBytes();
   }
 
   /** The envelope around `maxBodyBytes()` — used wherever a request carrying
    *  a message body is size-checked before that body is parsed out and
    *  checked on its own. */
   maxRequestBytes() {
-    return this.maxBodyBytes() + REQUEST_ENVELOPE_OVERHEAD_BYTES;
+    return this.admin.maxRequestBytes();
   }
 
   localMaxBodyBytesGet() {
-    return { maxBodyBytes: this.maxBodyBytes(), default: MAX_BODY_BYTES, floor: MIN_BODY_BYTES, ceiling: MAX_BODY_BYTES_CEILING };
+    return this.admin.localMaxBodyBytesGet();
   }
 
   localMaxBodyBytesSet(body) {
-    const { maxBodyBytes } = body || {};
-    if (maxBodyBytes === null || maxBodyBytes === undefined) {
-      this.setSetting("max_body_bytes", "");
-      return this.localMaxBodyBytesGet();
-    }
-    const n = Number(maxBodyBytes);
-    if (!Number.isInteger(n) || n < MIN_BODY_BYTES || n > MAX_BODY_BYTES_CEILING) {
-      return { error: "INVALID_ARGS", message: `maxBodyBytes must be an integer between ${MIN_BODY_BYTES} and ${MAX_BODY_BYTES_CEILING}` };
-    }
-    this.setSetting("max_body_bytes", String(n));
-    return this.localMaxBodyBytesGet();
+    return this.admin.localMaxBodyBytesSet(body);
   }
 
   /** Debug/inspection: every not-yet-acked message in both directions, oldest
