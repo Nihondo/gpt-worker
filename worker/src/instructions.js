@@ -57,6 +57,27 @@ export const OPERATING_INSTRUCTIONS = Object.freeze({
   dedicated: render(body, fragments, "dedicated"),
 });
 
+function hashString(str) {
+  let h1 = 0x811c9dc5, h2 = 0xcbf29ce4;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 0x01000193);
+    h2 = Math.imul(h2 ^ (code >>> 1), 0x01000193);
+  }
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, "0");
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, "0");
+  return `${hex1}${hex2}`;
+}
+
+export const OPERATING_INSTRUCTIONS_VERSION = Object.freeze({
+  shared: hashString(OPERATING_INSTRUCTIONS.shared),
+  dedicated: hashString(OPERATING_INSTRUCTIONS.dedicated),
+});
+
 export function operatingInstructions(connector) {
   return connector === "shared" ? OPERATING_INSTRUCTIONS.shared : OPERATING_INSTRUCTIONS.dedicated;
+}
+
+export function operatingInstructionsVersion(connector) {
+  return connector === "shared" ? OPERATING_INSTRUCTIONS_VERSION.shared : OPERATING_INSTRUCTIONS_VERSION.dedicated;
 }

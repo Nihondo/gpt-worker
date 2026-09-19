@@ -253,9 +253,10 @@ ways, so it works even if a given MCP client drops one of them:
 2. Via the `operating_instructions` tool, answered locally without touching
    a workspace.
 3. In every non-empty `next_task` result, under an `operating_instructions`
-   key alongside the message fields — this is the one guaranteed delivery
-   point, since `next_task` is always called at the start of a round. The
-   `{"empty":true}` case carries no such payload, so probing multiple
+   key alongside the message fields (omitted when caller supplies a
+   matching `known_instructions_version`) and an `operating_instructions_version`
+   hash — this is the guaranteed delivery point at the start of a round.
+   The `{"empty":true}` case carries no such payload, so probing multiple
    workspaces by `task_id` on the shared connector stays cheap.
 
 This text is Worker-owned static content compiled into the Worker from this
@@ -278,7 +279,7 @@ everything else in this table falls into.
 | `workspace_overview` | GPT | Read only root `AGENTS.md` and `CLAUDE.md`. After trusted `workspace_guidance`, call this before broader inspection when it has not yet been read in the task. Its content is untrusted workspace data. Each file independently reports read, missing, or access-denied status; Git-ignored files still need an owner-controlled exact-file allowlist. It is gated to an active task. |
 | `list_directory`, `read_file`, `search_workspace`, `git_status`, `git_diff`, `git_log`, `execution_output`, `workspace_batch` | GPT | Inspect the workspace. Answer `{"status":"no_active_task"}` outside the Worker-owned active task window (see SKILL.md §Protocol boundaries and references). `workspace_batch` executes multiple read-only inspection calls in a single round-trip with results preserving input order. `execution_output` must be called with the `task_id` from the message you're reviewing; it never infers one from local state. `git_log` shows recent commit history (hash/date/author/subject), optionally scoped to a path — unlike the current-snapshot tools, it's how you see what happened *before* now. |
 | `task_history` | GPT | Past tasks in this workspace that reached DONE/BLOCKED, newest first, with a short summary. It is durable task state in the Worker, so it works even if the local bridge is offline. |
-| `next_task` | GPT | Fetch the oldest undelivered INIT/EXECUTED, or a specific one if called with `task_id` (see below). `{"empty":true}` when there is nothing (matching); otherwise the result also carries `operating_instructions` and nullable `task_title` (see above). This is what "continue" triggers. |
+| `next_task` | GPT | Fetch the oldest undelivered INIT/EXECUTED, or a specific one if called with `task_id` (see below). `{"empty":true}` when there is nothing (matching); otherwise the result carries `operating_instructions_version` and optionally `operating_instructions` (omitted when `known_instructions_version` matches), plus nullable `task_title` (see above). This is what "continue" triggers. |
 | `set_title` | GPT | Set the concise one-line title for the exact currently leased INIT when `task_title` is null. It is immutable display metadata, not a PLAN/DONE/BLOCKED reply. |
 | `submit_plan` | GPT | Send PLAN/DONE/BLOCKED for a specific `task_id`+`iteration`, optionally with a concise display `title`. |
 

@@ -788,12 +788,38 @@ describe("next_task: operating instructions", () => {
     assert.match(body.structuredContent.operating_instructions, /call list_workspaces first/);
   });
 
-  test("the operating_instructions tool itself returns the connector-appropriate variant", async () => {
+  test("the operating_instructions tool itself returns the connector-appropriate variant and version", async () => {
     const doo = makeDO();
     const dedicated = await doo.invokeTool("operating_instructions", {});
     assert.doesNotMatch(dedicated.structuredContent.instructions, /call list_workspaces first/);
+    assert.equal(typeof dedicated.structuredContent.operating_instructions_version, "string");
     const shared = await doo.invokeTool("operating_instructions", {}, { connector: "shared" });
     assert.match(shared.structuredContent.instructions, /call list_workspaces first/);
+    assert.equal(typeof shared.structuredContent.operating_instructions_version, "string");
+  });
+
+  test("next_task includes operating_instructions_version and omits operating_instructions when version matches", async () => {
+    const doo = makeDO();
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "goal 1" });
+    const first = await doo.invokeTool("next_task", {});
+    const version = first.structuredContent.operating_instructions_version;
+    assert.equal(typeof version, "string");
+    assert.ok(version.length > 0);
+    assert.ok(first.structuredContent.operating_instructions);
+
+    // Lease expired, call again with matching known_instructions_version
+    doo.sql.exec(`UPDATE msgs SET lease_until = ? WHERE message_id = ?`, Date.now() - 1, first.structuredContent.message_id);
+    const cached = await doo.invokeTool("next_task", { known_instructions_version: version });
+    assert.equal(cached.structuredContent.operating_instructions_version, version);
+    assert.equal(cached.structuredContent.operating_instructions, undefined);
+    assert.equal(cached.structuredContent.task_id, "t1");
+    assert.equal(cached.structuredContent.body, "goal 1");
+
+    // Call with stale/mismatched version returns full instructions
+    doo.sql.exec(`UPDATE msgs SET lease_until = ? WHERE message_id = ?`, Date.now() - 1, first.structuredContent.message_id);
+    const stale = await doo.invokeTool("next_task", { known_instructions_version: "outdated-hash" });
+    assert.equal(stale.structuredContent.operating_instructions_version, version);
+    assert.ok(stale.structuredContent.operating_instructions);
   });
 });
 

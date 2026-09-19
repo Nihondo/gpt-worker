@@ -44,7 +44,7 @@
 // module directly.
 
 import TOOLS from "./tools.json" with { type: "json" };
-import { operatingInstructions } from "./instructions.js";
+import { operatingInstructions, operatingInstructionsVersion } from "./instructions.js";
 import { isValidWorkspaceId, json, readJsonWithLimit } from "./worker-http.js";
 
 // Tools answered locally by the hub (no workspace_id involved) instead of
@@ -196,7 +196,14 @@ function createBridgeMcp({
       const { name, arguments: args = {} } = params;
       if (name === "list_workspaces") return json({ jsonrpc: "2.0", id, result: toolOk({ workspaces: registeredWorkspaces() }) });
       if (name === "operating_instructions") {
-        return json({ jsonrpc: "2.0", id, result: toolOk({ instructions: operatingInstructions("shared") }) });
+        return json({
+          jsonrpc: "2.0",
+          id,
+          result: toolOk({
+            instructions: operatingInstructions("shared"),
+            operating_instructions_version: operatingInstructionsVersion("shared"),
+          }),
+        });
       }
       if (!HUB_TOOLS.some((tool) => tool.name === name)) {
         return json({ jsonrpc: "2.0", id, result: toolError("UNKNOWN_TOOL", `No such tool: ${name}`) });
@@ -282,14 +289,28 @@ function createBridgeMcp({
       const tool = TOOLS.tools.find((t) => t.name === name);
       if (!tool) return toolError("UNKNOWN_TOOL", `No such tool: ${name}`);
       try {
-        if (tool.location === "instructions") return toolOk({ instructions: operatingInstructions(connector) });
+        if (tool.location === "instructions") {
+          return toolOk({
+            instructions: operatingInstructions(connector),
+            operating_instructions_version: operatingInstructionsVersion(connector),
+          });
+        }
         if (tool.location === "queue_next") {
           const next = queueNext(args && args.task_id);
-          // Worker-owned static protocol text, not queue data (see
-          // instructions.js). next_task is the one call guaranteed to happen
-          // at the start of a round, so it is the reliable delivery point if
-          // the connector drops InitializeResult.instructions.
-          return toolOk(next.empty ? next : { operating_instructions: operatingInstructions(connector), ...next });
+          if (next.empty) return toolOk(next);
+          const version = operatingInstructionsVersion(connector);
+          const matches =
+            args &&
+            typeof args.known_instructions_version === "string" &&
+            args.known_instructions_version === version;
+          if (matches) {
+            return toolOk({ ...next, operating_instructions_version: version });
+          }
+          return toolOk({
+            operating_instructions: operatingInstructions(connector),
+            operating_instructions_version: version,
+            ...next,
+          });
         }
         if (tool.location === "queue_submit") return queueSubmit(args);
         if (tool.location === "queue_set_title") return queueSetTitle(args);

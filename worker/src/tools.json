@@ -172,11 +172,12 @@
     {
       "name": "next_task",
       "title": "Next task",
-      "description": "Fetch the oldest pending control message from the local agent (INIT / EXECUTED). Returns {empty:true} when there is nothing new, or the message plus this connector's operating_instructions when there is. Call this whenever the user asks you to continue. If the user's message names a specific task (e.g. 'continue task <uuid>'), always pass that exact id as task_id so you fetch that task even if a different one is also pending; never call this without task_id when one was named.",
+      "description": "Fetch the oldest pending control message from the local agent (INIT / EXECUTED). Returns {empty:true} when there is nothing new, or the message plus operating_instructions (omitted when known_instructions_version matches the current version) and operating_instructions_version. Call this whenever the user asks you to continue. If the user's message names a specific task (e.g. 'continue task <uuid>'), always pass that exact id as task_id so you fetch that task even if a different one is also pending; never call this without task_id when one was named.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "task_id": { "type": "string", "description": "Optional: fetch only this task's next message. Omit to take the oldest pending message regardless of task." }
+          "task_id": { "type": "string", "description": "Optional: fetch only this task's next message. Omit to take the oldest pending message regardless of task." },
+          "known_instructions_version": { "type": "string", "description": "Optional: the operating_instructions_version you already hold from an earlier next_task or operating_instructions call in this conversation. If it matches the current server version, operating_instructions will be omitted to save context." }
         },
         "additionalProperties": false
       },
