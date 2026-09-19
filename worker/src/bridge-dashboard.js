@@ -166,6 +166,9 @@ function createBridgeDashboard({
   notifyDashboardTaskCreated,
   fetchHubBrowserSettings,
   fetchWorkspaceDashboardRelay,
+  openDashboardWebSocket,
+  broadcastDashboardEvent,
+  closeDashboardSockets,
   maxFixedRequestBytes,
   maxSharedRequestBytes,
   ackedMessageRetentionMs,
@@ -224,25 +227,60 @@ function createBridgeDashboard({
     return { raw, expiresAt: now + DASHBOARD_SESSION_TTL_MS };
   }
 
+  async function resolveSession(raw) {
+    if (typeof raw !== "string" || !raw) return null;
+    const hash = await hashSessionToken(raw);
+    const rows = sql.exec(`SELECT expires_at FROM dashboard_sessions WHERE session_hash = ?`, hash).toArray();
+    if (rows.length === 0) return null;
+    if (rows[0].expires_at < Date.now()) {
+      sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+      return null;
+    }
+    return { sessionHash: hash, expiresAt: rows[0].expires_at };
+  }
+
   /** Also opportunistically deletes an already-expired row it happens to hit,
    *  rather than waiting for the next alarm() sweep — cheap, and keeps a
    *  just-expired session from working until the next 24h alarm cycle runs. */
   async function verifySession(raw) {
-    if (typeof raw !== "string" || !raw) return false;
-    const hash = await hashSessionToken(raw);
-    const rows = sql.exec(`SELECT expires_at FROM dashboard_sessions WHERE session_hash = ?`, hash).toArray();
-    if (rows.length === 0) return false;
-    if (rows[0].expires_at < Date.now()) {
-      sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
-      return false;
-    }
-    return true;
+    const session = await resolveSession(raw);
+    return session !== null;
   }
 
   async function revokeSession(raw) {
     if (typeof raw !== "string" || !raw) return;
     const hash = await hashSessionToken(raw);
     sql.exec(`DELETE FROM dashboard_sessions WHERE session_hash = ?`, hash);
+    if (closeDashboardSockets) {
+      closeDashboardSockets({ sessionHash: hash });
+    }
+  }
+
+  async function handleDashboardWebSocket(request, { unauthBucket, authBucket, tag, role }) {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    const upgrade = request.headers.get("upgrade");
+    if (!upgrade || upgrade.toLowerCase() !== "websocket") {
+      return new Response("expected websocket upgrade", { status: 426, headers: { upgrade: "websocket" } });
+    }
+    if (!checkDashboardOrigin(request)) {
+      return json({ error: "FORBIDDEN_ORIGIN" }, 403, dashboardApiHeaders());
+    }
+    const session = await resolveSession(readDashboardSessionCookie(request));
+    if (!session) {
+      if (!consumeDashboardRateLimit(unauthBucket, DASHBOARD_API_RATE_LIMIT)) return rateLimitedResponse();
+      return json({ error: "UNAUTHENTICATED" }, 401, dashboardApiHeaders());
+    }
+    if (!consumeDashboardRateLimit(authBucket, DASHBOARD_API_RATE_LIMIT)) return rateLimitedResponse();
+
+    return openDashboardWebSocket({
+      tag,
+      attachment: {
+        kind: "dashboard",
+        role,
+        sessionHash: session.sessionHash,
+        expiresAt: session.expiresAt,
+      },
+    });
   }
 
   // Shared dashboard *mechanism* (workspace and hub). Bucket names and cookie
@@ -344,6 +382,9 @@ function createBridgeDashboard({
      *  already issued under the old value. */
     revokeAllDashboardSessions() {
       sql.exec(`DELETE FROM dashboard_sessions`);
+      if (closeDashboardSockets) {
+        closeDashboardSockets();
+      }
     },
 
     /** Sweeps already-expired rows — called from BridgeDO.alarm()'s normal
@@ -371,8 +412,18 @@ function createBridgeDashboard({
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleDashboardAppCss(request);
       if (subParts.length === 1 && subParts[0] === "login") return this.handleDashboardLogin(request, workspaceId);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleDashboardLogout(request, workspaceId);
+      if (subParts.length === 1 && subParts[0] === "ws") return this.handleDashboardWs(request, workspaceId);
       if (subParts[0] === "api") return this.handleDashboardApi(request, subParts.slice(1));
       return new Response("not found", { status: 404 });
+    },
+
+    async handleDashboardWs(request, workspaceId) {
+      return handleDashboardWebSocket(request, {
+        unauthBucket: "dashboard-ws-unauth",
+        authBucket: "dashboard-ws",
+        tag: "dashboard-workspace",
+        role: "workspace",
+      });
     },
 
     async handleDashboardShell(request, workspaceId) {
@@ -785,8 +836,38 @@ function createBridgeDashboard({
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleHubDashboardAppCss(request);
       if (subParts.length === 1 && subParts[0] === "login") return this.handleHubDashboardLogin(request);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleHubDashboardLogout(request);
+      if (subParts.length === 1 && subParts[0] === "ws") return this.handleHubDashboardWs(request);
       if (subParts[0] === "api") return this.handleHubDashboardApi(request, subParts.slice(1));
       return new Response("not found", { status: 404 });
+    },
+
+    async handleHubDashboardWs(request) {
+      return handleDashboardWebSocket(request, {
+        unauthBucket: "hub-dashboard-ws-unauth",
+        authBucket: "hub-dashboard-ws",
+        tag: "dashboard-hub",
+        role: "hub",
+      });
+    },
+
+    async handleHubDashboardInvalidation(request) {
+      if (!isHubInstance()) return new Response("not found", { status: 404 });
+      if (request.method !== "POST") return methodNotAllowed("POST");
+      const parsed = await readJsonWithLimit(request, maxFixedRequestBytes);
+      if (parsed.tooLarge) return json({ error: "PAYLOAD_TOO_LARGE" }, 413, dashboardApiHeaders());
+      if (parsed.parseError || !parsed.value || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
+        return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+      }
+      const { workspaceId, scope } = parsed.value;
+      if (typeof workspaceId !== "string" || typeof scope !== "string") {
+        return json({ error: "INVALID_ARGS" }, 400, dashboardApiHeaders());
+      }
+      const registered = registeredWorkspaces();
+      if (!registered.some((w) => w.workspace_id === workspaceId)) {
+        return json({ error: "WORKSPACE_NOT_REGISTERED" }, 404, dashboardApiHeaders());
+      }
+      broadcastDashboardEvent("dashboard-hub", { type: "invalidate", workspaceId, scope });
+      return json({ ok: true }, 200, dashboardApiHeaders());
     },
 
     async handleHubDashboardShell(request) {

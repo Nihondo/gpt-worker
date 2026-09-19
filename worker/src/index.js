@@ -846,6 +846,9 @@ export class BridgeDO {
           })
         );
       },
+      openDashboardWebSocket: (args) => this.openDashboardWebSocket(args),
+      broadcastDashboardEvent: (tag, payload) => this.broadcastDashboardEvent(tag, payload),
+      closeDashboardSockets: (args) => this.closeDashboardSockets(args),
       maxFixedRequestBytes: MAX_REQUEST_BYTES,
       maxSharedRequestBytes: MAX_REQUEST_BYTES_CEILING,
       ackedMessageRetentionMs: RETENTION_MS,
@@ -869,6 +872,7 @@ export class BridgeDO {
     // hubDashboardRelay) — never routed here from a public URL (the
     // top-level Worker's fetch has no path shape that reaches it).
     if (parts.length === 1 && parts[0] === "hub-dashboard-relay") return this.handleHubDashboardRelay(request);
+    if (parts.length === 1 && parts[0] === "hub-dashboard-invalidate") return this.handleHubDashboardInvalidation(request);
     // Web dashboard (docs/plans/queue-dashboard.md): forwarded here as
     // /dashboard/<workspace_id>[/...] — see the top-level routing comment.
     // Variable length (root shell, app.js, login/logout, api/*), so this
@@ -923,7 +927,40 @@ export class BridgeDO {
   // ======================= /admin : provisioning (this workspace's own DO) =======================
 
   async handleAdmin(request) {
-    return this.admin.handleAdmin(request);
+    let op = null;
+    if (request.method === "POST") {
+      try {
+        const peeked = await readJsonWithLimit(request.clone(), MAX_REQUEST_BYTES);
+        if (peeked && !peeked.tooLarge && !peeked.parseError && peeked.value) {
+          op = peeked.value.op;
+        }
+      } catch {}
+    }
+
+    const response = await this.admin.handleAdmin(request);
+
+    if (op && response.ok) {
+      let isSuccess = true;
+      try {
+        const data = await response.clone().json();
+        if (data && data.error) {
+          isSuccess = false;
+        }
+      } catch {
+        isSuccess = false;
+      }
+      if (isSuccess) {
+        if (op === "register_workspace" || op === "unregister_workspace") {
+          this.notifyDashboardInvalidation("registry");
+        } else if (op === "hub_browser_settings_set") {
+          this.notifyDashboardInvalidation("settings");
+        } else if (op === "deprovision" || op === "provision" || op === "migrate_default") {
+          this.notifyDashboardInvalidation("activity");
+        }
+      }
+    }
+
+    return response;
   }
 
   hubBrowserSettingsGet() {
@@ -931,7 +968,11 @@ export class BridgeDO {
   }
 
   hubBrowserSettingsSet(body) {
-    return this.admin.hubBrowserSettingsSet(body);
+    const res = this.admin.hubBrowserSettingsSet(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   hubOwnerTokenGet() {
@@ -951,7 +992,10 @@ export class BridgeDO {
    *  back into clearProtocolState()/clearOAuthState()/
    *  revokeAllDashboardSessions() below for the domains it doesn't own. */
   deprovision() {
-    return this.admin.deprovision();
+    this.closeDashboardSockets();
+    const res = this.admin.deprovision();
+    this.notifyDashboardInvalidation("activity");
+    return res;
   }
 
   /** Wipes every queued message and task row (bridge-protocol.js's
@@ -987,6 +1031,10 @@ export class BridgeDO {
    *  Only the named key changes; the other two (and every queued message)
    *  are untouched. Requires the workspace to already be provisioned. */
   rotateSecret(key) {
+    if (key === "gpt_token") {
+      this.revokeAllDashboardSessions();
+      this.closeDashboardSockets();
+    }
     return this.admin.rotateSecret(key);
   }
 
@@ -1007,11 +1055,19 @@ export class BridgeDO {
   }
 
   registerWorkspace(body) {
-    return this.admin.registerWorkspace(body);
+    const res = this.admin.registerWorkspace(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("registry");
+    }
+    return res;
   }
 
   unregisterWorkspace(body) {
-    return this.admin.unregisterWorkspace(body);
+    const res = this.admin.unregisterWorkspace(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("registry");
+    }
+    return res;
   }
 
   /** Adopts the exact token values from the pre-multi-tenant single-DO
@@ -1055,19 +1111,99 @@ export class BridgeDO {
   // ======================= /link : local bridge WebSocket =======================
 
   async handleLink(request, token) {
-    return this.transport.handleLink(request, token);
+    const res = await this.transport.handleLink(request, token);
+    if (res && res.status === 101) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   webSocketMessage(ws, message) {
+    if (ws?.deserializeAttachment?.()?.kind === "dashboard") return;
     return this.transport.webSocketMessage(ws, message);
   }
 
-  webSocketClose(...args) {
-    return this.transport.webSocketClose(...args);
+  webSocketClose(ws, ...args) {
+    if (ws?.deserializeAttachment?.()?.kind === "dashboard") return;
+    const res = this.transport.webSocketClose(ws, ...args);
+    this.notifyDashboardInvalidation("activity");
+    return res;
   }
 
-  webSocketError(...args) {
-    return this.transport.webSocketError(...args);
+  webSocketError(ws, ...args) {
+    if (ws?.deserializeAttachment?.()?.kind === "dashboard") return;
+    const res = this.transport.webSocketError(ws, ...args);
+    this.notifyDashboardInvalidation("activity");
+    return res;
+  }
+
+  openDashboardWebSocket({ tag, attachment }) {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    this.ctx.acceptWebSocket(server, [tag]);
+    if (server.serializeAttachment && attachment) {
+      server.serializeAttachment(attachment);
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  broadcastDashboardEvent(tag, payload) {
+    const now = Date.now();
+    const str = typeof payload === "string" ? payload : JSON.stringify(payload);
+    for (const ws of this.ctx.getWebSockets(tag)) {
+      const att = ws.deserializeAttachment ? ws.deserializeAttachment() : null;
+      if (att && att.expiresAt && att.expiresAt < now) {
+        try {
+          ws.close(1008, "session expired");
+        } catch {}
+        continue;
+      }
+      try {
+        ws.send(str);
+      } catch {}
+    }
+  }
+
+  closeDashboardSockets({ tag, sessionHash } = {}) {
+    const tags = tag ? [tag] : ["dashboard-workspace", "dashboard-hub"];
+    for (const t of tags) {
+      for (const ws of this.ctx.getWebSockets(t)) {
+        const att = ws.deserializeAttachment ? ws.deserializeAttachment() : null;
+        if (!sessionHash || (att && att.sessionHash === sessionHash)) {
+          try {
+            ws.close(1008, "session revoked");
+          } catch {}
+        }
+      }
+    }
+  }
+
+  notifyDashboardInvalidation(scope) {
+    if (this.isHubInstance()) {
+      this.broadcastDashboardEvent("dashboard-hub", { type: "invalidate", scope });
+      return;
+    }
+    this.broadcastDashboardEvent("dashboard-workspace", { type: "invalidate", scope });
+    const workspaceId = this.ctx?.id?.name;
+    if (workspaceId && this.env?.BRIDGE_DO) {
+      try {
+        const hub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(HUB_DO_NAME));
+        const promise = hub.fetch(
+          new Request("https://gpt-worker.internal/hub-dashboard-invalidate", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ workspaceId, scope }),
+          })
+        ).catch(() => {});
+        if (this.ctx?.waitUntil) {
+          this.ctx.waitUntil(promise);
+        }
+      } catch {}
+    }
+  }
+
+  async handleHubDashboardInvalidation(request) {
+    return this.dashboard.handleHubDashboardInvalidation(request);
   }
 
   failAllPending() {
@@ -1248,7 +1384,11 @@ export class BridgeDO {
    *  eligible — no fallback to a different task if it isn't there, since
    *  silently substituting one would be more confusing than {empty:true}. */
   queueNext(taskId) {
-    return this.protocol.queueNext(taskId);
+    const res = this.protocol.queueNext(taskId);
+    if (res && !res.empty && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   /**
@@ -1258,11 +1398,19 @@ export class BridgeDO {
    * PLAN/DONE/BLOCKED transition.
    */
   queueSetTitle(args) {
-    return this.protocol.queueSetTitle(args);
+    const res = this.protocol.queueSetTitle(args);
+    if (res && !res.isError && res.structuredContent?.idempotent === false) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   queueSubmit(args) {
-    return this.protocol.queueSubmit(args);
+    const res = this.protocol.queueSubmit(args);
+    if (res && !res.isError && (res.ok !== false)) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   /** Past tasks that reached a terminal state (DONE/BLOCKED), newest first —
@@ -1471,7 +1619,11 @@ export class BridgeDO {
    *  Refuses messages belonging to active tasks to keep protocol state consistent;
    *  callers must use localDiscardTask() instead. */
   localDiscard(body) {
-    return this.protocol.localDiscard(body);
+    const res = this.protocol.localDiscard(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   /** Marks every not-yet-acked message for a task_id as acked, without
@@ -1479,19 +1631,35 @@ export class BridgeDO {
    *  replaces an unfinished task — otherwise the abandoned control messages
    *  would sit in the queue forever. */
   localDiscardTask(body) {
-    return this.protocol.localDiscardTask(body);
+    const res = this.protocol.localDiscardTask(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localStartTask(body) {
-    return this.protocol.localStartTask(body);
+    const res = this.protocol.localStartTask(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localReportTask(body) {
-    return this.protocol.localReportTask(body);
+    const res = this.protocol.localReportTask(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localMigrateLegacyState(body) {
-    return this.protocol.localMigrateLegacyState(body);
+    const res = this.protocol.localMigrateLegacyState(body);
+    if (res && res.migrated) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   // Thin delegates onto the admin/settings/registry domain (bridge-admin.js)
@@ -1504,7 +1672,11 @@ export class BridgeDO {
   }
 
   localSettingsSet(body) {
-    return this.admin.localSettingsSet(body);
+    const res = this.admin.localSettingsSet(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   localBrowserSettingsGet() {
@@ -1512,15 +1684,27 @@ export class BridgeDO {
   }
 
   localBrowserSettingsSet(body) {
-    return this.admin.localBrowserSettingsSet(body);
+    const res = this.admin.localBrowserSettingsSet(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   localGuidanceSet(body) {
-    return this.admin.localGuidanceSet(body);
+    const res = this.admin.localGuidanceSet(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   localGuidanceClear() {
-    return this.admin.localGuidanceClear();
+    const res = this.admin.localGuidanceClear();
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   setSetting(key, value) {
@@ -1546,7 +1730,11 @@ export class BridgeDO {
   }
 
   localMaxBodyBytesSet(body) {
-    return this.admin.localMaxBodyBytesSet(body);
+    const res = this.admin.localMaxBodyBytesSet(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("settings");
+    }
+    return res;
   }
 
   /** Debug/inspection: every not-yet-acked message in both directions, oldest
@@ -1557,7 +1745,11 @@ export class BridgeDO {
   }
 
   localEnqueue(body) {
-    return this.protocol.localEnqueue(body);
+    const res = this.protocol.localEnqueue(body);
+    if (res && !res.error && !res.idempotent) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   async localPoll(body) {
@@ -1565,15 +1757,27 @@ export class BridgeDO {
   }
 
   localAck(body) {
-    return this.protocol.localAck(body);
+    const res = this.protocol.localAck(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localCompleteTask(body) {
-    return this.protocol.localCompleteTask(body);
+    const res = this.protocol.localCompleteTask(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localContinueTask(body) {
-    return this.protocol.localContinueTask(body);
+    const res = this.protocol.localContinueTask(body);
+    if (res && !res.error) {
+      this.notifyDashboardInvalidation("activity");
+    }
+    return res;
   }
 
   localStatus() {
@@ -1584,9 +1788,21 @@ export class BridgeDO {
 
   async alarm() {
     const cutoff = Date.now() - RETENTION_MS;
-    this.sql.exec(`DELETE FROM msgs WHERE state = 'acked' AND created_at < ?`, cutoff);
+    const msgsRes = this.sql.exec(`DELETE FROM msgs WHERE state = 'acked' AND created_at < ?`, cutoff);
+    const msgsChanges = typeof msgsRes?.rowsWritten === "number"
+      ? msgsRes.rowsWritten
+      : (this.sql.exec(`SELECT changes() AS n`).toArray()[0]?.n || 0);
+
     const taskCutoff = Date.now() - TASK_RETENTION_MS;
-    this.sql.exec(`DELETE FROM tasks WHERE protocol_state IN ('DONE', 'BLOCKED') AND updated_at < ?`, taskCutoff);
+    const tasksRes = this.sql.exec(`DELETE FROM tasks WHERE protocol_state IN ('DONE', 'BLOCKED') AND updated_at < ?`, taskCutoff);
+    const tasksChanges = typeof tasksRes?.rowsWritten === "number"
+      ? tasksRes.rowsWritten
+      : (this.sql.exec(`SELECT changes() AS n`).toArray()[0]?.n || 0);
+
+    if (msgsChanges > 0 || tasksChanges > 0) {
+      this.notifyDashboardInvalidation("activity");
+    }
+
     const now = Date.now();
     this.oauth.cleanupExpiredOAuthState(now);
     this.dashboard.cleanupExpiredDashboardSessions(now);

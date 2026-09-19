@@ -18,6 +18,44 @@ import COMMON_DASHBOARD_APP_JS from "../worker/src/dashboard/common-app.js";
 import WORKSPACE_PANEL_JS from "../worker/src/dashboard/workspace-panel.js";
 import DASHBOARD_CSS from "../worker/src/dashboard/dashboard.css";
 
+if (typeof globalThis.WebSocketPair === "undefined") {
+  class FakeWebSocket {
+    constructor() {
+      this.sent = [];
+      this.closed = null;
+      this.attachment = null;
+    }
+    send(data) { this.sent.push(data); }
+    close(code, reason) { this.closed = { code, reason }; }
+    serializeAttachment(att) { this.attachment = att; }
+    deserializeAttachment() { return this.attachment; }
+  }
+  globalThis.WebSocketPair = class WebSocketPair {
+    constructor() {
+      this[0] = new FakeWebSocket();
+      this[1] = new FakeWebSocket();
+    }
+  };
+}
+
+const OriginalResponse = globalThis.Response;
+try {
+  new OriginalResponse(null, { status: 101 });
+} catch {
+  class PatchedResponse extends OriginalResponse {
+    constructor(body, init) {
+      if (init && init.status === 101) {
+        super(null, { status: 200, headers: init.headers });
+        Object.defineProperty(this, "status", { value: 101, writable: false });
+        if (init.webSocket) this.webSocket = init.webSocket;
+        return;
+      }
+      super(body, init);
+    }
+  }
+  globalThis.Response = PatchedResponse;
+}
+
 const ORIGIN = "https://example.com";
 
 /** Real BridgeDO instances behind the same env.BRIDGE_DO binding shape as
@@ -32,7 +70,32 @@ function makeRealBridgeDoEnv() {
     },
   };
   function instanceFor(name) {
-    if (!instances.has(name)) instances.set(name, new BridgeDO(makeFakeCtx(), env));
+    if (!instances.has(name)) {
+      const ctx = makeFakeCtx();
+      ctx.id = { name };
+      const sockets = new Map();
+      const waitedPromises = [];
+      ctx.waitUntil = (p) => { waitedPromises.push(p); };
+      ctx.waitedPromises = waitedPromises;
+      ctx.acceptWebSocket = (ws, tags = []) => {
+        ws.tags = tags;
+        for (const t of tags) {
+          if (!sockets.has(t)) sockets.set(t, new Set());
+          sockets.get(t).add(ws);
+        }
+      };
+      ctx.getWebSockets = (tag) => {
+        if (!tag) {
+          const all = new Set();
+          for (const s of sockets.values()) {
+            for (const ws of s) all.add(ws);
+          }
+          return Array.from(all);
+        }
+        return Array.from(sockets.get(tag) || []);
+      };
+      instances.set(name, new BridgeDO(ctx, env));
+    }
     return instances.get(name);
   }
   return { instanceFor, env };
@@ -1611,9 +1674,8 @@ describe("dashboard: Phase 4 browser ESM/controller boundaries", () => {
     assert.match(WORKSPACE_DASHBOARD_APP_JS, /discardMessageRefresh: "messages"/);
     assert.match(WORKSPACE_DASHBOARD_APP_JS, /panel\.pollActivity\(\)/);
     assert.match(HUB_DASHBOARD_APP_JS, /discardMessageRefresh: "all"/);
-    assert.match(HUB_DASHBOARD_APP_JS, /onTaskStarted: function \(\) \{ loadWorkspaceList\(\); \}/);
+    assert.doesNotMatch(HUB_DASHBOARD_APP_JS, /onTaskStarted:\s*function\s*\(\)\s*\{\s*loadWorkspaceList\(\);?\s*\}/);
     assert.match(HUB_DASHBOARD_APP_JS, /panel\.pollActivity\(\)/);
-    assert.doesNotMatch(HUB_DASHBOARD_APP_JS, /panel\.refreshAll\(\)/);
   });
 
   test("direct and hub entries adapt cadence to visibility and task activity using completion-driven scheduling", () => {
@@ -1658,8 +1720,8 @@ describe("dashboard: Phase 4 browser ESM/controller boundaries", () => {
 
   test("direct and hub entries re-arm activity schedulers when panel notifies activity state changes", () => {
     assert.match(WORKSPACE_PANEL_JS, /adapter\.onActivityStateChanged/);
-    assert.match(WORKSPACE_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(!document\.hidden\)\s*scheduleNext\(\);?\s*\}/);
-    assert.match(HUB_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(state\.workspaceId\s*&&\s*!document\.hidden\)\s*scheduleNextActivity\(\);?\s*\}/);
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(!document\.hidden\s*&&\s*!wsHealthy\)\s*scheduleNext\(\);?\s*\}/);
+    assert.match(HUB_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(state\.workspaceId\s*&&\s*!document\.hidden\s*&&\s*!wsHealthy\)\s*scheduleNextActivity\(\);?\s*\}/);
   });
 
   test("panel applies adapter and task-history request generations together, including recursive pages", () => {
@@ -2066,5 +2128,476 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     });
 
     assert.match(DASHBOARD_CSS, /\.decision-actions/);
+  });
+});
+
+describe("dashboard: push-first hibernation WebSocket, targeted invalidation, and body-less messages", () => {
+  test("workspace and hub /ws require GET, websocket upgrade, strict origin, and valid session cookie", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    // non-GET
+    const postRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "POST",
+      headers: { origin: ORIGIN, upgrade: "websocket", cookie },
+    }), env);
+    assert.equal(postRes.status, 405);
+
+    // non-upgrade
+    const nonUpgradeRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, cookie },
+    }), env);
+    assert.equal(nonUpgradeRes.status, 426);
+
+    // cross-origin
+    const crossOriginRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "GET",
+      headers: { origin: "https://evil.com", upgrade: "websocket", cookie },
+    }), env);
+    assert.equal(crossOriginRes.status, 403);
+
+    // unauthenticated
+    const unauthRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, upgrade: "websocket" },
+    }), env);
+    assert.equal(unauthRes.status, 401);
+
+    // valid authenticated upgrade
+    const okRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, upgrade: "websocket", cookie },
+    }), env);
+    assert.equal(okRes.status, 101);
+
+    // Hub /ws checks
+    const hub = instanceFor("gpt-worker-hub");
+    const { gptToken: hubGptToken } = hub.provisionHub();
+    const hubCookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    const hubUnauthRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/hub/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, upgrade: "websocket" },
+    }), env);
+    assert.equal(hubUnauthRes.status, 401);
+
+    const hubOkRes = await worker.fetch(new Request(`${ORIGIN}/dashboard/hub/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, upgrade: "websocket", cookie: hubCookie },
+    }), env);
+    assert.equal(hubOkRes.status, 101);
+  });
+
+  test("openDashboardWebSocket receives correct tag and attachment, and closeDashboardSockets closes them", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    let recorded = null;
+    const origOpen = doo.openDashboardWebSocket.bind(doo);
+    doo.openDashboardWebSocket = ({ tag, attachment }) => {
+      recorded = { tag, attachment };
+      return origOpen({ tag, attachment });
+    };
+
+    const res = await worker.fetch(new Request(`${ORIGIN}/dashboard/${workspaceId}/ws`, {
+      method: "GET",
+      headers: { origin: ORIGIN, upgrade: "websocket", cookie },
+    }), env);
+    assert.equal(res.status, 101);
+    assert.ok(recorded);
+    assert.equal(recorded.tag, "dashboard-workspace");
+    assert.equal(recorded.attachment.kind, "dashboard");
+    assert.equal(recorded.attachment.role, "workspace");
+    assert.ok(recorded.attachment.sessionHash);
+    assert.ok(recorded.attachment.expiresAt > Date.now());
+
+    // Verify socket close on logout
+    const sockets = doo.ctx.getWebSockets("dashboard-workspace");
+    assert.equal(sockets.length, 1);
+    const ws = sockets[0];
+    assert.equal(ws.closed, null);
+
+    await worker.fetch(req(`/dashboard/${workspaceId}/logout`, {
+      method: "POST",
+      headers: { origin: ORIGIN, cookie },
+    }), env);
+    assert.deepEqual(ws.closed, { code: 1008, reason: "session revoked" });
+  });
+
+  test("dashboard socket events do not dispatch to local transport or fail pending RPC", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+
+    let failed = false;
+    doo.transport.failAllPending = () => { failed = true; };
+
+    const fakeWs = {
+      deserializeAttachment: () => ({ kind: "dashboard" }),
+    };
+
+    doo.webSocketMessage(fakeWs, JSON.stringify({ rid: "r1" }));
+    doo.webSocketClose(fakeWs);
+    doo.webSocketError(fakeWs);
+    assert.equal(failed, false, "dashboard socket close/error must not fail local pending RPC");
+  });
+
+  test("workspace mutations broadcast activity invalidation to direct socket and relays to hub DO", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "ws1" });
+
+    // Open workspace socket
+    const wsPair = new WebSocketPair();
+    doo.ctx.acceptWebSocket(wsPair[1], ["dashboard-workspace"]);
+    wsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+
+    // Open hub socket
+    const hubWsPair = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubWsPair[1], ["dashboard-hub"]);
+    hubWsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h2", expiresAt: Date.now() + 100000 });
+
+    // Perform mutation on workspace: localEnqueue
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "test" });
+
+    // Wait for waitUntil promises if any
+    if (doo.ctx.waitedPromises) {
+      await Promise.all(doo.ctx.waitedPromises);
+    }
+
+    assert.equal(wsPair[1].sent.length, 1);
+    const wsMsg = JSON.parse(wsPair[1].sent[0]);
+    assert.deepEqual(wsMsg, { type: "invalidate", scope: "activity" });
+
+    assert.equal(hubWsPair[1].sent.length, 1);
+    const hubMsg = JSON.parse(hubWsPair[1].sent[0]);
+    assert.deepEqual(hubMsg, { type: "invalidate", workspaceId, scope: "activity" });
+  });
+
+  test("unregistered workspace invalidation is rejected by hub DO and not broadcast to hub sockets", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+
+    const hubWsPair = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubWsPair[1], ["dashboard-hub"]);
+    hubWsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h2", expiresAt: Date.now() + 100000 });
+
+    const res = await hub.fetch(new Request("https://gpt-worker.internal/hub-dashboard-invalidate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspaceId: "unregistered_id", scope: "activity" }),
+    }));
+    assert.equal(res.status, 404);
+    assert.equal(hubWsPair[1].sent.length, 0);
+  });
+
+  test("register/unregister broadcasts scope: registry, and settings mutation broadcasts scope: settings", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+
+    const hubWsPair = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubWsPair[1], ["dashboard-hub"]);
+    hubWsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h", expiresAt: Date.now() + 100000 });
+
+    hub.registerWorkspace({ workspace_id: "0123456789abcdef", name: "ws" });
+    assert.equal(hubWsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[0]), { type: "invalidate", scope: "registry" });
+
+    hub.hubBrowserSettingsSet({ chatUrl: "https://chatgpt.com/g/g-p-test/project" });
+    assert.equal(hubWsPair[1].sent.length, 2);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[1]), { type: "invalidate", scope: "settings" });
+
+    hub.unregisterWorkspace({ workspace_id: "0123456789abcdef" });
+    assert.equal(hubWsPair[1].sent.length, 3);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[2]), { type: "invalidate", scope: "registry" });
+  });
+
+  test("link connect and webSocketClose trigger activity invalidation", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+
+    const wsPair = new WebSocketPair();
+    doo.ctx.acceptWebSocket(wsPair[1], ["dashboard-workspace"]);
+    wsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+
+    // handleLink
+    const linkSecret = doo.getSecret("link_token");
+    const linkReq = new Request(`${ORIGIN}/link/${linkSecret}`, {
+      method: "GET",
+      headers: { upgrade: "websocket" },
+    });
+    const linkRes = await doo.handleLink(linkReq, linkSecret);
+    assert.equal(linkRes.status, 101);
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[0]), { type: "invalidate", scope: "activity" });
+
+    // webSocketClose on local socket (not dashboard)
+    const localWs = { deserializeAttachment: () => ({ connected_at: Date.now() }) };
+    doo.webSocketClose(localWs);
+    assert.equal(wsPair[1].sent.length, 2);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[1]), { type: "invalidate", scope: "activity" });
+  });
+
+  test("source contract: direct and hub apps connect to WebSocket and suppress periodic polling while healthy", () => {
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      assert.match(js, /new WebSocket\(wsUrl\)/);
+      assert.match(js, /wsHealthy\s*=\s*true/);
+      assert.match(js, /if\s*\(document\.hidden\s*\|\|\s*wsHealthy\)\s*return;/);
+      assert.match(js, /socket\.onclose\s*=\s*function\s*\(\)\s*\{\s*handleWsDown\(socket\);\s*\}/);
+      assert.match(js, /socket\.onerror\s*=\s*function\s*\(\)\s*\{\s*handleWsDown\(socket\);\s*\}/);
+      assert.match(js, /hasConnectedOnce/);
+    });
+
+    // Hub specific: onTaskStarted does not load list, non-selected workspace updates only single row
+    assert.match(HUB_DASHBOARD_APP_JS, /refreshSingleWorkspaceStatus\(workspaceId\)/);
+    assert.match(HUB_DASHBOARD_APP_JS, /updateWorkspaceRowStatus\(target\.workspaceId,\s*data,\s*null\)/);
+  });
+
+  test("source contract: gapless first connection, bounded backoff, and stale socket protection", () => {
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      // Stale socket ignore
+      assert.match(js, /if\s*\(socket\s*&&\s*socket\s*!==\s*ws\)\s*return;/);
+      assert.match(js, /if\s*\(socket\s*!==\s*ws\)\s*return;/);
+      assert.match(js, /socket\.onclose\s*=\s*function\s*\(\)\s*\{\s*handleWsDown\(socket\);\s*\}/);
+      assert.match(js, /socket\.onerror\s*=\s*function\s*\(\)\s*\{\s*handleWsDown\(socket\);\s*\}/);
+
+      // Bounded backoff
+      assert.match(js, /RECONNECT_CAP_MS\s*=\s*60000/);
+      assert.match(js, /reconnectDelay\s*===\s*5000\s*\?\s*15000\s*:\s*reconnectDelay\s*===\s*15000\s*\?\s*30000\s*:\s*RECONNECT_CAP_MS/);
+      assert.match(js, /reconnectDelay\s*=\s*5000/);
+
+      // Hidden tab stops reconnect timer, visible resumes
+      assert.match(js, /clearReconnectTimer\(\)/);
+      assert.match(js, /if\s*\(reconnectTimer\s*\|\|\s*document\.hidden\s*\|\|\s*wsHealthy\)\s*return;/);
+      assert.match(js, /if\s*\(ws\s*\|\|\s*document\.hidden\)\s*return;/);
+
+      // Gapless first connect: buffers during initial load, catch-up refresh on first open after initial load
+      assert.match(js, /initialLoadDone\s*=\s*false/);
+      assert.match(js, /initialLoadDone\s*=\s*true/);
+    });
+
+    // Direct: first open after initial load refreshes panel
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /if\s*\(hasConnectedOnce\)\s*\{\s*panel\.refreshAll\(\);\s*\}\s*else\s*\{\s*hasConnectedOnce\s*=\s*true;\s*if\s*\(initialLoadDone\)\s*\{\s*panel\.refreshAll\(\);\s*\}\s*\}/);
+
+    // Hub: first open after initial load refreshes list and settings
+    assert.match(HUB_DASHBOARD_APP_JS, /if\s*\(hasConnectedOnce\)\s*\{.*loadWorkspaceList\(\);.*loadHubBrowserSettings\(\);/s);
+    assert.match(HUB_DASHBOARD_APP_JS, /hasConnectedOnce\s*=\s*true;\s*if\s*\(initialLoadDone\)\s*\{/);
+  });
+
+  test("queueSetTitle invalidates on first title change, and does not invalidate on idempotent retry", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+
+    // Connect WS
+    const wsPair = new WebSocketPair();
+    doo.ctx.acceptWebSocket(wsPair[1], ["dashboard-workspace"]);
+    wsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+
+    // Enqueue an INIT task and lease it
+    doo.localStartTask({ task_id: "t1", goal: "test goal", text: "GOAL:\ntest goal" });
+    const taskId = "t1";
+    const nextRes = doo.queueNext({ task_id: taskId });
+    const messageId = nextRes.message_id;
+
+    // Wait for waitUntil promises if any
+    if (doo.ctx.waitedPromises) await Promise.all(doo.ctx.waitedPromises);
+    // Drain any previous sent invalidations
+    wsPair[1].sent.length = 0;
+
+    // First set_title: should succeed and notify invalidation
+    const res1 = doo.queueSetTitle({
+      message_id: messageId,
+      task_id: taskId,
+      iteration: 0,
+      title: "First Title",
+    });
+    assert.equal(res1.isError, undefined);
+    assert.equal(res1.structuredContent?.idempotent, false);
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[0]), { type: "invalidate", scope: "activity" });
+
+    // Idempotent retry with same title: should NOT notify invalidation
+    const res2 = doo.queueSetTitle({
+      message_id: messageId,
+      task_id: taskId,
+      iteration: 0,
+      title: "First Title",
+    });
+    assert.equal(res2.isError, undefined);
+    assert.equal(res2.structuredContent?.idempotent, true);
+    assert.equal(wsPair[1].sent.length, 1); // No new message
+  });
+
+  test("alarm() sends activity invalidation when retention purge actually deletes rows", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "ws1" });
+
+    // Direct socket
+    const wsPair = new WebSocketPair();
+    doo.ctx.acceptWebSocket(wsPair[1], ["dashboard-workspace"]);
+    wsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+
+    // Hub socket
+    const hubWsPair = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubWsPair[1], ["dashboard-hub"]);
+    hubWsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h2", expiresAt: Date.now() + 100000 });
+
+    // Case 1: Empty or fresh rows -> alarm() should NOT broadcast invalidation
+    await doo.alarm();
+    if (doo.ctx.waitedPromises) await Promise.all(doo.ctx.waitedPromises);
+    assert.equal(wsPair[1].sent.length, 0);
+    assert.equal(hubWsPair[1].sent.length, 0);
+
+    // Insert an expired acked message (> 7 days old)
+    const oldCreatedAt = Date.now() - (8 * 24 * 60 * 60 * 1000);
+    doo.sql.exec(
+      `INSERT INTO msgs (message_id, task_id, iteration, dir, kind, state, lease_until, body, title, created_at)
+       VALUES ('old_m1', 't_old', 0, 'to_gpt', 'INIT', 'acked', 0, 'old body', null, ?)`,
+      oldCreatedAt
+    );
+
+    // Case 2: Alarm with expired message -> deletes row and broadcasts activity invalidation
+    await doo.alarm();
+    if (doo.ctx.waitedPromises) await Promise.all(doo.ctx.waitedPromises);
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[0]), { type: "invalidate", scope: "activity" });
+    assert.equal(hubWsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[0]), { type: "invalidate", workspaceId, scope: "activity" });
+
+    // Case 3: Running alarm again immediately -> no rows deleted, no extra invalidation
+    await doo.alarm();
+    if (doo.ctx.waitedPromises) await Promise.all(doo.ctx.waitedPromises);
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.equal(hubWsPair[1].sent.length, 1);
+  });
+
+  test("real /admin route triggers dashboard invalidations for registry, settings, deprovision and provision", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const adminToken = "secret-admin-token-123";
+    env.ADMIN_TOKEN = adminToken;
+
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+
+    // Open hub socket
+    const hubWsPair = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubWsPair[1], ["dashboard-hub"]);
+    hubWsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+
+    function adminReq(body) {
+      return new Request(`${ORIGIN}/admin/${adminToken}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    // 1. register_workspace via /admin route
+    const regRes = await worker.fetch(adminReq({
+      op: "register_workspace",
+      workspace_id: "0123456789abcdef",
+      name: "ws-alpha",
+    }), env);
+    assert.equal(regRes.status, 200);
+    assert.equal(hubWsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[0]), { type: "invalidate", scope: "registry" });
+
+    // 2. hub_browser_settings_set via /admin route (invalid args: no event added)
+    const badSettingsRes = await worker.fetch(adminReq({
+      op: "hub_browser_settings_set",
+      chatUrl: "not-a-valid-url",
+    }), env);
+    assert.equal(badSettingsRes.status, 200);
+    const badSettingsBody = await badSettingsRes.json();
+    assert.equal(badSettingsBody.error, "INVALID_ARGS");
+    assert.equal(hubWsPair[1].sent.length, 1); // no extra event
+
+    // 3. hub_browser_settings_set via /admin route (valid args: emits settings event)
+    const goodSettingsRes = await worker.fetch(adminReq({
+      op: "hub_browser_settings_set",
+      chatUrl: "https://chatgpt.com/g/g-p-test123456789012345678901234/project",
+    }), env);
+    assert.equal(goodSettingsRes.status, 200);
+    assert.equal(hubWsPair[1].sent.length, 2);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[1]), { type: "invalidate", scope: "settings" });
+
+    // 4. unregister_workspace via /admin route
+    const unregRes = await worker.fetch(adminReq({
+      op: "unregister_workspace",
+      workspace_id: "0123456789abcdef",
+    }), env);
+    assert.equal(unregRes.status, 200);
+    assert.equal(hubWsPair[1].sent.length, 3);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[2]), { type: "invalidate", scope: "registry" });
+
+    // 5. registered workspace /admin deprovision
+    const wsId = "0123456789abcdef";
+    const ws = instanceFor(wsId);
+    ws.provision();
+    hub.registerWorkspace({ workspace_id: wsId, name: "ws-deprov" });
+    // Drain previous events
+    if (ws.ctx.waitedPromises) await Promise.all(ws.ctx.waitedPromises);
+    hubWsPair[1].sent.length = 0;
+
+    // Open direct workspace socket
+    const wsPair = new WebSocketPair();
+    ws.ctx.acceptWebSocket(wsPair[1], ["dashboard-workspace"]);
+    wsPair[1].serializeAttachment({ kind: "dashboard", sessionHash: "w1", expiresAt: Date.now() + 100000 });
+
+    const deprovRes = await worker.fetch(adminReq({
+      op: "deprovision",
+      workspace_id: wsId,
+    }), env);
+    assert.equal(deprovRes.status, 200);
+
+    // Wait for ws.ctx.waitUntil relay to hub
+    if (ws.ctx.waitedPromises) await Promise.all(ws.ctx.waitedPromises);
+
+    // Workspace socket received activity invalidation
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[0]), { type: "invalidate", scope: "activity" });
+
+    // Hub socket received targeted activity invalidation for that workspaceId
+    assert.equal(hubWsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[0]), { type: "invalidate", workspaceId: wsId, scope: "activity" });
+
+    // 6. provision via /admin route
+    wsPair[1].sent.length = 0;
+    hubWsPair[1].sent.length = 0;
+    const provRes = await worker.fetch(adminReq({
+      op: "provision",
+      workspace_id: wsId,
+    }), env);
+    assert.equal(provRes.status, 200);
+    if (ws.ctx.waitedPromises) await Promise.all(ws.ctx.waitedPromises);
+
+    assert.equal(wsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(wsPair[1].sent[0]), { type: "invalidate", scope: "activity" });
+    assert.equal(hubWsPair[1].sent.length, 1);
+    assert.deepEqual(JSON.parse(hubWsPair[1].sent[0]), { type: "invalidate", workspaceId: wsId, scope: "activity" });
+  });
+
+  test("source contract: body-less messages in panel, lazy loading, and body preservation", () => {
+    // Snapshot and loadMessages include &include_body=0
+    assert.match(WORKSPACE_PANEL_JS, /loadSnapshot.*&include_body=0/s);
+    assert.match(WORKSPACE_PANEL_JS, /loadMessages.*&include_body=0/s);
+
+    // Detail lazy loads via loadMessageDetail when body === undefined
+    assert.match(WORKSPACE_PANEL_JS, /function loadMessageDetail\(messageId,\s*taskId,\s*target\)/);
+    assert.match(WORKSPACE_PANEL_JS, /loadMessageDetail\(m\.messageId,\s*m\.taskId,\s*target\)/);
+    assert.match(WORKSPACE_PANEL_JS, /q\s*=\s*"\?task_id="\s*\+\s*encodeURIComponent\(taskId\)\s*\+\s*"&limit=100"/);
+
+    // Preserves loaded bodies
+    assert.match(WORKSPACE_PANEL_JS, /bodyMap\[m\.messageId\]/);
+    assert.match(WORKSPACE_PANEL_JS, /prevBody !== undefined \? Object\.assign\(\{\},\s*fresh,\s*\{\s*body:\s*prevBody\s*\}\)\s*:\s*fresh/);
   });
 });

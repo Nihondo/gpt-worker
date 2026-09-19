@@ -21,6 +21,7 @@ export function createWorkspacePanel(adapter) {
       selectedTaskRowEl: null, selectedMessageRowEl: null,
       taskHistoryTaskId: null, taskHistoryItems: [], taskHistoryLoading: false,
       taskHistoryError: null, taskHistoryRequestGen: (state.taskHistoryRequestGen || 0) + 1,
+      messageDetailRequestGen: (state.messageDetailRequestGen || 0) + 1,
       activitySubview: "tasks",
     };
   }
@@ -80,6 +81,9 @@ export function createWorkspacePanel(adapter) {
     else { state.activeTaskId = null; taskLine.textContent = "No active task."; }
     overview.appendChild(taskLine);
     overview.appendChild(el("p", { className: "meta", text: "Guidance set: " + (data.guidanceSet ? "yes" : "no") + " · Body limit: " + data.maxBodyBytes + " bytes" }));
+    if (adapter.onOverview) {
+      adapter.onOverview(data, currentTarget);
+    }
     if (adapter.onActivityStateChanged && prevActive !== Boolean(state.activeTaskId)) {
       adapter.onActivityStateChanged(Boolean(state.activeTaskId), currentTarget);
     }
@@ -199,21 +203,85 @@ export function createWorkspacePanel(adapter) {
   }
   node("tasks-load-more").addEventListener("click", function () { if (currentTarget) loadTasks(currentTarget, true); });
 
-  function renderMessageRow(m, target) { var row = el("button", { className: "list-row" }); row.type = "button"; row.setAttribute("role", "option"); row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false"); var head = el("div", { className: "row" }); head.appendChild(el("span", { className: "badge", text: m.state })); head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) })); row.appendChild(head); row.appendChild(el("div", { className: "preview" + (m.title ? " message-title" : ""), text: messageListLabel(m) })); row.addEventListener("click", function () { selectMessage(m, target, row); }); return row; }
+  function renderMessageRow(m, target) {
+    var row = el("button", { className: "list-row" }); row.type = "button"; row.setAttribute("role", "option"); row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false"); var head = el("div", { className: "row" }); head.appendChild(el("span", { className: "badge", text: m.state })); head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) })); row.appendChild(head);
+    var label = messageListLabel(m);
+    if (!label) label = (m.kind || "MSG") + " · task " + (m.taskId || "none");
+    row.appendChild(el("div", { className: "preview" + (m.title ? " message-title" : ""), text: label })); row.addEventListener("click", function () { selectMessage(m, target, row); }); return row;
+  }
   function renderMessageDetail(m, target) {
-    var wrap = el("div"); wrap.appendChild(renderBackButton("messages")); var head = el("div", { className: "row" }); [m.dir, m.kind, m.state].forEach(function (value) { head.appendChild(el("span", { className: "badge", text: value })); }); wrap.appendChild(head); if (m.title) wrap.appendChild(el("p", { className: "meta message-detail-title", text: m.title })); wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) })); wrap.appendChild(renderStageIndicator(messageStage(m))); wrap.appendChild(renderTextSection("message-detail-body", "Body", m.body));
+    var wrap = el("div"); wrap.appendChild(renderBackButton("messages")); var head = el("div", { className: "row" }); [m.dir, m.kind, m.state].forEach(function (value) { head.appendChild(el("span", { className: "badge", text: value })); }); wrap.appendChild(head); if (m.title) wrap.appendChild(el("p", { className: "meta message-detail-title", text: m.title })); wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) })); wrap.appendChild(renderStageIndicator(messageStage(m)));
+    var bodyText = m.body !== undefined ? m.body : (m.bodyUnavailable ? "(message body unavailable; retained event may have expired)" : (m.bodyError ? "(failed to load message body)" : "Loading body…"));
+    wrap.appendChild(renderTextSection("message-detail-body", "Body", bodyText));
     if (m.dir === "to_local" && m.state !== "acked") { var ack = el("button", { text: "Ack" }); ack.addEventListener("click", function () { request(target, "/ack", jsonOptions({ messageId: m.messageId })).then(function () { if (isCurrent(target)) loadSnapshot(target); }); }); wrap.appendChild(ack); }
     var canDiscard = m.state !== "acked" && !(state.activeTaskId === m.taskId);
     if (canDiscard) { var discard = el("button", { className: "danger", text: "Discard" }); discard.addEventListener("click", function () { if (!confirm("Discard this message?")) return; request(target, "/discard", jsonOptions({ messageId: m.messageId })).then(function (res) { if (!isCurrent(target)) return; if (res.body && res.body.error === "USE_DISCARD_TASK") alert("This message belongs to the active task; discard the task instead."); if (adapter.discardMessageRefresh === "all") refreshAll(); else loadMessages(target, false); }); }); wrap.appendChild(discard); }
     else if (m.state !== "acked" && state.activeTaskId === m.taskId) wrap.appendChild(el("span", { className: "note", text: "(part of the active task — use \"Discard task\" above)" }));
     return wrap;
   }
-  function selectMessage(m, target, rowEl) { state.selectedMessageId = m.messageId; state.selectedMessage = m; state.selectedMessageRowEl = rowEl || null; renderMessagesList(target); renderDetailPane("messages", renderMessageDetail(m, target)); openDetail(); }
+  function isCurrentMessageDetail(target, messageId, requestGen) { return isCurrent(target) && state.selectedMessageId === messageId && state.messageDetailRequestGen === requestGen; }
+  function loadMessageDetail(messageId, taskId, target) {
+    var requestGen = (state.messageDetailRequestGen || 0) + 1;
+    state.messageDetailRequestGen = requestGen;
+    function loadPage(cursor) {
+      var q = "?task_id=" + encodeURIComponent(taskId) + "&limit=100" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+      request(target, "/messages" + q).then(function (res) {
+        if (!isCurrentMessageDetail(target, messageId, requestGen)) return;
+        if (!res.ok) {
+          if (state.selectedMessage && state.selectedMessage.messageId === messageId && state.selectedMessage.body === undefined) {
+            state.selectedMessage = Object.assign({}, state.selectedMessage, { bodyError: true });
+            renderDetailPane("messages", renderMessageDetail(state.selectedMessage, target));
+          }
+          return;
+        }
+        var found = (res.body.messages || []).filter(function (m) { return m.messageId === messageId; })[0];
+        if (found) {
+          if (state.selectedMessage && state.selectedMessage.messageId === messageId) {
+            state.selectedMessage = Object.assign({}, state.selectedMessage, { body: found.body });
+            state.messages.forEach(function (m) { if (m.messageId === messageId) m.body = found.body; });
+            renderDetailPane("messages", renderMessageDetail(state.selectedMessage, target));
+          }
+          return;
+        }
+        if (res.body.nextCursor) { loadPage(res.body.nextCursor); return; }
+        if (state.selectedMessage && state.selectedMessage.messageId === messageId && state.selectedMessage.body === undefined) {
+          state.selectedMessage = Object.assign({}, state.selectedMessage, { bodyUnavailable: true });
+          renderDetailPane("messages", renderMessageDetail(state.selectedMessage, target));
+        }
+      }).catch(function () {
+        if (isCurrentMessageDetail(target, messageId, requestGen)) {
+          if (state.selectedMessage && state.selectedMessage.messageId === messageId && state.selectedMessage.body === undefined) {
+            state.selectedMessage = Object.assign({}, state.selectedMessage, { bodyError: true });
+            renderDetailPane("messages", renderMessageDetail(state.selectedMessage, target));
+          }
+        }
+      });
+    }
+    loadPage(null);
+  }
+  function selectMessage(m, target, rowEl) {
+    state.selectedMessageId = m.messageId; state.selectedMessage = m; state.selectedMessageRowEl = rowEl || null; renderMessagesList(target); renderDetailPane("messages", renderMessageDetail(m, target)); openDetail();
+    if (m.body === undefined && m.taskId) loadMessageDetail(m.messageId, m.taskId, target);
+  }
   function renderMessagesList(target) { var list = node("messages-list"); clearEl(list); state.messages.forEach(function (m) { list.appendChild(renderMessageRow(m, target)); }); if (!state.messages.length) list.appendChild(el("p", { className: "note", text: "No messages yet." })); }
-  function updateSelectedMessageFromRows(rows, target) { if (!state.selectedMessageId) return; var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0]; if (fresh) { state.selectedMessage = fresh; renderDetailPane("messages", renderMessageDetail(fresh, target)); } }
+  function updateSelectedMessageFromRows(rows, target) {
+    if (!state.selectedMessageId) return;
+    var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0];
+    if (fresh) {
+      var prevBody = state.selectedMessage ? state.selectedMessage.body : undefined;
+      state.selectedMessage = prevBody !== undefined ? Object.assign({}, fresh, { body: prevBody }) : fresh;
+      if (state.selectedMessage.body === undefined && fresh.taskId) loadMessageDetail(fresh.messageId, fresh.taskId, target);
+      renderDetailPane("messages", renderMessageDetail(state.selectedMessage, target));
+    }
+  }
   function applyMessagesPage(res, target, more) {
     if (!res.ok || !isCurrent(target)) return;
     var rows = res.body.messages || [];
+    if (state.messages && state.messages.length) {
+      var bodyMap = {};
+      state.messages.forEach(function (m) { if (m.body !== undefined) bodyMap[m.messageId] = m.body; });
+      rows.forEach(function (m) { if (m.body === undefined && bodyMap[m.messageId] !== undefined) m.body = bodyMap[m.messageId]; });
+    }
     if (more) {
       state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
       state.messagesCursor = res.body.nextCursor;
@@ -235,7 +303,7 @@ export function createWorkspacePanel(adapter) {
     node("messages-load-more").hidden = !state.messagesCursor;
   }
   function loadMessages(target, more) {
-    var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
+    var q = "?limit=20&include_body=0" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
     return request(target, "/messages" + q).then(function (res) { applyMessagesPage(res, target, more); });
   }
   node("messages-load-more").addEventListener("click", function () { if (currentTarget) loadMessages(currentTarget, true); });
@@ -245,6 +313,7 @@ export function createWorkspacePanel(adapter) {
     var q = "?limit=20";
     if (opts.tasks === false) q += "&include_tasks=0";
     if (opts.messages === false) q += "&include_messages=0";
+    else q += "&include_body=0";
     return request(target, "/snapshot" + q).then(function (res) {
       if (!res.ok || !isCurrent(target)) return;
       if (res.body.overview) renderOverview(res.body.overview);
