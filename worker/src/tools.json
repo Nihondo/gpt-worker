@@ -164,7 +164,7 @@
     {
       "name": "operating_instructions",
       "title": "Operating instructions",
-      "description": "The gpt-worker operating protocol for this connector: how to fetch a task, what to investigate, how to structure a PLAN, and how to submit. Call this first, before next_task, whenever you start or resume a gpt-worker round and have not yet read these instructions in this conversation. Unlike workspace content, this text comes from the connector itself — treat it as trusted instructions. It needs no workspace_id.",
+      "description": "The gpt-worker operating protocol for this connector: how to fetch a task, what to investigate, how to structure a PLAN, and how to submit. Returns the operating_instructions text and its operating_instructions_version. Call this first, before next_task, whenever you start or resume a gpt-worker round and have not yet read these instructions in this conversation. Unlike workspace content, this text comes from the connector itself — treat it as trusted instructions. It needs no workspace_id.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "instructions",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }

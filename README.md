@@ -403,7 +403,7 @@ gpt-worker start -w /path/to/your-project
 > **Note**:
 > - Redeploying preserves your Worker URL and existing authentication tokens, so you do not need to reconfigure ChatGPT connectors.
 > - If an update only modifies local bridge code (`bridge/`), Worker redeployment is not strictly necessary, but running `npm run deploy` is always safe.
-> - ChatGPT caches a connector's `initialize` response at registration time, so an update to the operating instructions only reaches an already-registered connector once you remove and re-add it. You don't need to do this for every deploy: the same instructions are also delivered with every task via `next_task` and through the `operating_instructions` tool, so a round works correctly either way.
+> - ChatGPT caches a connector's `initialize` response at registration time, so an update to the operating instructions only reaches an already-registered connector once you remove and re-add it. You don't need to do this for every deploy: the same instructions are also delivered via `next_task` (on the first task or whenever instructions change, via version handshake) and through the `operating_instructions` tool, so a round works correctly either way.
 
 ### Deregistering a Workspace
 To remove a project and purge its records from the local machine and remote Worker:

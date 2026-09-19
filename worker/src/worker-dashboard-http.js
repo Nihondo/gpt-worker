@@ -77,8 +77,8 @@ function dashboardHtmlHeaders() {
     "referrer-policy": "no-referrer",
     // script-src 'self' (not the OAuth consent page's script-less CSP,
     // which can't run the dashboard's polling/kanban JS) — see
-    // Dashboard scripts and styles are fixed same-origin Text modules.
-    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    // Dashboard scripts, styles, and icons are fixed same-origin modules/assets.
+    "content-security-policy": "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   };
 }
 
@@ -88,6 +88,10 @@ function dashboardJsHeaders() {
 
 function dashboardCssHeaders() {
   return { "content-type": "text/css; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" };
+}
+
+function dashboardPngHeaders() {
+  return { "content-type": "image/png", "cache-control": "public, max-age=86400", "referrer-policy": "no-referrer" };
 }
 
 function dashboardApiHeaders() {
@@ -137,6 +141,7 @@ export {
   dashboardHtmlHeaders,
   dashboardJsHeaders,
   dashboardCssHeaders,
+  dashboardPngHeaders,
   dashboardApiHeaders,
   encodeDashboardCursor,
   decodeDashboardCursor,
