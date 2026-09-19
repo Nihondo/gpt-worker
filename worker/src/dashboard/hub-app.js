@@ -58,6 +58,7 @@
       request: function (target, path, options) { return wsApiFor(target.workspaceId, path, options); },
       isCurrent: function (target) { return state.workspaceId === target.workspaceId && state.selectionGen === target.generation; },
       onTaskStarted: function () { loadWorkspaceList(); },
+      onActivityStateChanged: function () { if (state.workspaceId && !document.hidden) scheduleNextActivity(); },
       discardMessageRefresh: "all",
     });
 

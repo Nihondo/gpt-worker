@@ -426,6 +426,7 @@ function createBridgeDashboard({
      *  through one of those two already-gated callers. */
     async dashboardApiDispatch(name, method, request, url) {
       if (name === "overview" && method === "GET") return json(this.dashboardOverview(), 200, dashboardApiHeaders());
+      if (name === "snapshot" && method === "GET") return json(this.dashboardSnapshot(url.searchParams), 200, dashboardApiHeaders());
       if (name === "messages" && method === "GET") return json(this.dashboardMessages(url.searchParams), 200, dashboardApiHeaders());
       if (name === "tasks" && method === "GET") return json(this.dashboardTasks(url.searchParams), 200, dashboardApiHeaders());
       if (name === "guidance" && method === "GET") return json(workspaceGuidance(), 200, dashboardApiHeaders());
@@ -464,6 +465,23 @@ function createBridgeDashboard({
         maxBodyBytes: localMaxBodyBytesGet().maxBodyBytes,
         retention: { ackedMessagesMs: ackedMessageRetentionMs, terminalTasksMs: terminalTaskRetentionMs },
       };
+    },
+
+    dashboardSnapshot(params) {
+      const res = {
+        overview: this.dashboardOverview(),
+      };
+      const listParams = new URLSearchParams();
+      if (params.has("limit")) listParams.set("limit", params.get("limit"));
+      if (params.get("include_tasks") !== "0") {
+        res.tasks = this.dashboardTasks(listParams);
+      }
+      if (params.get("include_messages") !== "0") {
+        const msgParams = new URLSearchParams(listParams);
+        if (params.has("include_body")) msgParams.set("include_body", params.get("include_body"));
+        res.messages = this.dashboardMessages(msgParams);
+      }
+      return res;
     },
 
     /** Retention-bounded (§"retention 境界"), acked-included message history —

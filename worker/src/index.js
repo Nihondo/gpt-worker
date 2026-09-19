@@ -1328,6 +1328,10 @@ export class BridgeDO {
     return this.dashboard.dashboardTasks(params);
   }
 
+  dashboardSnapshot(params) {
+    return this.dashboard.dashboardSnapshot(params);
+  }
+
   async handleDashboard(request, workspaceId, subParts) {
     return this.dashboard.handleDashboard(request, workspaceId, subParts);
   }

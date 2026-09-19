@@ -36,6 +36,7 @@
       request: function (requestTarget, path, options) { return api("/api" + path, options); },
       isCurrent: function (requestTarget) { return requestTarget === target; },
       discardMessageRefresh: "messages",
+      onActivityStateChanged: function () { if (!document.hidden) scheduleNext(); },
     });
 
     var timer = null;

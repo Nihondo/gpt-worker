@@ -61,8 +61,8 @@ export function createWorkspacePanel(adapter) {
     node("messages-detail").hidden = which !== "messages";
     closeDetail();
     if (changed && currentTarget) {
-      if (which === "tasks") loadTasks(currentTarget, false);
-      else if (which === "messages") loadMessages(currentTarget, false);
+      if (which === "tasks") loadSnapshot(currentTarget, { messages: false });
+      else if (which === "messages") loadSnapshot(currentTarget, { tasks: false });
     }
   }
   node("tab-tasks").addEventListener("click", function () { setActivityTab("tasks"); });
@@ -170,13 +170,39 @@ export function createWorkspacePanel(adapter) {
   function selectTask(t, target, rowEl) { var changed = state.selectedTaskId !== t.taskId; state.selectedTaskId = t.taskId; state.selectedTask = t; state.selectedTaskRowEl = rowEl || null; if (changed) loadTaskHistory(t.taskId, target); renderTasksList(target); renderDetailPane("tasks", renderTaskDetail(t, target)); openDetail(); }
   function renderTasksList(target) { var list = node("tasks-list"); clearEl(list); state.tasks.forEach(function (t) { list.appendChild(renderTaskRow(t, target)); }); if (!state.tasks.length) list.appendChild(el("p", { className: "note", text: "No tasks yet." })); }
   function updateSelectedTaskFromRows(rows, target) { if (!state.selectedTaskId) return; var fresh = rows.filter(function (t) { return t.taskId === state.selectedTaskId; })[0]; if (fresh) { var changed = state.selectedTask && state.selectedTask.updatedAt !== fresh.updatedAt; state.selectedTask = fresh; if (changed) loadTaskHistory(fresh.taskId, target); renderDetailPane("tasks", renderTaskDetail(fresh, target)); } }
-  function loadTasks(target, more) { var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : ""); return request(target, "/tasks" + q).then(function (res) { if (!res.ok || !isCurrent(target)) return; var rows = res.body.tasks || []; if (more) { state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator); state.tasksCursor = res.body.nextCursor; state.tasksExpanded = true; } else if (state.tasksExpanded) { if (res.body.nextCursor) state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator); else { state.tasks = rows; state.tasksCursor = null; state.tasksExpanded = false; } updateSelectedTaskFromRows(rows, target); } else { state.tasks = rows; state.tasksCursor = res.body.nextCursor; updateSelectedTaskFromRows(rows, target); } renderTasksList(target); node("tasks-load-more").hidden = !state.tasksCursor; }); }
+  function applyTasksPage(res, target, more) {
+    if (!res.ok || !isCurrent(target)) return;
+    var rows = res.body.tasks || [];
+    if (more) {
+      state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+      state.tasksCursor = res.body.nextCursor;
+      state.tasksExpanded = true;
+    } else if (state.tasksExpanded) {
+      if (res.body.nextCursor) state.tasks = mergeRows(state.tasks, rows, "taskId", taskComparator);
+      else {
+        state.tasks = rows;
+        state.tasksCursor = null;
+        state.tasksExpanded = false;
+      }
+      updateSelectedTaskFromRows(rows, target);
+    } else {
+      state.tasks = rows;
+      state.tasksCursor = res.body.nextCursor;
+      updateSelectedTaskFromRows(rows, target);
+    }
+    renderTasksList(target);
+    node("tasks-load-more").hidden = !state.tasksCursor;
+  }
+  function loadTasks(target, more) {
+    var q = "?limit=20" + (more && state.tasksCursor ? "&cursor=" + encodeURIComponent(state.tasksCursor) : "");
+    return request(target, "/tasks" + q).then(function (res) { applyTasksPage(res, target, more); });
+  }
   node("tasks-load-more").addEventListener("click", function () { if (currentTarget) loadTasks(currentTarget, true); });
 
   function renderMessageRow(m, target) { var row = el("button", { className: "list-row" }); row.type = "button"; row.setAttribute("role", "option"); row.setAttribute("aria-selected", state.selectedMessageId === m.messageId ? "true" : "false"); var head = el("div", { className: "row" }); head.appendChild(el("span", { className: "badge", text: m.state })); head.appendChild(el("span", { className: "meta", text: fmtTime(m.createdAt) })); row.appendChild(head); row.appendChild(el("div", { className: "preview" + (m.title ? " message-title" : ""), text: messageListLabel(m) })); row.addEventListener("click", function () { selectMessage(m, target, row); }); return row; }
   function renderMessageDetail(m, target) {
     var wrap = el("div"); wrap.appendChild(renderBackButton("messages")); var head = el("div", { className: "row" }); [m.dir, m.kind, m.state].forEach(function (value) { head.appendChild(el("span", { className: "badge", text: value })); }); wrap.appendChild(head); if (m.title) wrap.appendChild(el("p", { className: "meta message-detail-title", text: m.title })); wrap.appendChild(el("p", { className: "meta", text: "task=" + m.taskId + " iter=" + m.iteration + " " + fmtTime(m.createdAt) })); wrap.appendChild(renderStageIndicator(messageStage(m))); wrap.appendChild(renderTextSection("message-detail-body", "Body", m.body));
-    if (m.dir === "to_local" && m.state !== "acked") { var ack = el("button", { text: "Ack" }); ack.addEventListener("click", function () { request(target, "/ack", jsonOptions({ messageId: m.messageId })).then(function () { if (isCurrent(target)) { loadMessages(target, false); loadOverview(target); loadTasks(target, false); } }); }); wrap.appendChild(ack); }
+    if (m.dir === "to_local" && m.state !== "acked") { var ack = el("button", { text: "Ack" }); ack.addEventListener("click", function () { request(target, "/ack", jsonOptions({ messageId: m.messageId })).then(function () { if (isCurrent(target)) loadSnapshot(target); }); }); wrap.appendChild(ack); }
     var canDiscard = m.state !== "acked" && !(state.activeTaskId === m.taskId);
     if (canDiscard) { var discard = el("button", { className: "danger", text: "Discard" }); discard.addEventListener("click", function () { if (!confirm("Discard this message?")) return; request(target, "/discard", jsonOptions({ messageId: m.messageId })).then(function (res) { if (!isCurrent(target)) return; if (res.body && res.body.error === "USE_DISCARD_TASK") alert("This message belongs to the active task; discard the task instead."); if (adapter.discardMessageRefresh === "all") refreshAll(); else loadMessages(target, false); }); }); wrap.appendChild(discard); }
     else if (m.state !== "acked" && state.activeTaskId === m.taskId) wrap.appendChild(el("span", { className: "note", text: "(part of the active task — use \"Discard task\" above)" }));
@@ -185,15 +211,59 @@ export function createWorkspacePanel(adapter) {
   function selectMessage(m, target, rowEl) { state.selectedMessageId = m.messageId; state.selectedMessage = m; state.selectedMessageRowEl = rowEl || null; renderMessagesList(target); renderDetailPane("messages", renderMessageDetail(m, target)); openDetail(); }
   function renderMessagesList(target) { var list = node("messages-list"); clearEl(list); state.messages.forEach(function (m) { list.appendChild(renderMessageRow(m, target)); }); if (!state.messages.length) list.appendChild(el("p", { className: "note", text: "No messages yet." })); }
   function updateSelectedMessageFromRows(rows, target) { if (!state.selectedMessageId) return; var fresh = rows.filter(function (m) { return m.messageId === state.selectedMessageId; })[0]; if (fresh) { state.selectedMessage = fresh; renderDetailPane("messages", renderMessageDetail(fresh, target)); } }
-  function loadMessages(target, more) { var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : ""); return request(target, "/messages" + q).then(function (res) { if (!res.ok || !isCurrent(target)) return; var rows = res.body.messages || []; if (more) { state.messages = mergeRows(state.messages, rows, "messageId", messageComparator); state.messagesCursor = res.body.nextCursor; state.messagesExpanded = true; } else if (state.messagesExpanded) { if (res.body.nextCursor) state.messages = mergeRows(state.messages, rows, "messageId", messageComparator); else { state.messages = rows; state.messagesCursor = null; state.messagesExpanded = false; } updateSelectedMessageFromRows(rows, target); } else { state.messages = rows; state.messagesCursor = res.body.nextCursor; updateSelectedMessageFromRows(rows, target); } renderMessagesList(target); node("messages-load-more").hidden = !state.messagesCursor; }); }
+  function applyMessagesPage(res, target, more) {
+    if (!res.ok || !isCurrent(target)) return;
+    var rows = res.body.messages || [];
+    if (more) {
+      state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+      state.messagesCursor = res.body.nextCursor;
+      state.messagesExpanded = true;
+    } else if (state.messagesExpanded) {
+      if (res.body.nextCursor) state.messages = mergeRows(state.messages, rows, "messageId", messageComparator);
+      else {
+        state.messages = rows;
+        state.messagesCursor = null;
+        state.messagesExpanded = false;
+      }
+      updateSelectedMessageFromRows(rows, target);
+    } else {
+      state.messages = rows;
+      state.messagesCursor = res.body.nextCursor;
+      updateSelectedMessageFromRows(rows, target);
+    }
+    renderMessagesList(target);
+    node("messages-load-more").hidden = !state.messagesCursor;
+  }
+  function loadMessages(target, more) {
+    var q = "?limit=20" + (more && state.messagesCursor ? "&cursor=" + encodeURIComponent(state.messagesCursor) : "");
+    return request(target, "/messages" + q).then(function (res) { applyMessagesPage(res, target, more); });
+  }
   node("messages-load-more").addEventListener("click", function () { if (currentTarget) loadMessages(currentTarget, true); });
 
-  function loadAll() { var target = currentTarget; if (!target) return; return Promise.all([loadOverview(target), loadGuidance(target), loadLimits(target), loadBrowserSettings(target), loadMessages(target, false), loadTasks(target, false)]); }
+  function loadSnapshot(target, options) {
+    var opts = options || {};
+    var q = "?limit=20";
+    if (opts.tasks === false) q += "&include_tasks=0";
+    if (opts.messages === false) q += "&include_messages=0";
+    return request(target, "/snapshot" + q).then(function (res) {
+      if (!res.ok || !isCurrent(target)) return;
+      if (res.body.overview) renderOverview(res.body.overview);
+      if (res.body.tasks) applyTasksPage({ ok: true, body: res.body.tasks }, target, false);
+      if (res.body.messages) applyMessagesPage({ ok: true, body: res.body.messages }, target, false);
+    });
+  }
+
+  function loadAll() {
+    var target = currentTarget;
+    if (!target) return;
+    return Promise.all([loadSnapshot(target), loadGuidance(target), loadLimits(target), loadBrowserSettings(target)]);
+  }
   function pollActivity() {
     var target = currentTarget;
     if (!target) return;
-    var subview = state.activitySubview === "messages" ? loadMessages(target, false) : loadTasks(target, false);
-    return Promise.all([loadOverview(target), subview]);
+    return state.activitySubview === "messages"
+      ? loadSnapshot(target, { tasks: false })
+      : loadSnapshot(target, { messages: false });
   }
   function refreshAll() { return loadAll(); }
   function hasActiveTask() { return Boolean(state.activeTaskId); }

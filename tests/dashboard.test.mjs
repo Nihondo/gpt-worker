@@ -555,6 +555,92 @@ describe("dashboard: message/task history pagination and retention framing", () 
   });
 });
 
+describe("dashboard: consolidated snapshot API", () => {
+  test("direct GET /api/snapshot returns overview, tasks, and messages matching individual first-page responses", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "message body 1" });
+    const now = Date.now();
+    doo.sql.exec(
+      `INSERT INTO tasks (task_id, goal, title, iteration, protocol_state, waiting_for, task_started_at, updated_at, terminal_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      "t2",
+      "test goal",
+      "test title",
+      0,
+      "WAITING_PLAN",
+      "PLAN",
+      now - 1000,
+      now,
+      null,
+    );
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    // Direct snapshot
+    const snapRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/snapshot?limit=10`, { headers: { cookie } }), env);
+    assert.equal(snapRes.status, 200);
+    const snap = await snapRes.json();
+
+    // Individual endpoints
+    const overviewRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/overview`, { headers: { cookie } }), env);
+    const overviewExpected = await overviewRes.json();
+    const tasksRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/tasks?limit=10`, { headers: { cookie } }), env);
+    const tasksExpected = await tasksRes.json();
+    const messagesRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/messages?limit=10`, { headers: { cookie } }), env);
+    const messagesExpected = await messagesRes.json();
+
+    assert.deepEqual(snap.overview, overviewExpected);
+    assert.deepEqual(snap.tasks, tasksExpected);
+    assert.deepEqual(snap.messages, messagesExpected);
+  });
+
+  test("direct GET /api/snapshot respects include_tasks=0 and include_messages=0 filtering", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "msg" });
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    // include_messages=0
+    const noMsgRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/snapshot?include_messages=0`, { headers: { cookie } }), env);
+    const noMsg = await noMsgRes.json();
+    assert.ok(noMsg.overview);
+    assert.ok(noMsg.tasks);
+    assert.equal(noMsg.messages, undefined);
+
+    // include_tasks=0
+    const noTasksRes = await worker.fetch(req(`/dashboard/${workspaceId}/api/snapshot?include_tasks=0`, { headers: { cookie } }), env);
+    const noTasks = await noTasksRes.json();
+    assert.ok(noTasks.overview);
+    assert.equal(noTasks.tasks, undefined);
+    assert.ok(noTasks.messages);
+  });
+
+  test("hub relay forwards snapshot queries and preserves filtering and isolation", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const { hub, hubGptToken } = makeHub(env, instanceFor);
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "A" });
+    doo.localEnqueue({ kind: "INIT", task_id: "t1", iteration: 0, body: "msg" });
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    const res = await worker.fetch(
+      req(`/dashboard/hub/api/workspaces/${workspaceId}/snapshot?limit=5&include_messages=0`, { headers: { cookie } }),
+      env,
+    );
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.ok(body.overview);
+    assert.ok(body.tasks);
+    assert.equal(body.messages, undefined);
+
+    // Isolation: unregistered workspace is 404
+    const unregRes = await worker.fetch(
+      req(`/dashboard/hub/api/workspaces/unknownworkspace12/snapshot`, { headers: { cookie } }),
+      env,
+    );
+    assert.equal(unregRes.status, 404);
+  });
+});
+
 describe("dashboard: ack / discard / discard-task constraints", () => {
   test("ack only succeeds for to_local messages", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
@@ -1434,14 +1520,14 @@ describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesE
 
     assert.match(js, /tasksExpanded: false, messagesExpanded: false/, "state must track whether Load more has expanded each list");
 
-    const loadTasksIndex = js.indexOf("function loadTasks(target, more)");
+    const loadTasksIndex = js.indexOf("function applyTasksPage(res, target, more)");
     assert.ok(loadTasksIndex >= 0);
     const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
     assert.match(loadTasksBody, /state\.tasksExpanded = true/, "Load more must mark the list expanded");
     assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/, "an expanded poll response must be merged into the retained cache, not replace it");
     assert.doesNotMatch(loadTasksBody, /if \(!more\) \{\s*state\.tasks = rows;/, "must not unconditionally replace the list on every non-Load-more fetch regardless of expansion state");
 
-    const loadMessagesIndex = js.indexOf("function loadMessages(target, more)");
+    const loadMessagesIndex = js.indexOf("function applyMessagesPage(res, target, more)");
     assert.ok(loadMessagesIndex >= 0);
     const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
     assert.match(loadMessagesBody, /state\.messagesExpanded = true/, "Load more must mark the list expanded");
@@ -1463,13 +1549,13 @@ describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesE
     assert.match(selectBody, /tasksExpanded: false/, "switching workspaces must reset the previous workspace's expansion state");
     assert.match(selectBody, /messagesExpanded: false/, "switching workspaces must reset the previous workspace's expansion state");
 
-    const loadTasksIndex = js.indexOf("function loadTasks(target, more)");
+    const loadTasksIndex = js.indexOf("function applyTasksPage(res, target, more)");
     assert.ok(loadTasksIndex >= 0);
     const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
     assert.match(loadTasksBody, /state\.tasksExpanded = true/);
     assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/);
 
-    const loadMessagesIndex = js.indexOf("function loadMessages(target, more)");
+    const loadMessagesIndex = js.indexOf("function applyMessagesPage(res, target, more)");
     assert.ok(loadMessagesIndex >= 0);
     const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
     assert.match(loadMessagesBody, /state\.messagesExpanded = true/);
@@ -1551,8 +1637,29 @@ describe("dashboard: Phase 4 browser ESM/controller boundaries", () => {
     assert.match(WORKSPACE_PANEL_JS, /function hasActiveTask\(\)/);
     assert.match(WORKSPACE_PANEL_JS, /Boolean\(state\.activeTaskId\)/);
     const tabSwitchBody = WORKSPACE_PANEL_JS.slice(WORKSPACE_PANEL_JS.indexOf("function setActivityTab"), WORKSPACE_PANEL_JS.indexOf('node("tab-tasks").addEventListener'));
-    assert.match(tabSwitchBody, /loadTasks\(currentTarget, false\)/);
-    assert.match(tabSwitchBody, /loadMessages\(currentTarget, false\)/);
+    assert.match(tabSwitchBody, /loadSnapshot\(currentTarget,\s*\{\s*messages:\s*false\s*\}\)/);
+    assert.match(tabSwitchBody, /loadSnapshot\(currentTarget,\s*\{\s*tasks:\s*false\s*\}\)/);
+  });
+
+  test("shared panel activation and polling consolidate activity reads through snapshot", () => {
+    assert.match(WORKSPACE_PANEL_JS, /function loadSnapshot\(target, options\)/);
+    assert.match(WORKSPACE_PANEL_JS, /request\(target, "\/snapshot" \+ q\)/);
+    const loadAllBody = WORKSPACE_PANEL_JS.slice(WORKSPACE_PANEL_JS.indexOf("function loadAll()"), WORKSPACE_PANEL_JS.indexOf("function pollActivity()"));
+    assert.match(loadAllBody, /loadSnapshot\(target\)/);
+    assert.doesNotMatch(loadAllBody, /loadOverview/);
+    assert.doesNotMatch(loadAllBody, /loadTasks/);
+    assert.doesNotMatch(loadAllBody, /loadMessages/);
+    const pollActivityBody = WORKSPACE_PANEL_JS.slice(WORKSPACE_PANEL_JS.indexOf("function pollActivity()"), WORKSPACE_PANEL_JS.indexOf("function refreshAll()"));
+    assert.match(pollActivityBody, /loadSnapshot\(target, \{\s*tasks:\s*false\s*\}\)/);
+    assert.match(pollActivityBody, /loadSnapshot\(target, \{\s*messages:\s*false\s*\}\)/);
+    assert.match(WORKSPACE_PANEL_JS, /request\(target, "\/tasks" \+ q\)/);
+    assert.match(WORKSPACE_PANEL_JS, /request\(target, "\/messages" \+ q\)/);
+  });
+
+  test("direct and hub entries re-arm activity schedulers when panel notifies activity state changes", () => {
+    assert.match(WORKSPACE_PANEL_JS, /adapter\.onActivityStateChanged/);
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(!document\.hidden\)\s*scheduleNext\(\);?\s*\}/);
+    assert.match(HUB_DASHBOARD_APP_JS, /onActivityStateChanged:\s*function\s*\(\)\s*\{\s*if\s*\(state\.workspaceId\s*&&\s*!document\.hidden\)\s*scheduleNextActivity\(\);?\s*\}/);
   });
 
   test("panel applies adapter and task-history request generations together, including recursive pages", () => {
