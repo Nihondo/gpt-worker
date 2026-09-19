@@ -329,10 +329,10 @@ gpt-worker url
 
 Open the `WebUI URL` (`https://<your-worker>.workers.dev/dashboard/hub`) and log in with that shared hub token (**not** a single workspace's `gpt_token`; that one is rejected here). After login you get a workspace picker listing every workspace registered with this shared connector (the same set `gpt-worker init` adds you to and `list_workspaces` shows ChatGPT); selecting one gives you the exact same view/actions as that workspace's own dashboard above. The two logins are entirely separate sessions — a workspace session can't reach the hub dashboard and a hub session can't directly authenticate a workspace's own dashboard URL — and the hub only ever reaches a workspace_id it has registered, never an arbitrary one.
 
-What it can and can't do:
+Capabilities and behavior:
 - **Can do**: browse pending messages and full task exchange history with timestamps, ack or discard messages, view and edit guidance or body limits, view/edit/clear browser settings (shared ChatGPT Project URL, workspace override, conversation URL), start new tasks from the browser (available from both the per-workspace and hub dashboards).
-- **Can't do (current design)**: real-time push updates (the dashboard uses adaptive polling when visible: ~30s while active, ~2m when idle, and ~60s for the Hub workspace list, paused while hidden; it does not hold an open WebSocket push connection to the browser yet).
-- Retention follows standard policies: an acked message is removed after 7 days, and completed task history after 30 days.
+- **Real-time updates**: supports real-time push updates over WebSocket, immediately reflecting task progress, message exchanges, and setting changes in the browser (automatically falls back to adaptive polling — ~30s while active, ~2m when idle, ~60s for the Hub workspace list — if the WebSocket disconnects, and pauses updates while the tab is hidden).
+- **Data retention**: follows standard Worker policies (an acked message is removed after 7 days, and completed task history after 30 days).
 
 A workspace's own dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`). A hub dashboard session is revoked immediately if you rotate the shared hub token (`gpt-worker rotate --hub`) — see [Data Retention](#data-retention).
 
