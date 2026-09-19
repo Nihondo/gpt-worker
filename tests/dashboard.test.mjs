@@ -14,6 +14,8 @@ import worker, { BridgeDO } from "../worker/src/index.js";
 import { makeFakeCtx } from "./helpers/fake-do-ctx.mjs";
 import WORKSPACE_DASHBOARD_APP_JS from "../worker/src/dashboard/workspace-app.js";
 import HUB_DASHBOARD_APP_JS from "../worker/src/dashboard/hub-app.js";
+import COMMON_DASHBOARD_APP_JS from "../worker/src/dashboard/common-app.js";
+import WORKSPACE_PANEL_JS from "../worker/src/dashboard/workspace-panel.js";
 import DASHBOARD_CSS from "../worker/src/dashboard/dashboard.css";
 
 const ORIGIN = "https://example.com";
@@ -1342,15 +1344,10 @@ describe("hub dashboard: untrusted content and app.js safety", () => {
     assert.doesNotMatch(html, /<script>alert\(1\)<\/script>/, "the server-rendered shell never embeds registry content — only client JS renders it via textContent");
   });
 
-  test("hub app.js's ack handler also refreshes via loadMessages(id, gen, false), not the raw fetch result", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    const js = await res.text();
-    assert.match(js, /wsApiFor\(id, "\/ack"/);
-    assert.doesNotMatch(js, /\/ack"[\s\S]*?\)\.then\(loadMessages\)/, "must not pass the api() result directly as loadMessages(more)");
-    const ackCallIndex = js.indexOf('wsApiFor(id, "/ack"');
-    const nextChunk = js.slice(ackCallIndex, ackCallIndex + 400);
-    assert.match(nextChunk, /loadMessages\(id, gen, false\)/);
+  test("the shared panel ack handler refreshes the first page rather than passing the response to loadMessages", () => {
+    assert.match(WORKSPACE_PANEL_JS, /request\(target, "\/ack"/);
+    assert.doesNotMatch(WORKSPACE_PANEL_JS, /\/ack"[\s\S]*?\.then\(loadMessages\)/);
+    assert.match(WORKSPACE_PANEL_JS, /loadMessages\(target, false\)/);
   });
 
   // Regression coverage for the reviewed cross-workspace UI race (a slower
@@ -1359,9 +1356,7 @@ describe("hub dashboard: untrusted content and app.js safety", () => {
   // click could then write to the wrong target) — source-level, not a
   // browser/DOM test, same rationale as the ack-callback check above.
   test("hub app.js guards every per-workspace request with a selection generation and a fixed target id, never mutable global state alone", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    const js = await res.text();
+    const js = HUB_DASHBOARD_APP_JS;
 
     assert.match(js, /selectionGen/, "must track a selection generation to detect a stale in-flight response");
     assert.match(js, /function wsApiFor\(workspaceId, path, options\)/, "every per-workspace call must take its target workspaceId explicitly");
@@ -1374,21 +1369,14 @@ describe("hub dashboard: untrusted content and app.js safety", () => {
     assert.ok(selectIndex >= 0);
     const selectBody = js.slice(selectIndex, selectIndex + 1000);
     assert.match(selectBody, /selectionGen \+= 1/);
-    assert.match(selectBody, /clearEl\(document\.getElementById\("messages-list"\)\)/);
-    assert.match(selectBody, /clearEl\(document\.getElementById\("tasks-list"\)\)/);
+    assert.match(selectBody, /workspaceId: id, generation: state\.selectionGen/);
+    assert.match(selectBody, /panel\.activate\(target, \{ clearView: true \}\)/);
 
     // Every load*() response handler must check the captured generation
     // against the current one before touching the DOM.
-    ["loadOverview", "loadGuidance", "loadLimits", "loadBrowserSettings", "loadMessages", "loadTasks"].forEach((fnName) => {
-      const fnIndex = js.indexOf("function " + fnName + "(");
-      assert.ok(fnIndex >= 0, fnName + " must exist");
-      const fnBody = js.slice(fnIndex, fnIndex + 500);
-      assert.match(fnBody, /gen === state\.selectionGen|gen !== state\.selectionGen/, fnName + " must guard its response against a stale selection generation");
-    });
-
-    // Browser settings mutation handlers must also guard error/success UI against stale selectionGen
-    assert.match(js, /chat-project-override-save[\s\S]*?gen === state\.selectionGen/);
-    assert.match(js, /conversation-url-save[\s\S]*?gen === state\.selectionGen/);
+    assert.match(WORKSPACE_PANEL_JS, /adapter\.isCurrent\(target\)/);
+    assert.match(WORKSPACE_PANEL_JS, /isCurrentTaskHistory\(target, taskId, requestGen\)/);
+    assert.match(js, /wsApiFor\(target\.workspaceId, path, options\)/);
   });
 });
 
@@ -1399,16 +1387,9 @@ describe("dashboard: app.js ack callback regression (loadMessages(more) argument
   // would silently pass the resolved {ok,status,body} object through as
   // `more`. Assert the served app.js never does that for the ack call, and
   // does call loadMessages(false) (a real page-refresh) afterward instead.
-  test("the ack button's api(...).then(...) never passes the fetch result straight into loadMessages", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    const js = await res.text();
-    assert.match(js, /api\("\/api\/ack"/);
-    assert.doesNotMatch(js, /\/api\/ack"[\s\S]*?\)\.then\(loadMessages\)/, "must not pass the api() result directly as loadMessages(more)");
-    const ackCallIndex = js.indexOf('api("/api/ack"');
-    const nextChunk = js.slice(ackCallIndex, ackCallIndex + 400);
-    assert.match(nextChunk, /loadMessages\(false\)/, "the ack handler must explicitly refresh the first page");
+  test("the shared panel ack callback never passes the fetch result to loadMessages", () => {
+    assert.doesNotMatch(WORKSPACE_PANEL_JS, /\/ack"[\s\S]*?\.then\(loadMessages\)/);
+    assert.match(WORKSPACE_PANEL_JS, /loadMessages\(target, false\)/);
   });
 });
 
@@ -1433,11 +1414,11 @@ function assertExpandedPollNeverOverwritesDeepestCursor(fnBody, cursorField, exp
   );
   assert.match(
     fnBody,
-    new RegExp("state\\." + cursorField + " = null;\\s*\\n\\s*state\\." + expandedField + " = false;"),
+    new RegExp("state\\." + cursorField + " = null;\\s*state\\." + expandedField + " = false;"),
     "the expanded-poll collapse branch must reset both the cursor and the expanded flag once the first page covers the whole retained dataset"
   );
-  assert.match(fnBody, new RegExp("loadMoreBtn\\.hidden = !state\\." + cursorField + ";"), "Load more visibility must read the retained state cursor");
-  assert.doesNotMatch(fnBody, /loadMoreBtn\.hidden = !res\.body\.nextCursor;/, "Load more visibility must not read the raw response cursor directly");
+  assert.match(fnBody, new RegExp("hidden = !state\\." + cursorField + ";"), "Load more visibility must read the retained state cursor");
+  assert.doesNotMatch(fnBody, /hidden = !res\.body\.nextCursor;/, "Load more visibility must not read the raw response cursor directly");
 }
 
 describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesExpanded contract)", () => {
@@ -1448,22 +1429,19 @@ describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesE
   // nextCursor, silently dropping every row loaded past page 1 and resetting
   // the "load more" boundary. Source-level regression check, not a
   // browser/DOM test, same rationale as the ack-callback checks above.
-  test("workspace app.js tracks expansion state and merges (not replaces) the list once Load more has been used", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    const js = await res.text();
+  test("shared panel tracks expansion state and merges (not replaces) the list once Load more has been used", () => {
+    const js = WORKSPACE_PANEL_JS;
 
     assert.match(js, /tasksExpanded: false, messagesExpanded: false/, "state must track whether Load more has expanded each list");
 
-    const loadTasksIndex = js.indexOf("function loadTasks(more)");
+    const loadTasksIndex = js.indexOf("function loadTasks(target, more)");
     assert.ok(loadTasksIndex >= 0);
     const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
     assert.match(loadTasksBody, /state\.tasksExpanded = true/, "Load more must mark the list expanded");
     assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/, "an expanded poll response must be merged into the retained cache, not replace it");
     assert.doesNotMatch(loadTasksBody, /if \(!more\) \{\s*state\.tasks = rows;/, "must not unconditionally replace the list on every non-Load-more fetch regardless of expansion state");
 
-    const loadMessagesIndex = js.indexOf("function loadMessages(more)");
+    const loadMessagesIndex = js.indexOf("function loadMessages(target, more)");
     assert.ok(loadMessagesIndex >= 0);
     const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
     assert.match(loadMessagesBody, /state\.messagesExpanded = true/, "Load more must mark the list expanded");
@@ -1474,26 +1452,24 @@ describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesE
     assertExpandedPollNeverOverwritesDeepestCursor(loadMessagesBody, "messagesCursor", "messagesExpanded");
   });
 
-  test("hub app.js has the same Load-more-survives-polling contract, and resets it when switching workspaces", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    const js = await res.text();
+  test("hub uses the shared Load-more-survives-polling controller and resets it on panel activation", () => {
+    const js = WORKSPACE_PANEL_JS;
 
     assert.match(js, /tasksExpanded: false, messagesExpanded: false/, "state must track whether Load more has expanded each list");
 
-    const selectIndex = js.indexOf("function selectWorkspace(id, name)");
-    assert.ok(selectIndex >= 0);
-    const selectBody = js.slice(selectIndex, selectIndex + 1000);
-    assert.match(selectBody, /state\.tasksExpanded = false/, "switching workspaces must reset the previous workspace's expansion state");
-    assert.match(selectBody, /state\.messagesExpanded = false/, "switching workspaces must reset the previous workspace's expansion state");
+    const resetIndex = js.indexOf("function reset()");
+    assert.ok(resetIndex >= 0);
+    const selectBody = js.slice(resetIndex, resetIndex + 1000);
+    assert.match(selectBody, /tasksExpanded: false/, "switching workspaces must reset the previous workspace's expansion state");
+    assert.match(selectBody, /messagesExpanded: false/, "switching workspaces must reset the previous workspace's expansion state");
 
-    const loadTasksIndex = js.indexOf("function loadTasks(id, gen, more)");
+    const loadTasksIndex = js.indexOf("function loadTasks(target, more)");
     assert.ok(loadTasksIndex >= 0);
     const loadTasksBody = js.slice(loadTasksIndex, js.indexOf('document.getElementById("tasks-load-more").addEventListener', loadTasksIndex));
     assert.match(loadTasksBody, /state\.tasksExpanded = true/);
     assert.match(loadTasksBody, /mergeRows\(state\.tasks, rows, "taskId", taskComparator\)/);
 
-    const loadMessagesIndex = js.indexOf("function loadMessages(id, gen, more)");
+    const loadMessagesIndex = js.indexOf("function loadMessages(target, more)");
     assert.ok(loadMessagesIndex >= 0);
     const loadMessagesBody = js.slice(loadMessagesIndex, js.indexOf('document.getElementById("messages-load-more").addEventListener', loadMessagesIndex));
     assert.match(loadMessagesBody, /state\.messagesExpanded = true/);
@@ -1505,36 +1481,64 @@ describe("dashboard: Load more rows survive 10s polling (tasksExpanded/messagesE
 });
 
 describe("dashboard: task exchange-history detail", () => {
-  test("workspace and hub apps load all body-free task messages, render them chronologically, and guard stale responses", () => {
-    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+  test("shared panel loads all body-free task messages, renders them chronologically, and guards stale responses", () => {
+    [WORKSPACE_PANEL_JS].forEach((js) => {
       assert.match(js, /function renderTaskHistory\(t\)/);
       assert.match(js, /Exchange history/);
       assert.match(js, /task-history-list/);
-      assert.match(js, /function formatTimelineTime\(ms\)/);
+      assert.match(COMMON_DASHBOARD_APP_JS, /function formatTimelineTime\(ms\)/);
       assert.match(js, /encodeURIComponent\(taskId\).*include_body=0/);
       assert.match(js, /function loadTaskHistory\(/);
       assert.match(js, /res\.body\.nextCursor/);
       assert.match(js, /a\.createdAt - b\.createdAt/);
+      assert.match(js, /String\(a\.messageId\)\.localeCompare\(String\(b\.messageId\)\)/);
       assert.match(js, /m\.kind \|\| "UNKNOWN"/);
       assert.doesNotMatch(js.slice(js.indexOf("function renderTaskHistory"), js.indexOf("function isCurrentTaskHistory")), /m\.body/);
     });
-    assert.match(WORKSPACE_DASHBOARD_APP_JS, /taskHistoryRequestGen/);
-    assert.match(WORKSPACE_DASHBOARD_APP_JS, /state\.selectedTaskId === taskId/);
-    assert.match(HUB_DASHBOARD_APP_JS, /state\.workspaceId === id && state\.selectionGen === gen/);
-    assert.match(HUB_DASHBOARD_APP_JS, /wsApiFor\(id, "\/messages" \+ q\)/);
+    assert.match(WORKSPACE_PANEL_JS, /taskHistoryRequestGen/);
+    assert.match(WORKSPACE_PANEL_JS, /state\.selectedTaskId === taskId/);
+    assert.match(HUB_DASHBOARD_APP_JS, /state\.workspaceId === target\.workspaceId && state\.selectionGen === target\.generation/);
+    assert.match(HUB_DASHBOARD_APP_JS, /wsApiFor\(target\.workspaceId, path, options\)/);
   });
 
-  test("workspace and hub apps render exchange history titles and prefer message titles in message lists", () => {
-    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
-      assert.match(js, /function messageListLabel\(m\)/);
-      assert.match(js, /typeof m\.title === "string" && m\.title/);
-      assert.match(js, /task-history-title/);
-      assert.match(js, /message-title/);
-      assert.match(js, /message-detail-title/);
-    });
+  test("shared modules render exchange history titles and prefer message titles in message lists", () => {
+    assert.match(COMMON_DASHBOARD_APP_JS, /function messageListLabel\(message\)/);
+    assert.match(COMMON_DASHBOARD_APP_JS, /typeof message\.title === "string" && message\.title/);
+    ["task-history-title", "message-title", "message-detail-title"].forEach((className) => assert.match(WORKSPACE_PANEL_JS, new RegExp(className)));
     assert.match(DASHBOARD_CSS, /\.task-history-title/);
     assert.match(DASHBOARD_CSS, /\.list-row \.message-title/);
     assert.match(DASHBOARD_CSS, /\.message-detail-title/);
+  });
+});
+
+describe("dashboard: Phase 4 browser ESM/controller boundaries", () => {
+  test("panel imports only the relative common helper module and both entries dynamically load it from their own base", () => {
+    assert.match(WORKSPACE_PANEL_JS, /from "\.\/common-app\.js"/);
+    assert.doesNotMatch(WORKSPACE_PANEL_JS, /from "https?:\/\//);
+    [WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      assert.match(js, /import\("\.\/workspace-panel\.js"\)/);
+      assert.doesNotMatch(js, /import\("https?:\/\//);
+    });
+  });
+
+  test("direct and hub entries preserve their distinct polling, discard, and navigator-refresh policies", () => {
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /discardMessageRefresh: "messages"/);
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /panel\.pollActivity\(\)/);
+    assert.match(HUB_DASHBOARD_APP_JS, /discardMessageRefresh: "all"/);
+    assert.match(HUB_DASHBOARD_APP_JS, /onTaskStarted: function \(\) \{ loadWorkspaceList\(\); \}/);
+    assert.match(HUB_DASHBOARD_APP_JS, /loadWorkspaceList\(\); if \(state\.workspaceId\) panel\.refreshAll\(\);/);
+  });
+
+  test("panel applies adapter and task-history request generations together, including recursive pages", () => {
+    assert.match(WORKSPACE_PANEL_JS, /currentTarget === target && adapter\.isCurrent\(target\)/);
+    assert.match(WORKSPACE_PANEL_JS, /state\.selectedTaskId === taskId && state\.taskHistoryTaskId === taskId && state\.taskHistoryRequestGen === requestGen/);
+    assert.match(WORKSPACE_PANEL_JS, /if \(res\.body\.nextCursor\) \{ loadPage\(res\.body\.nextCursor\); return; \}/);
+  });
+
+  test("direct activation preserves shell placeholders while hub selection explicitly clears stale workspace content", () => {
+    assert.match(WORKSPACE_PANEL_JS, /function activate\(target, options\).*options && options\.clearView/s);
+    assert.match(WORKSPACE_DASHBOARD_APP_JS, /panel\.activate\(target\);/);
+    assert.match(HUB_DASHBOARD_APP_JS, /panel\.activate\(target, \{ clearView: true \}\);/);
   });
 });
 
@@ -1565,6 +1569,23 @@ describe("dashboard: Text-module asset extraction", () => {
     assert.equal(body, HUB_DASHBOARD_APP_JS);
   });
 
+  test("workspace and hub serve the shared ESM module bytes with JavaScript no-store headers", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+    for (const [url, expected] of [
+      [`/dashboard/${workspaceId}/common-app.js`, COMMON_DASHBOARD_APP_JS],
+      [`/dashboard/${workspaceId}/workspace-panel.js`, WORKSPACE_PANEL_JS],
+      ["/dashboard/hub/common-app.js", COMMON_DASHBOARD_APP_JS],
+      ["/dashboard/hub/workspace-panel.js", WORKSPACE_PANEL_JS],
+    ]) {
+      const res = await worker.fetch(req(url), env);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get("content-type"), /javascript/);
+      assert.equal(res.headers.get("cache-control"), "no-store");
+      assert.equal(await res.text(), expected);
+    }
+  });
+
   test("workspace and hub app.css routes both serve the one imported stylesheet Text module", async () => {
     const { env, instanceFor } = makeRealBridgeDoEnv();
     const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
@@ -1581,7 +1602,7 @@ describe("dashboard: Text-module asset extraction", () => {
     const html = await res.text();
     assert.match(html, new RegExp(`Workspace: <strong>${workspaceId}</strong>`));
     assert.match(html, new RegExp(`<link rel="stylesheet" href="/dashboard/${workspaceId}/app\\.css">`));
-    assert.match(html, new RegExp(`<script src="/dashboard/${workspaceId}/app\\.js"></script>`));
+    assert.match(html, new RegExp(`<script type="module" src="/dashboard/${workspaceId}/app\\.js"></script>`));
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
@@ -1593,7 +1614,7 @@ describe("dashboard: Text-module asset extraction", () => {
     const html = await res.text();
     assert.match(html, new RegExp(`<h2>${workspaceId}</h2>`));
     assert.match(html, new RegExp(`<link rel="stylesheet" href="/dashboard/${workspaceId}/app\\.css">`));
-    assert.match(html, new RegExp(`<script src="/dashboard/${workspaceId}/app\\.js"></script>`));
+    assert.match(html, new RegExp(`<script type="module" src="/dashboard/${workspaceId}/app\\.js"></script>`));
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
@@ -1602,7 +1623,7 @@ describe("dashboard: Text-module asset extraction", () => {
     const res = await worker.fetch(req(`/dashboard/hub`), env);
     const html = await res.text();
     assert.match(html, /<link rel="stylesheet" href="\/dashboard\/hub\/app\.css">/);
-    assert.match(html, /<script src="\/dashboard\/hub\/app\.js"><\/script>/);
+    assert.match(html, /<script type="module" src="\/dashboard\/hub\/app\.js"><\/script>/);
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 
@@ -1613,7 +1634,7 @@ describe("dashboard: Text-module asset extraction", () => {
     const res = await worker.fetch(req(`/dashboard/hub`, { headers: { cookie } }), env);
     const html = await res.text();
     assert.match(html, /<link rel="stylesheet" href="\/dashboard\/hub\/app\.css">/);
-    assert.match(html, /<script src="\/dashboard\/hub\/app\.js"><\/script>/);
+    assert.match(html, /<script type="module" src="\/dashboard\/hub\/app\.js"><\/script>/);
     assert.doesNotMatch(html, /\{\{|\}\}/, "no unresolved {{marker}} may reach the browser");
   });
 });
@@ -1787,24 +1808,12 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
   // comment "Never innerHTML, even to clear ...", which a bare word match
   // would misreport as a violation. Check the actual unsafe sinks instead.
   const UNSAFE_HTML_SINKS = [/\.innerHTML\s*=/, /\.outerHTML\s*=/, /insertAdjacentHTML\s*\(/, /document\.write\s*\(/];
-  test("workspace app.js uses no unsafe HTML-insertion sink, only textContent/element construction", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    const js = await res.text();
-    assert.match(js, /Never innerHTML/, "the safety-rationale comment itself is expected and must not trip the sink check below");
-    UNSAFE_HTML_SINKS.forEach((pattern) => assert.doesNotMatch(js, pattern, "must not use " + pattern));
-    assert.match(js, /function el\(tag, opts\)/, "must still build all elements through the shared el() helper");
-    assert.match(js, /\.textContent = /);
-  });
-
-  test("hub app.js uses no unsafe HTML-insertion sink, only textContent/element construction", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    const js = await res.text();
-    assert.match(js, /Never innerHTML/);
-    UNSAFE_HTML_SINKS.forEach((pattern) => assert.doesNotMatch(js, pattern, "must not use " + pattern));
-    assert.match(js, /function el\(tag, opts\)/);
+  test("shared browser modules use no unsafe HTML-insertion sink", () => {
+    [COMMON_DASHBOARD_APP_JS, WORKSPACE_PANEL_JS, WORKSPACE_DASHBOARD_APP_JS, HUB_DASHBOARD_APP_JS].forEach((js) => {
+      UNSAFE_HTML_SINKS.forEach((pattern) => assert.doesNotMatch(js, pattern, "must not use " + pattern));
+    });
+    assert.match(COMMON_DASHBOARD_APP_JS, /Never innerHTML/);
+    assert.match(COMMON_DASHBOARD_APP_JS, /function el\(tag, opts\)/);
   });
 
   // The task/message stage mapping is the source of truth for the
@@ -1814,31 +1823,22 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
   function assertStageMappingPresent(js) {
     const taskStageIdx = js.indexOf("function taskStage(t)");
     assert.ok(taskStageIdx >= 0, "taskStage(t) must exist");
-    const taskStageBody = js.slice(taskStageIdx, js.indexOf("\n  }\n", taskStageIdx) + 5);
+    const taskStageBody = js.slice(taskStageIdx, taskStageIdx + 1800);
     ["WAITING_PLAN", "EXECUTING", "WAITING_REVIEW", "DONE", "BLOCKED"].forEach((s) => {
       assert.match(taskStageBody, new RegExp(s), "taskStage must branch on " + s);
     });
 
     const messageStageIdx = js.indexOf("function messageStage(m)");
     assert.ok(messageStageIdx >= 0, "messageStage(m) must exist");
-    const messageStageBody = js.slice(messageStageIdx, js.indexOf("\n  }\n", messageStageIdx) + 5);
+    const messageStageBody = js.slice(messageStageIdx, messageStageIdx + 1000);
     assert.match(messageStageBody, /m\.dir === "to_gpt"/);
     assert.match(messageStageBody, /m\.state === "pending"/);
     assert.match(messageStageBody, /m\.state === "leased"/);
     assert.match(messageStageBody, /m\.state === "acked"/);
   }
 
-  test("workspace app.js's stage mapping covers all 5 protocolState values and the message dir/state branches", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    assertStageMappingPresent(await res.text());
-  });
-
-  test("hub app.js's stage mapping covers all 5 protocolState values and the message dir/state branches", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    assertStageMappingPresent(await res.text());
+  test("common-app.js's stage mapping covers all protocol and message states", () => {
+    assertStageMappingPresent(COMMON_DASHBOARD_APP_JS);
   });
 
   // Unicode-safe list truncation: must slice on code points (Array.from),
@@ -1851,42 +1851,25 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     assert.match(fnBody, /Array\.from\(/, "must slice on code points via Array.from, not a raw UTF-16 .slice()");
   }
 
-  test("workspace app.js defines a 180-char, code-point-safe list truncation contract", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    assertTruncationContract(await res.text());
-  });
-
-  test("hub app.js defines a 180-char, code-point-safe list truncation contract", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    assertTruncationContract(await res.text());
+  test("common-app.js defines a 180-char, code-point-safe list truncation contract", () => {
+    assertTruncationContract(COMMON_DASHBOARD_APP_JS);
   });
 
   test("task rows prefer the durable title, preserve the goal fallback, and render both as text", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
-    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
-    [workspaceJs, hubJs].forEach((js) => {
+    [COMMON_DASHBOARD_APP_JS].forEach((js) => {
       const start = js.indexOf("function taskListLabel(task)");
       const labelFn = js.slice(start, js.indexOf("// ---- 3-stage indicator", start));
       assert.ok(start >= 0, "taskListLabel must exist");
       assert.match(labelFn, /typeof task\.title === "string"/);
       assert.match(labelFn, /truncateText\(task\.goal, LIST_PREVIEW_CHARS\)/);
-      assert.match(js, /" task-title"/);
-      assert.match(js, /task-detail-title/);
+      assert.match(WORKSPACE_PANEL_JS, /" task-title"/);
+      assert.match(WORKSPACE_PANEL_JS, /task-detail-title/);
       assert.doesNotMatch(js, /innerHTML\s*=/);
     });
   });
 
   test("detail panes show the full text without redundant Read more controls", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
-    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
-    [workspaceJs, hubJs].forEach((js) => {
+    [WORKSPACE_PANEL_JS].forEach((js) => {
       assert.match(js, /function renderTextSection\(containerId, label, fullText\)/);
       assert.doesNotMatch(js, /function renderExpandable\(/);
       assert.doesNotMatch(js, /DETAIL_PREVIEW_CHARS/);
@@ -1901,7 +1884,7 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     const start = js.indexOf("function renderWorkspaceList(data)");
     const listFn = js.slice(start, js.indexOf("function loadWorkspaceList()", start));
     assert.match(listFn, /className: "workspace-choice"/);
-    assert.match(listFn, /status = w\.overview\.activeTask \? "In progress" : "Idle"/);
+    assert.match(listFn, /w\.overview && w\.overview\.activeTask \? "In progress" : "Idle"/);
     assert.doesNotMatch(listFn, /to ChatGPT/);
     assert.doesNotMatch(listFn, /to local/);
   });
@@ -1912,7 +1895,8 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     const selectStart = js.indexOf("function selectWorkspace(id, name)");
     const selectFn = js.slice(selectStart, js.indexOf("// ---- overview ----", selectStart));
     assert.match(js, /function updateWorkspaceSelection\(workspaceId\)/);
-    assert.match(selectFn, /state\.workspaceId = id;\s*\n\s*updateWorkspaceSelection\(id\);/);
+    assert.match(selectFn, /state\.workspaceId = id; updateWorkspaceSelection\(id\);/);
+    assert.match(selectFn, /panel\.activate\(target, \{ clearView: true \}\)/);
     assert.match(js, /setAttribute\("aria-current", "true"\)/);
   });
 
@@ -1927,31 +1911,19 @@ describe("dashboard: graphical workspace layout (workspace navigation + context 
     assert.match(js, /state\.selectedMessage\s*=\s*m;/, "selectMessage must store a full row snapshot, not just the id");
   }
 
-  test("workspace app.js's selectTask/selectMessage take the row object and store a snapshot", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const res = await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env);
-    assertSelectionSnapshotContract(await res.text());
+  test("shared workspace panel selectTask/selectMessage take the row object and store a snapshot", () => {
+    assertSelectionSnapshotContract(WORKSPACE_PANEL_JS);
   });
 
-  test("hub app.js's selectTask/selectMessage take the row object and store a snapshot", async () => {
-    const { env } = makeRealBridgeDoEnv();
-    const res = await worker.fetch(req(`/dashboard/hub/app.js`), env);
-    assertSelectionSnapshotContract(await res.text());
-  });
-
-  test("workspace and hub app.js render WAITING_LOCAL sub-states and LOCAL_DECISION action buttons", async () => {
-    const { env, instanceFor } = makeRealBridgeDoEnv();
-    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
-    const workspaceJs = await (await worker.fetch(req(`/dashboard/${workspaceId}/app.js`), env)).text();
-    const hubJs = await (await worker.fetch(req(`/dashboard/hub/app.js`), env)).text();
-
-    [workspaceJs, hubJs].forEach((js) => {
+  test("shared modules render WAITING_LOCAL sub-states and LOCAL_DECISION action buttons", () => {
+    [COMMON_DASHBOARD_APP_JS].forEach((js) => {
       assert.match(js, /WAITING_LOCAL/);
       assert.match(js, /LOCAL_PLAN_ACK/);
       assert.match(js, /LOCAL_DONE_ACK/);
       assert.match(js, /LOCAL_BLOCKED_ACK/);
       assert.match(js, /LOCAL_DECISION/);
+    });
+    [WORKSPACE_PANEL_JS].forEach((js) => {
       assert.match(js, /Complete task/);
       assert.match(js, /Continue implementation/);
       assert.match(js, /complete-task/);

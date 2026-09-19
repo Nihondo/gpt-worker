@@ -84,6 +84,8 @@
 
 import WORKSPACE_DASHBOARD_APP_JS from "./dashboard/workspace-app.js";
 import HUB_DASHBOARD_APP_JS from "./dashboard/hub-app.js";
+import COMMON_DASHBOARD_APP_JS from "./dashboard/common-app.js";
+import WORKSPACE_PANEL_JS from "./dashboard/workspace-panel.js";
 import DASHBOARD_CSS from "./dashboard/dashboard.css";
 import WORKSPACE_DASHBOARD_LOGIN_HTML from "./dashboard/workspace-login.html";
 import WORKSPACE_DASHBOARD_SHELL_HTML from "./dashboard/workspace-shell.html";
@@ -364,6 +366,8 @@ function createBridgeDashboard({
       // for what it actually guards.
       if (subParts.length === 0) return this.handleDashboardShell(request, workspaceId);
       if (subParts.length === 1 && subParts[0] === "app.js") return this.handleDashboardAppJs(request);
+      if (subParts.length === 1 && subParts[0] === "common-app.js") return serveDashboardAsset(request, { bucket: "dashboard-public", body: COMMON_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
+      if (subParts.length === 1 && subParts[0] === "workspace-panel.js") return serveDashboardAsset(request, { bucket: "dashboard-public", body: WORKSPACE_PANEL_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleDashboardAppCss(request);
       if (subParts.length === 1 && subParts[0] === "login") return this.handleDashboardLogin(request, workspaceId);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleDashboardLogout(request, workspaceId);
@@ -758,6 +762,8 @@ function createBridgeDashboard({
       // shell/app.js/app.css/login/logout/api — see handleHubDashboardShell etc.
       if (subParts.length === 0) return this.handleHubDashboardShell(request);
       if (subParts.length === 1 && subParts[0] === "app.js") return this.handleHubDashboardAppJs(request);
+      if (subParts.length === 1 && subParts[0] === "common-app.js") return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: COMMON_DASHBOARD_APP_JS, makeHeaders: dashboardJsHeaders });
+      if (subParts.length === 1 && subParts[0] === "workspace-panel.js") return serveDashboardAsset(request, { bucket: "hub-dashboard-public", body: WORKSPACE_PANEL_JS, makeHeaders: dashboardJsHeaders });
       if (subParts.length === 1 && subParts[0] === "app.css") return this.handleHubDashboardAppCss(request);
       if (subParts.length === 1 && subParts[0] === "login") return this.handleHubDashboardLogin(request);
       if (subParts.length === 1 && subParts[0] === "logout") return this.handleHubDashboardLogout(request);
