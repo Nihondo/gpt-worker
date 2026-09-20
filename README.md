@@ -480,7 +480,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `1` | Error (the message says what to do) |
 | `2` | `wait` timed out with no reply yet — run it again |
 | `3` | `wait` delivered a reply, but the task did not advance. The reply is printed; inspect with `gpt-worker state`, and if the task is truly stuck, `gpt-worker discard-task --yes` |
-| `4` | The Worker could not be reached. For `task`/`report`/`handoff` the message says whether the request may still have been applied — check `gpt-worker state` before repeating it. `wait` can also exit 4 right after printing a reply whose acknowledgement could not be confirmed: follow the guidance it prints (check `gpt-worker state` and `gpt-worker queue`) rather than assuming a redelivery |
+| `4` | The Worker could not be reached. For `task`/`report`/`handoff` the message says whether the request may still have been applied — check `gpt-worker state` before repeating it. `wait` can also exit 4 right after printing a reply whose acknowledgement could not be confirmed: follow the guidance it prints (check `gpt-worker state` and `gpt-worker queue --task <task id>`) rather than assuming a redelivery |
 
 Commands retry transient network failures on their own (a few short attempts). `wait` goes further and keeps trying until its own timeout, so a brief outage during a long wait does not end it.
 

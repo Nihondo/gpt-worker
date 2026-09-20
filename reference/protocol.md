@@ -327,6 +327,11 @@ retrying in a loop — report it and stop:
 - `partial: true` with a `warning` on a `search_workspace` result — the search
   ended abnormally after printing some hits. Use them, but do not treat the list
   as complete.
+- `partial: true` with `hiddenByGitCheck: N` and a `warning` on a `list_directory`,
+  `search_workspace`, `git_status`, `git_diff` or `workspace_info` result — N
+  paths were hidden because Git could not confirm they are not ignored, so an
+  empty or short result may be that and not the truth about the workspace.
+  Report it; do not conclude the directory is empty or nothing matched.
 - `ACCESS_DENIED_GITIGNORED_FILE` may carry a `message` saying Git *could not
   confirm* the path is not ignored. The path is denied as a precaution, not
   because a `.gitignore` rule matches it; the operator has to fix git access

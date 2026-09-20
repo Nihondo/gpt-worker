@@ -305,9 +305,10 @@ describe("a hung git is asked once, not once per path", () => {
     assert.ok(spawnCount() > 1);
   });
 
-  test("only a timeout is remembered: a fast failure is asked again every time", () => {
-    // A quick failure costs nothing to repeat, and repeating it is what lets a
-    // repaired repository work again immediately.
+  test("a timeout is remembered across operations; outside any operation a fast failure is asked again each call", () => {
+    // Each unscoped call is its own operation, so a quick failure is re-asked
+    // (which is what lets a repaired repository work again at once). Within ONE
+    // operation it is shared — see the next describe.
     resetSpawnLog();
     installCountedGit(`case "$1" in rev-parse) echo "fatal: detected dubious ownership in repository at '/x'" >&2; exit 128;; *) exit 0;; esac`);
     const rules = new IgnoreRules({ root: makeWorkspace() });
@@ -315,6 +316,140 @@ describe("a hung git is asked once, not once per path", () => {
     assert.equal(rules.isGitIgnored("notes.txt"), true);
     assert.equal(rules.isGitIgnored("notes.txt"), true);
     assert.equal(spawnCount(), 2, "each call probed git again");
+  });
+});
+
+// Inside one tool call, what git could not answer is shared: a listing of N
+// entries asks once, not N times — for a fast failure exactly as for a timeout —
+// while the *next* tool call asks again, so a repaired git works at once. And a
+// result that looks empty because git could not vouch for its entries says so.
+describe("a tool call asks git once about what git cannot answer, and says when it did", () => {
+  // makeWorkspace() already holds notes.txt, so this yields count + 1 entries.
+  function workspaceWithFiles(count) {
+    const root = makeWorkspace();
+    for (let i = 0; i < count; i++) fs.writeFileSync(path.join(root, `file-${i}.txt`), "x\n");
+    return root;
+  }
+  const DUBIOUS = `case "$1" in rev-parse) echo "fatal: detected dubious ownership in repository at '/x'" >&2; exit 128;; *) exit 0;; esac`;
+
+  test("a fast git failure is asked once per operation, and the next operation asks again", () => {
+    resetSpawnLog();
+    installCountedGit(DUBIOUS);
+    const tools = new WorkspaceTools(workspaceWithFiles(20));
+
+    tools.listDirectory({ path: "." });
+    assert.equal(spawnCount(), 1, "21 entries, one probe");
+
+    tools.listDirectory({ path: "." });
+    assert.equal(spawnCount(), 2, "the next tool call asks git afresh");
+  });
+
+  test("repeated failures of per-path check-ignore are taken to mean git is broken, after a few", () => {
+    resetSpawnLog();
+    installCountedGit(`case "$1" in rev-parse) exit 0;; check-ignore) exit 128;; *) exit 0;; esac`);
+    const tools = new WorkspaceTools(workspaceWithFiles(20));
+
+    tools.listDirectory({ path: "." });
+
+    // One rev-parse, then check-ignore fails 3 times in a row (the streak limit),
+    // after which the remaining entries are denied without asking.
+    assert.equal(spawnCount(), 4);
+  });
+
+  test("a tool that calls another tool stays in one operation: the outer result counts everything", () => {
+    // workspace_overview reads AGENTS.md and CLAUDE.md through readFile. If the
+    // inner call opened its own operation, it would reset the count the outer one
+    // is keeping and annotate its own result, and the outer total would be short.
+    installCountedGit(`case "$1" in rev-parse) echo "fatal: detected dubious ownership in repository at '/x'" >&2; exit 128;; *) exit 0;; esac`);
+    resetSpawnLog();
+    const root = makeWorkspace();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "agents\n");
+    fs.writeFileSync(path.join(root, "CLAUDE.md"), "claude\n");
+    const overview = new WorkspaceTools(root).workspaceOverview();
+
+    assert.equal(overview.hiddenByGitCheck, 2, "both overview files counted on the one outer result");
+    assert.equal(spawnCount(), 1, "and git was asked once for the whole overview");
+  });
+
+  test("a definite answer resets the streak: scattered odd paths do not condemn the rest", () => {
+    resetSpawnLog();
+    // Three paths make git exit 128 (odd), but never three in a row: ordinary
+    // files, which get a definite "not ignored", sit between them. Without the
+    // reset the third odd path would trip the streak limit and the ordinary file
+    // that follows (notes.txt) would be denied for a problem it does not have.
+    installCountedGit(`case "$1" in rev-parse) exit 0;; check-ignore) case "$*" in *odd*) exit 128;; *) exit 1;; esac;; *) exit 0;; esac`);
+    const root = makeWorkspace();
+    for (const name of ["a-odd-1.txt", "b.txt", "c-odd-2.txt", "d.txt", "e-odd-3.txt"]) {
+      fs.writeFileSync(path.join(root, name), "x\n");
+    }
+    const listing = new WorkspaceTools(root).listDirectory({ path: "." });
+
+    assert.deepEqual(
+      listing.entries.map((entry) => entry.path),
+      ["b.txt", "d.txt", "notes.txt"],
+      "the ordinary files are shown, including the one after the third odd path"
+    );
+    assert.equal(listing.hiddenByGitCheck, 3, "only the three odd paths were denied");
+  });
+
+  test("a listing emptied by git being unable to answer carries a warning instead of looking empty", () => {
+    installCountedGit(DUBIOUS);
+    const listing = new WorkspaceTools(workspaceWithFiles(5)).listDirectory({ path: "." });
+
+    assert.deepEqual(listing.entries, []);
+    assert.equal(listing.partial, true);
+    assert.equal(listing.hiddenByGitCheck, 6, "five files plus notes.txt");
+    assert.match(listing.warning, /6 paths were hidden because Git could not confirm they are not ignored/);
+    assert.match(listing.warning, /dubious ownership/);
+    assert.match(listing.warning, /may be empty or incomplete/);
+  });
+
+  test("the same holds for a hung git", () => {
+    installShim("git", GIT.hangEverything);
+    const listing = new WorkspaceTools(workspaceWithFiles(3)).listDirectory({ path: "." });
+
+    assert.deepEqual(listing.entries, []);
+    assert.equal(listing.hiddenByGitCheck, 4, "three files plus notes.txt");
+    assert.match(listing.warning, /did not answer in time/);
+  });
+
+  test("a search whose hits were all hidden by the git check says so", () => {
+    installShim("rg", `[ "$1" = "--version" ] && exit 0; echo "notes.txt:1:plain notes"; exit 0`);
+    installCountedGit(DUBIOUS);
+    const result = new WorkspaceTools(makeWorkspace()).searchWorkspace({ query: "plain" });
+
+    assert.deepEqual(result.hits, []);
+    assert.equal(result.partial, true);
+    assert.equal(result.hiddenByGitCheck, 1);
+    assert.match(result.warning, /1 path was hidden because Git could not confirm it is not ignored/);
+  });
+
+  test("when git answers, no warning fields appear at all", () => {
+    installShim("git", GIT.notIgnored);
+    const listing = new WorkspaceTools(workspaceWithFiles(3)).listDirectory({ path: "." });
+
+    assert.equal(listing.entries.length, 4);
+    assert.equal(listing.partial, undefined);
+    assert.equal(listing.warning, undefined);
+    assert.equal(listing.hiddenByGitCheck, undefined);
+  });
+
+  test("an error result is left as it is: it already says what went wrong", () => {
+    installShim("git", GIT.hangEverything);
+    const result = new WorkspaceTools(makeWorkspace()).readFile({ path: "notes.txt" });
+
+    assert.equal(result.error, "ACCESS_DENIED_GITIGNORED_FILE");
+    assert.equal(result.partial, undefined);
+    assert.match(result.message, /Git could not confirm/);
+  });
+
+  test("an existing search warning is kept and extended, not overwritten", () => {
+    installShim("rg", `[ "$1" = "--version" ] && exit 0; echo "notes.txt:1:plain notes"; echo "rg: ./x: Permission denied" >&2; exit 2`);
+    installCountedGit(DUBIOUS);
+    const result = new WorkspaceTools(makeWorkspace()).searchWorkspace({ query: "plain" });
+
+    assert.match(result.warning, /ended abnormally/);
+    assert.match(result.warning, /Git could not confirm/);
   });
 });
 

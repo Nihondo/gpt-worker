@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { IgnoreRules } from "../bridge/ignore.mjs";
+import { IgnoreRules, hasGitMarker } from "../bridge/ignore.mjs";
 import { hasGitAncestor } from "./helpers/git-ancestor.mjs";
 
 // A temp dir is only a *plain* directory if nothing above it is a git checkout.
@@ -181,10 +181,12 @@ describe("IgnoreRules: real git, damaged and plain directories", () => {
   });
 });
 
-// A daemon outlives `git init`. "Plain directory" used to be cached forever, so a
-// workspace that became a repository after the daemon started kept exposing
-// everything its .gitignore was written to hide, until the daemon was restarted.
-describe("IgnoreRules: a plain workspace that later becomes a repository", { skip: TMP_IN_GIT }, () => {
+// A daemon outlives `git init`. "Plain directory" used to be cached for the life
+// of the process, so a workspace that became a repository after the daemon
+// started kept exposing everything its .gitignore was written to hide. The
+// verdict is now scoped to one tool call: git is asked again at the start of the
+// next, so a change is seen immediately — no time window.
+describe("IgnoreRules: the repository state is re-examined on every operation", { skip: TMP_IN_GIT }, () => {
   function makePlain() {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-plain-to-git-")));
     fs.writeFileSync(path.join(root, "secret.txt"), "hidden\n");
@@ -195,33 +197,127 @@ describe("IgnoreRules: a plain workspace that later becomes a repository", { ski
     fs.writeFileSync(path.join(root, ".gitignore"), "secret.txt\n");
   }
 
-  test("the same instance starts honoring .gitignore once a .git appears", () => {
+  test("a call outside any operation is its own operation: a new repository is seen at once", () => {
     const root = makePlain();
     try {
-      const rules = new IgnoreRules({ root, plainRecheckMs: 0 });
+      const rules = new IgnoreRules({ root });
       assert.equal(rules.isGitIgnored("secret.txt"), false, "plain: nothing is git-ignored yet");
       assert.equal(rules.isGitRepository, false);
 
       initRepoIgnoringSecret(root);
 
-      assert.equal(rules.isGitIgnored("secret.txt"), true, "the long-lived instance notices the new repository");
+      assert.equal(rules.isGitIgnored("secret.txt"), true);
       assert.equal(rules.isGitRepository, true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
 
-  test("the re-check is bounded by an interval, not run on every path", () => {
-    // Documents the trade-off: within the interval a fresh `git init` is not yet
-    // seen. The interval is what keeps the lstat walk off the per-path hot path.
+  test("within one operation the verdict is held; the very next operation sees the change (no time window)", () => {
     const root = makePlain();
     try {
-      const rules = new IgnoreRules({ root, plainRecheckMs: 60_000 });
+      const rules = new IgnoreRules({ root });
+      rules.beginOperation();
       assert.equal(rules.isGitIgnored("secret.txt"), false);
       initRepoIgnoringSecret(root);
-      assert.equal(rules.isGitIgnored("secret.txt"), false, "still inside the re-check interval");
+      assert.equal(rules.isGitIgnored("secret.txt"), false, "the verdict is stable inside a single tool call");
+      rules.endOperation();
+
+      // Immediately afterwards — not after some interval.
+      rules.beginOperation();
+      assert.equal(rules.isGitIgnored("secret.txt"), true);
+      rules.endOperation();
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a repository whose git dir lives elsewhere (GIT_DIR/GIT_WORK_TREE) is noticed although no .git appears", () => {
+    // The old marker-only re-check could never see this: there is no `.git` in
+    // the workspace or above it, yet git treats the directory as a work tree.
+    const root = makePlain();
+    const gitDir = path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-extgit-"))), "repo.git");
+    const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+    try {
+      process.env.GIT_DIR = gitDir; // does not exist yet: git says "not a git repository"
+      process.env.GIT_WORK_TREE = root;
+      const rules = new IgnoreRules({ root });
+      rules.beginOperation();
+      assert.equal(rules.isGitIgnored("secret.txt"), false);
+      assert.equal(rules.isGitRepository, false);
+      rules.endOperation();
+
+      execFileSync("git", ["init", "-q"], { cwd: root, stdio: "pipe" }); // creates the repo at GIT_DIR
+      fs.writeFileSync(path.join(root, ".gitignore"), "secret.txt\n");
+      assert.equal(fs.existsSync(path.join(root, ".git")), false, "precondition: no .git in the workspace");
+
+      rules.beginOperation();
+      assert.equal(rules.isGitIgnored("secret.txt"), true);
+      assert.equal(rules.isGitRepository, true);
+      rules.endOperation();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(path.dirname(gitDir), { recursive: true, force: true });
+    }
+  });
+
+  test("a repository that goes away recovers to a plain directory instead of denying everything forever", () => {
+    // isGitRepository=true used to be permanent: after .git was removed, git's
+    // check-ignore failed for every path and the daemon denied them all until
+    // it was restarted.
+    const root = makePlain();
+    try {
+      initRepoIgnoringSecret(root);
+      const rules = new IgnoreRules({ root });
+      rules.beginOperation();
+      assert.equal(rules.isGitIgnored("secret.txt"), true);
+      assert.equal(rules.isGitRepository, true);
+      rules.endOperation();
+
+      fs.renameSync(path.join(root, ".git"), path.join(root, ".git-removed"));
+
+      rules.beginOperation();
+      assert.equal(rules.isGitIgnored("secret.txt"), false, "plain again: only the static filters apply");
+      assert.equal(rules.isGitRepository, false);
+      rules.endOperation();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("hasGitMarker", () => {
+  // The marker check is an access control: "I could not look" must not read as
+  // "there is no marker".
+  const notRoot = typeof process.getuid === "function" && process.getuid() !== 0;
+
+  test("no marker anywhere above is false; a marker (directory or file) is true", () => {
+    const top = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-marker-")));
+    try {
+      const work = path.join(top, "a", "b");
+      fs.mkdirSync(work, { recursive: true });
+      if (!hasGitAncestor(top)) assert.equal(hasGitMarker(work), false);
+      fs.writeFileSync(path.join(top, ".git"), "gitdir: /elsewhere\n");
+      assert.equal(hasGitMarker(work), true);
+    } finally {
+      fs.rmSync(top, { recursive: true, force: true });
+    }
+  });
+
+  test("an error other than 'not there' counts as a marker, so the check fails closed", { skip: !notRoot && "permission checks do not apply to root" }, () => {
+    const top = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-marker-eacces-")));
+    const locked = path.join(top, "locked");
+    try {
+      fs.mkdirSync(path.join(locked, "child"), { recursive: true });
+      fs.chmodSync(locked, 0o000); // cannot even look inside
+      assert.equal(hasGitMarker(path.join(locked, "child")), true, "EACCES is not evidence that there is no .git");
+    } finally {
+      fs.chmodSync(locked, 0o700);
+      fs.rmSync(top, { recursive: true, force: true });
     }
   });
 });

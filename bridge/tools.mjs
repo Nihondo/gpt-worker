@@ -64,13 +64,65 @@ export function parseGitHubRemote(rawUrl) {
   };
 }
 
+// The tools that consult the gitignore check. Each call to one of them is an
+// "operation" (see runOperation): git is asked afresh about the workspace at its
+// start, and what it cannot answer is shared and counted until its end.
+const OPERATION_METHODS = [
+  "workspaceInfo",
+  "workspaceOverview",
+  "listDirectory",
+  "readFile",
+  "searchWorkspace",
+  "gitStatus",
+  "gitDiff",
+  "gitLog",
+];
+
+/** When git could not answer for some paths, those paths were denied as a
+ *  precaution — which, in a listing or a search, makes the result look empty.
+ *  Say so on the result itself, so "nothing here" and "git could not vouch for
+ *  anything here" are not the same answer. Errors are left alone: they already
+ *  say what went wrong. */
+function annotateGitPolicy(result, { deniedByUnknown, reason }) {
+  if (!deniedByUnknown || !result || typeof result !== "object" || Array.isArray(result) || result.error) return result;
+  const n = deniedByUnknown;
+  const warning =
+    `${n} path${n === 1 ? " was" : "s were"} hidden because Git could not confirm ${n === 1 ? "it is" : "they are"} not ignored (${reason}), ` +
+    `so this result may be empty or incomplete for that reason.`;
+  return { ...result, partial: true, hiddenByGitCheck: n, warning: result.warning ? `${result.warning} ${warning}` : warning };
+}
+
 export class WorkspaceTools {
   constructor(root, { allowedReadPaths } = {}) {
     this.root = fs.realpathSync(root);
     this.ignore = new IgnoreRules({ root: this.root });
+    this.operationDepth = 0;
+    for (const name of OPERATION_METHODS) {
+      const original = WorkspaceTools.prototype[name];
+      this[name] = (...args) => this.runOperation(() => original.apply(this, args));
+    }
     // The default reads private local state on each decision. A running bridge
     // therefore observes CLI allow/deny changes without being restarted.
     this.allowedReadPaths = allowedReadPaths || (() => readAllowedReadPaths(this.root));
+  }
+
+  /** Runs one tool call as an operation. Only the outermost call opens and
+   *  closes it (a tool that calls another tool internally stays in the same one),
+   *  and its result carries a warning if git could not answer for some paths. */
+  runOperation(fn) {
+    const outermost = this.operationDepth === 0;
+    this.operationDepth++;
+    if (outermost) this.ignore.beginOperation();
+    let summary = null;
+    try {
+      const result = fn();
+      if (!outermost) return result;
+      summary = this.ignore.endOperation();
+      return annotateGitPolicy(result, summary);
+    } finally {
+      this.operationDepth--;
+      if (outermost && summary === null) this.ignore.endOperation();
+    }
   }
 
   log(kind, detail) {

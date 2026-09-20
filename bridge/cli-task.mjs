@@ -204,10 +204,10 @@ async function deliverMessages(root, cfg, messages) {
           `--- The reply above was printed, but its acknowledgement could not be confirmed ---\n` +
             `The Worker could not be reached, so it is unknown whether it recorded the acknowledgement. Look at where things stand before acting:\n` +
             `  gpt-worker state -w ${root}\n` +
-            `  gpt-worker queue -w ${root}\n` +
+            `  gpt-worker queue -w ${root} --task ${message.task_id}\n` +
             `  - The task has moved on (a PLAN reply -> EXECUTING; a DONE/BLOCKED reply -> no active task, or LOCAL_DECISION for a review-only DONE):\n` +
             `    the acknowledgement landed and 'gpt-worker wait' will NOT deliver this reply again. Act on the reply above, once.\n` +
-            `  - Still WAITING_LOCAL with waiting_for LOCAL_PLAN_ACK / LOCAL_DONE_ACK / LOCAL_BLOCKED_ACK, and 'queue' lists this reply as pending:\n` +
+            `  - Still WAITING_LOCAL with waiting_for LOCAL_PLAN_ACK / LOCAL_DONE_ACK / LOCAL_BLOCKED_ACK, and 'queue' lists a [to_local] ${message.kind} for it:\n` +
             `    it did not land. Do not act yet; run 'gpt-worker wait -w ${root}', which delivers the same reply again.\n` +
             `  - Still waiting for one of those, but 'queue' shows nothing pending: the reply was recorded as delivered while the task never advanced,\n` +
             `    and 'wait' will never return it. The task is stuck. Tell the user; if abandoning it is authorized,\n` +

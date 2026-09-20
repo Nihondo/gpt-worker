@@ -244,7 +244,8 @@ describe("wait: delivering a reply", () => {
       const first = await ws.run(["wait", "--timeout", "5"]);
       assert.equal(first.code, 4, first.stderr);
       assert.match(first.stdout, /Step 1: edit a\.js/);
-      assert.match(first.stderr, /gpt-worker queue -w /, "the guidance sends the agent to the queue as well as the state");
+      assert.match(first.stderr, /gpt-worker queue -w .* --task t1/, "the guidance sends the agent to this task's queue as well as the state");
+      assert.match(first.stderr, /lists a \[to_local\] PLAN for it/, "and says exactly which row to look for");
       assert.match(first.stderr, /nothing pending: the reply was recorded as delivered while the task never advanced/);
       assert.match(first.stderr, /discard-task -w .* --yes/);
 
