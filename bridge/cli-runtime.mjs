@@ -1,4 +1,7 @@
 import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   readWorkerConfig,
   workerConfigPath,
@@ -9,6 +12,7 @@ import {
   clearGuidance,
   appendLog,
 } from "./state.mjs";
+import { verifyScanner } from "./scanner.mjs";
 
 // Exit codes beyond the conventional 0 (success) / 1 (error). `wait` already
 // uses 2 for "no message yet".
@@ -25,6 +29,10 @@ export function parseArgs(argv) {
       else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("--") && argv[i + 1] !== "-w") out[a.slice(2)] = argv[++i];
       else out[a.slice(2)] = true;
     } else if (a === "-w" && argv[i + 1]) out.workspace = argv[++i];
+    else if (a === "-n") {
+      if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("-")) out.n = argv[++i];
+      else out.n = true;
+    }
     else out._.push(a);
   }
   return out;
@@ -281,9 +289,90 @@ export async function adminCall(worker, op, extra = {}, opts = {}) {
 }
 
 export async function remoteActiveTask(cfg, opts = {}) {
+  return (await remoteActiveState(cfg, opts)).task;
+}
+
+/** Returns the active task together with the Worker-owned read-window
+ * metadata. Keep remoteActiveTask() as the task-only compatibility wrapper:
+ * most callers need no knowledge of the window, while status must never
+ * duplicate the Worker's idle-limit constant locally. */
+export async function remoteActiveState(cfg, opts = {}) {
   const state = await localCall(cfg, "active_task", {}, opts);
   if (state.error) throw new WorkerCallError(state.error);
-  return state.task || null;
+  return { task: state.task || null, taskWindow: state.taskWindow || null };
+}
+
+function commandVersion(bin, args = ["--version"]) {
+  try {
+    return execFileSync(bin, args, { encoding: "utf8", timeout: 2_000, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function commandWorks(bin, args) {
+  try {
+    execFileSync(bin, args, { timeout: 2_000, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseMinimumNodeVersion(range) {
+  const match = typeof range === "string" ? range.match(/>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?/) : null;
+  return match ? match.slice(1).map((part) => Number(part || 0)) : null;
+}
+
+function nodeSatisfiesMinimum(current, minimum) {
+  const actual = current.split(".").map((part) => Number(part));
+  for (let i = 0; i < minimum.length; i++) {
+    if ((actual[i] || 0) !== minimum[i]) return (actual[i] || 0) > minimum[i];
+  }
+  return true;
+}
+
+/** Check the local programs gpt-worker depends on before init starts an
+ * irreversible deploy. Fatal findings block by default; optional programs are
+ * reported so an operator knows which conveniences are unavailable. */
+export function checkPrerequisites({ packagePath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json") } = {}) {
+  const fatal = [];
+  const warnings = [];
+  const info = [];
+  let nodeRange = null;
+  try {
+    nodeRange = JSON.parse(fs.readFileSync(packagePath, "utf8")).engines?.node || null;
+  } catch {
+    fatal.push(`could not read the required Node version from ${packagePath}`);
+  }
+  const minimum = parseMinimumNodeVersion(nodeRange);
+  if (minimum && !nodeSatisfiesMinimum(process.versions.node, minimum)) {
+    fatal.push(`Node ${process.versions.node} does not satisfy package.json engines.node ${nodeRange}`);
+  } else if (nodeRange) {
+    info.push(`Node ${process.versions.node} (${nodeRange})`);
+  }
+
+  const git = commandVersion("git");
+  if (!git) fatal.push("git was not found on PATH (workspace reads require it)");
+  else info.push(git);
+
+  try {
+    const scanner = verifyScanner();
+    info.push(`secret scanner: ${scanner.bin} ${scanner.version}`);
+  } catch (err) {
+    fatal.push(String(err?.message || err).split("\n")[0]);
+  }
+
+  const rg = commandVersion("rg");
+  if (!rg) warnings.push("rg was not found on PATH; searches fall back to git grep");
+  else info.push(rg);
+
+  if (process.platform === "darwin") {
+    info.push(commandWorks("open", ["-Ra", "Google Chrome"]) ? "Google Chrome: available" : "Google Chrome: not found (browser nudges will need manual setup)");
+  } else {
+    info.push("Google Chrome: not checked on this platform");
+  }
+  return { ok: fatal.length === 0, fatal, warnings, info };
 }
 
 export async function migrateLegacyStateIfNeeded(root, cfg) {

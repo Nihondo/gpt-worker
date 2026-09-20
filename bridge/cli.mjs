@@ -4,6 +4,7 @@
 
 import { fixPermissions } from "./state.mjs";
 import { EXIT_WORKER_UNREACHABLE, WorkerCallError, WorkerUnreachableError, parseArgs } from "./cli-runtime.mjs";
+import { formatHelp } from "./cli-help.mjs";
 import {
   cmdInit,
   cmdRemove,
@@ -20,6 +21,7 @@ import {
 } from "./cli-browser.mjs";
 import {
   cmdStart,
+  cmdLogs,
   cmdStatus,
   cmdStop,
 } from "./cli-daemon.mjs";
@@ -76,6 +78,19 @@ async function main() {
   const [, , cmd, ...rest] = process.argv;
   const args = parseArgs(rest);
 
+  const isHelpCommand = cmd === "help";
+  const helpTarget = isHelpCommand ? args._[0] || null : args.help ? cmd : null;
+  if (!cmd || isHelpCommand || helpTarget !== null) {
+    const help = formatHelp(helpTarget);
+    if (help) {
+      process.stdout.write(help);
+      return;
+    }
+    console.error(`Unknown command: ${helpTarget}`);
+    process.stderr.write(formatHelp());
+    process.exit(1);
+  }
+
   fixPermissions();
 
   switch (cmd) {
@@ -107,6 +122,8 @@ async function main() {
       return cmdStop(args);
     case "status":
       return cmdStatus(args);
+    case "logs":
+      return cmdLogs(args);
     case "queue":
       return cmdQueue(args);
     case "task":
@@ -130,8 +147,9 @@ async function main() {
     case "discard-task":
       return cmdDiscardTask(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|handoff|limits|state|rotate|complete|continue|discard-task> [options]`);
-      process.exit(cmd ? 1 : 0);
+      console.error(`Unknown command: ${cmd}`);
+      process.stderr.write(formatHelp());
+      process.exit(1);
   }
 }
 

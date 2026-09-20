@@ -53,6 +53,20 @@ function buildInitBody(goal) {
   return `GOAL:\n${goal}`;
 }
 
+/** Keep the interactive nudge message while also preserving a local diagnostic
+ * trail. nudgeChatGpt never logs a task body or browser content; this tee must
+ * retain that same boundary. */
+function cliNudgeLog(root) {
+  return (line) => {
+    console.log(line);
+    try {
+      appendLog(root, `nudge: ${String(line).replace(/\s+/g, " ")}`);
+    } catch {
+      /* a diagnostic write must not make task/report fail */
+    }
+  };
+}
+
 /** `handoff` marks the round as a hand-off request: whoever is running this
  * round is not the one who will run `wait` for its reply. This covers both
  * directions of the same situation — the agent that did this round's work is
@@ -112,6 +126,7 @@ export async function cmdTask(args) {
   console.log(`Task ${taskId} queued.`);
   const chatSettings = await loadChatSettings(cfg);
   await nudgeChatGpt(chatSettings, taskId, cfg.workspaceId, {
+    log: cliNudgeLog(root),
     onConversationDiscovered: async (url) => {
       await localCall(cfg, "browser_settings_set", { conversationUrl: url });
     },
@@ -549,6 +564,7 @@ async function reportRound(args, handoff) {
   console.log(`Reported iteration ${newIteration}.`);
   const chatSettings = await loadChatSettings(cfg);
   await nudgeChatGpt(chatSettings, task.taskId, cfg.workspaceId, {
+    log: cliNudgeLog(root),
     onConversationDiscovered: async (url) => {
       await localCall(cfg, "browser_settings_set", { conversationUrl: url });
     },
@@ -586,5 +602,4 @@ export async function cmdState(args) {
   await migrateLegacyStateIfNeeded(root, cfg);
   console.log(JSON.stringify((await remoteActiveTask(cfg)) || { taskId: null }, null, 2));
 }
-
 

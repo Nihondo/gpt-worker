@@ -30,6 +30,8 @@ import {
   loadChatSettings,
   nudgeChatGpt,
 } from "../bridge/cli.mjs";
+import { COMMANDS, commandNames, formatHelp } from "../bridge/cli-help.mjs";
+import { extractWorkerUrl } from "../bridge/cli-provision.mjs";
 
 describe("parseArgs", () => {
   test("-w after a bare boolean flag is not swallowed as that flag's value", () => {
@@ -86,6 +88,15 @@ describe("parseArgs", () => {
     assert.equal(args.force, true);
   });
 
+  test("-n parses the log line count", () => {
+    const args = parseArgs(["-n", "20"]);
+    assert.equal(args.n, "20");
+  });
+
+  test("bare -n is retained as invalid rather than treated as a positional argument", () => {
+    assert.equal(parseArgs(["-n"]).n, true);
+  });
+
   test("parses options passed after complete or continue subcommands", () => {
     // main() strips the command name before calling parseArgs(rest)
     const completeArgs = parseArgs(["-w", "/tmp/x"]);
@@ -97,18 +108,51 @@ describe("parseArgs", () => {
 });
 
 describe("complete and continue command dispatch", () => {
-  test("main() dispatches complete and continue and lists them in Usage", async () => {
+  test("main() dispatches complete and continue", async () => {
     const fs = await import("node:fs");
     const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
     assert.match(cliSource, /case "complete":\s*\n\s*return cmdComplete\(args\);/);
     assert.match(cliSource, /case "continue":\s*\n\s*return cmdContinue\(args\);/);
-    assert.match(cliSource, /Usage: gpt-worker.*\|complete\|continue\|/);
   });
 
-  test("main() dispatches discard-task and lists it in Usage", async () => {
+  test("main() dispatches discard-task", async () => {
     const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
     assert.match(cliSource, /case "discard-task":\s*\n\s*return cmdDiscardTask\(args\);/);
-    assert.match(cliSource, /Usage: gpt-worker.*\|discard-task>/);
+  });
+});
+
+describe("CLI help", () => {
+  test("help data and dispatcher case labels stay in exact sync", () => {
+    const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
+    const cases = [...cliSource.matchAll(/case "([a-z-]+)":/g)].map((match) => match[1]);
+    assert.deepEqual(commandNames().sort(), cases.sort());
+    assert.equal(COMMANDS.some((command) => command.name === "logs"), true);
+  });
+
+  test("English command reference documents every help command", () => {
+    const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    for (const name of commandNames()) {
+      assert.ok(readme.includes(`| \`gpt-worker ${name}`), name);
+    }
+  });
+
+  test("formats general and command-specific help without configuration", () => {
+    assert.match(formatHelp(), /Usage: gpt-worker <command>/);
+    assert.match(formatHelp(), /logs/);
+    assert.match(formatHelp("task"), /Usage: gpt-worker task/);
+    assert.equal(formatHelp("missing"), null);
+  });
+});
+
+describe("extractWorkerUrl", () => {
+  test("prefers a workers.dev deployment URL and ignores dashboard links", () => {
+    const output = "View dashboard: https://dash.cloudflare.com/example\nDeployed: https://custom.example.dev\nWorker: https://my-worker.workers.dev";
+    assert.equal(extractWorkerUrl(output), "https://my-worker.workers.dev");
+  });
+
+  test("accepts a non-dashboard custom origin when no workers.dev URL is present", () => {
+    assert.equal(extractWorkerUrl("Published at https://worker.example.com/path"), "https://worker.example.com");
+    assert.equal(extractWorkerUrl("only https://dash.cloudflare.com/example"), null);
   });
 });
 

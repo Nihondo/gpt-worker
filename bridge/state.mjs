@@ -494,6 +494,56 @@ function logFilePath(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), "bridge.log");
 }
 
+/** Paths for the current log and its single rotated predecessor. These are
+ * intentionally available without tokens or Worker connectivity: logs remain
+ * the primary local diagnostic when the Worker or bridge is unavailable. */
+export function logFilePaths(workspaceRoot) {
+  const current = logFilePath(workspaceRoot);
+  return { current, previous: `${current}.1` };
+}
+
+function readTailBytes(filePath, lineCount) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(fd).size;
+    const chunks = [];
+    let position = size;
+    let newlines = 0;
+    const chunkSize = 16 * 1024;
+    while (position > 0 && newlines <= lineCount) {
+      const length = Math.min(chunkSize, position);
+      position -= length;
+      const chunk = Buffer.allocUnsafe(length);
+      fs.readSync(fd, chunk, 0, length, position);
+      chunks.unshift(chunk);
+      for (const byte of chunk) if (byte === 10) newlines++;
+    }
+    // Decode only after concatenating the raw chunks: decoding independently
+    // would corrupt a multibyte UTF-8 character split at a chunk boundary.
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return "";
+    throw err;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/** Return the final `lines` log records, crossing the one retained rotation.
+ * Reading starts at the end of each file so an old 10MB generation is not
+ * routinely loaded just to display a few diagnostics. */
+export function readLogTail(workspaceRoot, lines = 50) {
+  const count = Math.max(1, Math.min(10_000, Number.parseInt(lines, 10) || 50));
+  const { current, previous } = logFilePaths(workspaceRoot);
+  const currentText = readTailBytes(current, count);
+  const currentLines = currentText.split("\n").filter(Boolean);
+  if (currentLines.length >= count) return currentLines.slice(-count).join("\n") + "\n";
+  const previousText = readTailBytes(previous, count - currentLines.length);
+  const combined = [...previousText.split("\n").filter(Boolean), ...currentLines];
+  return combined.length ? combined.slice(-count).join("\n") + "\n" : "";
+}
+
 export function appendLog(workspaceRoot, line) {
   const logPath = logFilePath(workspaceRoot);
   ensurePrivateDir(path.dirname(logPath));
@@ -527,10 +577,12 @@ function processStartTime(pid) {
   }
 }
 
-export function writePidFile(workspaceRoot, { workspace }) {
+export function writePidFile(workspaceRoot, { workspace, alwaysAllow = undefined }) {
   const pid = process.pid;
   const startedAt = processStartTime(pid);
-  atomicWrite(pidFilePath(workspaceRoot), JSON.stringify({ pid, startedAt, workspace }, null, 2) + "\n");
+  const data = { pid, startedAt, workspace };
+  if (typeof alwaysAllow === "boolean") data.alwaysAllow = alwaysAllow;
+  atomicWrite(pidFilePath(workspaceRoot), JSON.stringify(data, null, 2) + "\n");
 }
 
 export function readPidFile(workspaceRoot) {

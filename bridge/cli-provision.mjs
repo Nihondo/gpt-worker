@@ -23,6 +23,7 @@ import {
 } from "./chat-nudge.mjs";
 import {
   adminCall,
+  checkPrerequisites,
   localCall,
   requireWorkspaceConfig,
   workspaceRoot,
@@ -125,10 +126,56 @@ function runWrangler(args, { input, cwd } = {}) {
   });
 }
 
+/** Extract the public Worker origin from Wrangler output. Wrangler may print
+ * dashboard and documentation links too, so prefer a workers.dev origin and
+ * never mistake a Cloudflare dashboard URL for the deployed endpoint. */
+export function extractWorkerUrl(deployOutput) {
+  const urls = String(deployOutput || "").match(/https:\/\/[^\s)\]}>"']+/g) || [];
+  const candidates = [];
+  for (const value of urls) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || /(^|\.)dash\.cloudflare\.com$/i.test(url.hostname)) continue;
+      candidates.push(url.origin);
+    } catch {
+      /* not a usable URL */
+    }
+  }
+  return candidates.find((url) => /\.workers\.dev$/i.test(new URL(url).hostname)) || candidates[0] || null;
+}
+
+function suppliedWorkerUrl(value) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.pathname === "/" ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+function printPreflight(result) {
+  for (const line of result.info) console.log(`  ✓ ${line}`);
+  for (const line of result.warnings) console.warn(`  ! ${line}`);
+}
+
 export async function cmdInit(args) {
   const root = workspaceRoot(args);
   let worker = readWorkerConfig();
   const existingTokens = readTokens(root);
+
+  if (!args["skip-preflight"]) {
+    console.log("Checking local prerequisites...");
+    const prerequisites = checkPrerequisites();
+    printPreflight(prerequisites);
+    if (!prerequisites.ok) {
+      for (const line of prerequisites.fatal) console.error(`  ✗ ${line}`);
+      console.error("Initialization stopped before contacting Cloudflare. Fix the prerequisites above, or re-run with --skip-preflight if you accept the risk.");
+      process.exit(1);
+    }
+  } else {
+    console.warn("Skipping local prerequisite checks (--skip-preflight).");
+  }
 
   if (worker && existingTokens && !args.force) {
     worker = await ensureSharedConnector(worker);
@@ -145,28 +192,37 @@ export async function cmdInit(args) {
     // First-ever run on this machine/account: deploy the Worker once and
     // set the one machine-wide ADMIN_TOKEN. Every later `init -w <dir>` for
     // another workspace reuses this — no further `wrangler deploy`.
-    console.log("Checking Cloudflare login...");
-    try {
-      runWrangler(["whoami"]);
-    } catch {
-      console.error("Not logged in to Cloudflare. Run this in an interactive terminal first:\n  npx wrangler login\nThen re-run: gpt-worker init");
+    const overrideUrl = args["worker-url"] === true ? null : suppliedWorkerUrl(args["worker-url"]);
+    if (args["worker-url"] && !overrideUrl) {
+      console.error("Invalid --worker-url: provide an HTTPS origin such as https://example.workers.dev");
       process.exit(1);
     }
+    let workerUrl = overrideUrl;
+    if (!workerUrl) {
+      console.log("Checking Cloudflare login...");
+      try {
+        runWrangler(["whoami"]);
+      } catch {
+        console.error("Not logged in to Cloudflare. Run this in an interactive terminal first:\n  npx wrangler login\nThen re-run: gpt-worker init");
+        process.exit(1);
+      }
 
-    console.log("Deploying the relay Worker...");
-    let deployOut;
-    try {
-      deployOut = runWrangler(["deploy"]);
-    } catch (err) {
-      console.error("Deploy failed:\n" + (err.stdout || err.message || err));
-      process.exit(1);
+      console.log("Deploying the relay Worker...");
+      let deployOut;
+      try {
+        deployOut = runWrangler(["deploy"]);
+      } catch (err) {
+        console.error("Deploy failed:\n" + (err.stdout || err.message || err));
+        process.exit(1);
+      }
+      workerUrl = extractWorkerUrl(deployOut);
+      if (!workerUrl) {
+        console.error("Could not find the deployed Worker URL in wrangler's output. Re-run with --worker-url https://your-worker.example:\n" + deployOut);
+        process.exit(1);
+      }
+    } else {
+      console.log(`Using supplied Worker URL: ${workerUrl}`);
     }
-    const m = deployOut.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i);
-    if (!m) {
-      console.error("Could not find the deployed Worker URL in wrangler's output:\n" + deployOut);
-      process.exit(1);
-    }
-    const workerUrl = m[0];
     const adminToken = crypto.randomBytes(32).toString("hex");
 
     console.log("Setting the admin secret...");

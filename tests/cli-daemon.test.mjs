@@ -1,0 +1,110 @@
+// Status and logs are operator diagnostics, so test them through the real CLI
+// process and HTTP transport. This makes their output contract explicit while
+// keeping the fake Worker limited to the same /local surface as production.
+
+import { after, test } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { runCli, startFakeWorker } from "./helpers/fake-worker.mjs";
+
+const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-daemon-config-"));
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-daemon-state-"));
+process.env.GPT_WORKER_CONFIG_DIR = configDir;
+process.env.GPT_WORKER_STATE_ROOT = stateDir;
+const { appendLog, writeTokensAtomic, workspaceStateDir } = await import("../bridge/state.mjs?cli-daemon-test");
+
+const ENV = { GPT_WORKER_CONFIG_DIR: configDir, GPT_WORKER_STATE_ROOT: stateDir, GPT_WORKER_RETRY_BASE_MS: "1" };
+const WORKSPACE_ID = "0123456789abcdef";
+
+after(() => {
+  fs.rmSync(configDir, { recursive: true, force: true });
+  fs.rmSync(stateDir, { recursive: true, force: true });
+});
+
+function makeWorkspace(server) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-daemon-ws-")));
+  fs.writeFileSync(path.join(configDir, "worker.json"), JSON.stringify({ workerUrl: server?.url || "http://127.0.0.1:1", adminToken: "admin" }));
+  writeTokensAtomic(root, { workspaceId: WORKSPACE_ID, cliToken: "cli", linkToken: "link", workspacePath: root });
+  return {
+    root,
+    run: (args) => runCli([...args, "-w", root], { env: ENV }),
+    cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+test("status shows local diagnostics, task timing, read gate, and body limit", async () => {
+  const now = Date.now();
+  const server = await startFakeWorker((call) => {
+    if (!call.path.startsWith("/local/")) return { body: {} };
+    if (call.op === "status") return { body: { connected: true, pendingToGpt: 2, pendingToLocal: 1 } };
+    if (call.op === "active_task") {
+      return {
+        body: {
+          task: { taskId: "t1", iteration: 4, protocolState: "EXECUTING", waitingFor: "GPT_PLAN", taskStartedAt: now - 20_000, updatedAt: now - 1_000 },
+          taskWindow: { state: "active", expiresAt: now + 60_000, idleMs: 3_600_000 },
+        },
+      };
+    }
+    if (call.op === "max_body_bytes_get") return { body: { maxBodyBytes: 16_384, floor: 1_024, ceiling: 2_097_152 } };
+    return { body: {} };
+  });
+  const ws = makeWorkspace(server);
+  try {
+    const result = await ws.run(["status"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /read gate\s+: unknown \(bridge not running\)/);
+    assert.ok(result.stdout.includes(`${workspaceStateDir(ws.root)}/bridge.log`));
+    assert.match(result.stdout, /task\s+: t1/);
+    assert.match(result.stdout, /waiting for\s+: GPT_PLAN/);
+    assert.match(result.stdout, /read window\s+: active; expires/);
+    assert.match(result.stdout, /body limit\s+: 16384 bytes/);
+  } finally {
+    await server.close();
+    ws.cleanup();
+  }
+});
+
+test("status distinguishes an unreachable Worker from no active task", async () => {
+  const server = await startFakeWorker(() => ({ body: {} }));
+  const ws = makeWorkspace(server);
+  await server.close();
+  try {
+    const result = await ws.run(["status"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /worker link\s+: UNREACHABLE/);
+    assert.match(result.stdout, /task\s+: \(unknown — the Worker is the only source of task state\)/);
+    assert.doesNotMatch(result.stdout, /task\s+: \(none\)/);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test("logs reads local entries without Worker connectivity and --path prints both generations", async () => {
+  const ws = makeWorkspace(null);
+  try {
+    appendLog(ws.root, "first diagnostic");
+    appendLog(ws.root, "second diagnostic");
+    const logs = await ws.run(["logs", "-n", "1"]);
+    assert.equal(logs.code, 0, logs.stderr);
+    assert.match(logs.stdout, /second diagnostic/);
+    assert.doesNotMatch(logs.stdout, /first diagnostic/);
+
+    const paths = await ws.run(["logs", "--path"]);
+    assert.equal(paths.code, 0, paths.stderr);
+    assert.match(paths.stdout, /bridge\.log\n/);
+    assert.match(paths.stdout, /bridge\.log\.1/);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test("help is available without local configuration", async () => {
+  const general = await runCli(["help"], { env: ENV });
+  assert.equal(general.code, 0, general.stderr);
+  assert.match(general.stdout, /logs/);
+  const command = await runCli(["task", "--help"], { env: ENV });
+  assert.equal(command.code, 0, command.stderr);
+  assert.match(command.stdout, /Usage: gpt-worker task/);
+});

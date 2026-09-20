@@ -21,6 +21,11 @@ const {
   acquireFileLock,
   releaseFileLock,
   fixPermissions,
+  logFilePaths,
+  readLogTail,
+  appendLog,
+  writePidFile,
+  readPidFile,
   workspaceStateDir,
 } = await import("../bridge/state.mjs?worker-config-test");
 const { loadChatSettings, nudgeChatGpt, cmdChatUrl, ensureRemoteSettingsBeforeKeepRemote } = await import("../bridge/cli.mjs?worker-config-test");
@@ -62,6 +67,25 @@ test("serialized config updates preserve URL and tab mappings added from stale s
     [workspaceA]: "https://chatgpt.com/g/g-p-a/c/a",
     [workspaceB]: "https://chatgpt.com/g/g-p-b/c/b",
   });
+});
+
+test("readLogTail reads the requested final lines across one rotation without corrupting UTF-8", () => {
+  const root = fs.mkdtempSync(path.join(stateDir, "test-log-root-"));
+  const paths = logFilePaths(root);
+  fs.mkdirSync(path.dirname(paths.current), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(paths.previous, "old 1\nold 日本語\n");
+  fs.writeFileSync(paths.current, "new 1\nnew 2\n");
+  assert.equal(readLogTail(root, 3), "old 日本語\nnew 1\nnew 2\n");
+  appendLog(root, "new 3");
+  assert.match(readLogTail(root, 1), /new 3/);
+});
+
+test("writePidFile records --always-allow while keeping older pid files readable", () => {
+  const root = fs.mkdtempSync(path.join(stateDir, "test-pid-root-"));
+  writePidFile(root, { workspace: root, alwaysAllow: true });
+  assert.equal(readPidFile(root).alwaysAllow, true);
+  writePidFile(root, { workspace: root });
+  assert.equal(Object.hasOwn(readPidFile(root), "alwaysAllow"), false);
 });
 
 test("a removal based on an old snapshot retains a later workspace URL and tab mapping", () => {

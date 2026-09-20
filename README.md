@@ -446,11 +446,12 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 
 | Command | Description |
 |---|---|
-| `gpt-worker init -w <dir>` | Register workspace (deploys Worker on first run) |
+| `gpt-worker init -w <dir> [--worker-url <https-url>] [--skip-preflight]` | Register workspace (deploys Worker on first run). Checks Node, Git, and the secret scanner before Cloudflare operations; `--worker-url` uses an already deployed Worker and `--skip-preflight` bypasses those local checks. |
 | `gpt-worker url [-w <dir>]` | Display WebUI (dashboard) URL, OAuth Server URL, and owner token (`-w` displays URLs dedicated to that workspace) |
 | `gpt-worker start -w <dir>` | Start the local bridge process |
 | `gpt-worker stop -w <dir>` | Stop the local bridge process |
-| `gpt-worker status -w <dir>` | Check bridge process status and active task |
+| `gpt-worker status -w <dir>` | Check local bridge diagnostics, read-gate state, log path, chat binding, Worker link, and active task details |
+| `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | Show the last 50 local bridge log lines (including the retained rotation). `--path` prints log paths for `tail -f`; `--all` covers every locally provisioned workspace. Does not require Worker connectivity. |
 | `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | Queue a new task for ChatGPT |
 | `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
 | `gpt-worker report [-w <dir>] [--title "<title>"]` | Submit execution metrics and test results to ChatGPT |
@@ -471,6 +472,8 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | Rotate authentication tokens (workspace GPT/link/CLI token or shared hub token) |
 | `gpt-worker workspaces` | List all registered workspaces |
 | `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge records |
+
+Run `gpt-worker help`, `gpt-worker help <command>`, or `gpt-worker <command> --help` to see the available commands without requiring a configured workspace.
 
 ### Exit codes
 

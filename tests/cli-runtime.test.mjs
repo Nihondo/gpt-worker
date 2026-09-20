@@ -18,13 +18,25 @@ const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-runtime-config-"));
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-runtime-state-"));
 process.env.GPT_WORKER_CONFIG_DIR = configDir;
 process.env.GPT_WORKER_STATE_ROOT = stateDir;
-const { WorkerCallError, WorkerUnreachableError, adminCall, localCall, migrateLegacyStateIfNeeded, parseRetryAfterMs, remoteActiveTask } =
+const { WorkerCallError, WorkerUnreachableError, adminCall, localCall, migrateLegacyStateIfNeeded, parseRetryAfterMs, remoteActiveState, remoteActiveTask } =
   await import("../bridge/cli-runtime.mjs?cli-runtime-test");
 const { workspaceStateDir, readState } = await import("../bridge/state.mjs?cli-runtime-test");
 
 after(() => {
   fs.rmSync(configDir, { recursive: true, force: true });
   fs.rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("remoteActiveState preserves Worker-owned window information while remoteActiveTask stays task-only", async () => {
+  const task = { taskId: "t1" };
+  const taskWindow = { state: "active", idleMs: 3_600_000, expiresAt: 1_700_000_000_000 };
+  const server = await startFakeWorker(() => ({ body: { task, taskWindow } }));
+  try {
+    assert.deepEqual(await remoteActiveState(cfgFor(server)), { task, taskWindow });
+    assert.deepEqual(await remoteActiveTask(cfgFor(server)), task);
+  } finally {
+    await server.close();
+  }
 });
 
 // Retries are real, so keep them fast: 1ms base delay instead of 300ms.
