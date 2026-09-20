@@ -275,24 +275,42 @@ gpt-worker guidance --clear -w .
 ```
 > 💬 **チャットでは:** 「このプロジェクトの gpt-worker のガイダンスを設定して：テストは必ず Vitest で書き、関数コンポーネントを優先すること」／「このプロジェクトの gpt-worker のガイダンスを解除して」
 
-### Git で無視されている特定ファイル・ディレクトリを読み取らせたい
-`.gitignore` に含まれるファイルは通常 ChatGPT から隠されます。特定のファイルやディレクトリの読み取りを個別許可したい場合は次のように実行します。
+### 読み取りアクセスの管理（allow-read と deny-read）
+`.gitignore` に含まれるファイルは通常 ChatGPT から隠され、通常の追跡ファイルは読み取ることができます。`allow-read` と `deny-read` を使用して、きめ細かな読み取りポリシーを設定できます。
+
+- **ポリシーの優先順位**: 機密ファイル（`.env`、秘密鍵など） > `deny-read` > `.gitignore` ベースライン（`allow-read` による例外許可を含む）。機密パスは絶対に読み取れません。
+- **`allow-read <path>`**: Git で無視されているファイルまたはディレクトリへの MCP `read_file` 直接読み取りを個別許可します。ディレクトリ配下のファイルは一覧表示や検索からは隠蔽されたままとなります。
+- **`unallow-read <path>`**: `allow-read` の例外許可を解除します。
+- **`deny-read <path>`**: ファイルまたはディレクトリ（通常の追跡ファイルや過去に allow-read されたパスを含む）の読み取りを明示的に禁止します。禁止されたパスは一覧表示、検索、直接読み取りから完全に隠蔽されます。
+- **`undeny-read <path>`**: 明示的な禁止設定を解除します。そのパスが同時に allow-read にも登録されていた場合、背後にある allow-read 例外が再び有効になります。
 
 ```bash
-# 特定のファイルを許可
+# Git で無視されているファイルまたはディレクトリの読み取りを許可
 gpt-worker allow-read config/test-fixture.json -w .
-
-# ディレクトリ全体（配下ファイル含む）を許可
 gpt-worker allow-read fixtures -w .
 
 # 許可中のパス一覧を確認
 gpt-worker allow-list -w .
 
-# 許可を取り消す
-gpt-worker deny-read config/test-fixture.json -w .
-gpt-worker deny-read fixtures -w .
+# allow-read の例外を解除
+gpt-worker unallow-read config/test-fixture.json -w .
+gpt-worker unallow-read fixtures -w .
+
+# 通常ファイルや許可済みパスの読み取りを明示的に禁止
+gpt-worker deny-read secret-docs -w .
+gpt-worker deny-read config/internal.json -w .
+
+# 禁止中のパス一覧を確認
+gpt-worker deny-list -w .
+
+# 明示的な禁止設定を解除
+gpt-worker undeny-read secret-docs -w .
+gpt-worker undeny-read config/internal.json -w .
 ```
-※ ディレクトリを許可した場合、配下ファイルへの直接読み取り (`read_file`) が可能になりますが、一覧表示 (`list_directory`) や検索 (`search_workspace`) からは引き続き隠蔽されます。また、`.env` や秘密鍵などの機密ファイルは、許可されたディレクトリ配下にあっても安全のため保護され、読み取ることはできません。
+※ `gpt-worker status` では `read allowed` と `read denied` の両方のパスが表示されます。`.env` や秘密鍵（`.ssh/` 等）などの機密ファイルは、いずれのリストによっても読み取り可能になることはありません。
+
+> [!NOTE]
+> **互換性に関する注意**: 従来の `gpt-worker` では、`deny-read` は `allow-read` の例外許可を取り消すために使用されていました。その操作は `unallow-read` に変更されました。現在の `deny-read` は、通常の追跡ファイルや許可済みパスを含む任意のパスを対象に、独立した永続的拒否ルールを作成します。既存の `read-allowlist.json` のエントリはそのまま保持されます。
 
 ### 設定内容を確認したい
 登録されている Project URL や自動送信の設定を確認できます。
@@ -453,7 +471,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker url [-w <dir>]` | WebUI（ダッシュボード）URL、OAuth Server URL、認証トークンを表示（`-w` を付けるとそのワークスペース専用 URL を表示） |
 | `gpt-worker start -w <dir>` | ローカルブリッジ（通信プロセス）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
-| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、READ許可パス、ログパス、検証済みのチャット紐付け、Worker 接続、アクティブタスクの詳細を確認。Worker 障害時は未紐付けと誤表示せず利用不可として表示します。 |
+| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、READ許可・禁止パス、ログパス、検証済みのチャット紐付け、Worker 接続、アクティブタスクの詳細を確認。Worker 障害時は未紐付けと誤表示せず利用不可として表示します。 |
 | `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | ローカルブリッジログの末尾50行を表示（保持しているローテーションも対象）。`--path` は `tail -f` 用のパス表示、`--all` は移動・削除済みのものも含むローカル登録済み全ワークスペースを対象にします。Worker への接続は不要です。 |
 | `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | ChatGPT に新しいタスクを依頼 |
 | `gpt-worker wait -w <dir>` | ChatGPT の応答（計画またはレビュー結果）を待機 |
@@ -469,8 +487,11 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker chat <new\|attach\|status> ... -w <dir>` | 新しいチャットの開始、手動で開いた会話の紐付け、または復旧状態の確認 |
 | `gpt-worker show-config [-w <dir>]` | ブラウザ連携の設定内容を確認 |
 | `gpt-worker allow-read <path> -w <dir>` | Git 無視ファイル・ディレクトリの個別読み取りを許可 |
+| `gpt-worker unallow-read <path> -w <dir>` | Git 無視ファイル・ディレクトリの個別許可を解除 |
 | `gpt-worker allow-list -w <dir>` | 個別許可されたファイル・ディレクトリ一覧を表示 |
-| `gpt-worker deny-read <path> -w <dir>` | 個別読み取りの許可を取り消し |
+| `gpt-worker deny-read <path> -w <dir>` | ファイルまたはディレクトリの個別読み取りを明示的に禁止 |
+| `gpt-worker undeny-read <path> -w <dir>` | 個別読み取りの明示的禁止を解除 |
+| `gpt-worker deny-list -w <dir>` | 明示的に読み取り禁止されたパス一覧を表示 |
 | `gpt-worker state -w <dir>` | 現在のタスク状態を JSON で確認 |
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | 認証トークン（ワークスペースの GPT/link/CLI トークン、または共有 hub トークン）を再生成 |
 | `gpt-worker workspaces` | 登録済みプロジェクト一覧を表示 |

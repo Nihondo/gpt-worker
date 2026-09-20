@@ -28,9 +28,12 @@ import {
 import {
   cmdAllowList,
   cmdAllowRead,
+  cmdDenyList,
   cmdDenyRead,
   cmdGuidance,
   cmdLimits,
+  cmdUnallowRead,
+  cmdUndenyRead,
 } from "./cli-settings.mjs";
 import {
   buildExecutedBody,
@@ -112,10 +115,16 @@ async function main() {
       return cmdGuidance(args);
     case "allow-read":
       return cmdAllowRead(args);
-    case "deny-read":
-      return cmdDenyRead(args);
+    case "unallow-read":
+      return cmdUnallowRead(args);
     case "allow-list":
       return cmdAllowList(args);
+    case "deny-read":
+      return cmdDenyRead(args);
+    case "undeny-read":
+      return cmdUndenyRead(args);
+    case "deny-list":
+      return cmdDenyList(args);
     case "start":
       return cmdStart(args);
     case "stop":

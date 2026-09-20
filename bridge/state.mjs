@@ -82,7 +82,7 @@ export function fixPermissions() {
     const wsDir = path.join(STATE_ROOT, d.name);
     chmodIfExists(wsDir, 0o700);
     removeStaleLock(path.join(wsDir, "tokens.json.lock"));
-    for (const f of ["tokens.json", "state.json", "guidance.md", "read-allowlist.json", "bridge.pid", "bridge.log", "bridge.log.1"]) {
+    for (const f of ["tokens.json", "state.json", "guidance.md", "read-allowlist.json", "read-denylist.json", "bridge.pid", "bridge.log", "bridge.log.1"]) {
       chmodIfExists(path.join(wsDir, f), 0o600);
     }
     const rDir = path.join(wsDir, "records");
@@ -460,11 +460,59 @@ export function allowReadPath(workspaceRoot, relPath) {
   writeAllowedReadPaths(workspaceRoot, paths.sort());
 }
 
-export function denyReadPath(workspaceRoot, relPath) {
+export function unallowReadPath(workspaceRoot, relPath) {
   const stripped = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath;
   const withSlash = `${stripped}/`;
   const paths = readAllowedReadPaths(workspaceRoot).filter((p) => p !== stripped && p !== withSlash);
   writeAllowedReadPaths(workspaceRoot, paths);
+}
+
+// Owner-controlled explicit read denylist. Overrides allow-read and normal
+// Git-tracked reads.
+function readDenylistFilePath(workspaceRoot) {
+  return path.join(workspaceStateDir(workspaceRoot), "read-denylist.json");
+}
+
+export function readDeniedReadPaths(workspaceRoot) {
+  const filePath = readDenylistFilePath(workspaceRoot);
+  let content;
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    if (err && err.code === "ENOENT") return [];
+    throw err;
+  }
+  let data;
+  try {
+    data = JSON.parse(content);
+  } catch (err) {
+    throw new Error(`Failed to parse ${filePath}: ${err.message}`);
+  }
+  if (!data || typeof data !== "object" || !Array.isArray(data.paths)) {
+    throw new Error(`Invalid denylist schema in ${filePath}: expected { paths: string[] }`);
+  }
+  if (!data.paths.every((p) => typeof p === "string")) {
+    throw new Error(`Invalid denylist schema in ${filePath}: all paths must be strings`);
+  }
+  return data.paths;
+}
+
+function writeDeniedReadPaths(workspaceRoot, paths) {
+  atomicWrite(readDenylistFilePath(workspaceRoot), JSON.stringify({ paths }, null, 2) + "\n");
+}
+
+export function denyReadPath(workspaceRoot, relPath) {
+  const opposite = relPath.endsWith("/") ? relPath.slice(0, -1) : `${relPath}/`;
+  const paths = readDeniedReadPaths(workspaceRoot).filter((p) => p !== opposite);
+  if (!paths.includes(relPath)) paths.push(relPath);
+  writeDeniedReadPaths(workspaceRoot, paths.sort());
+}
+
+export function undenyReadPath(workspaceRoot, relPath) {
+  const stripped = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath;
+  const withSlash = `${stripped}/`;
+  const paths = readDeniedReadPaths(workspaceRoot).filter((p) => p !== stripped && p !== withSlash);
+  writeDeniedReadPaths(workspaceRoot, paths);
 }
 
 function stateFilePath(workspaceRoot) {

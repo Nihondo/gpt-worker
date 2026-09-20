@@ -7,6 +7,7 @@ import {
   logFilePaths,
   logFilePathsFromStateDir,
   readAllowedReadPaths,
+  readDeniedReadPaths,
   readLogTail,
   readLogTailFromStateDir,
   removePidFile,
@@ -222,6 +223,25 @@ function printAllowedReads(root) {
   }
 }
 
+function printDeniedReads(root) {
+  let paths;
+  try {
+    paths = readDeniedReadPaths(root);
+  } catch {
+    console.log("read denied : unavailable (corrupt state)");
+    return;
+  }
+  if (paths.length === 0) {
+    console.log("read denied : (none)");
+    return;
+  }
+  console.log(`read denied : ${paths.length}`);
+  for (const p of paths) {
+    const label = p.endsWith("/") ? "directory" : "file";
+    console.log(`  ${label.padEnd(10)}: ${p}`);
+  }
+}
+
 export async function cmdStatus(args) {
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
@@ -230,6 +250,7 @@ export async function cmdStatus(args) {
   console.log(`local process: ${pidCheck.status}${pidCheck.info ? ` (pid ${pidCheck.info.pid})` : ""}`);
   console.log(`read gate   : ${readGateStatus(pidCheck)}`);
   printAllowedReads(root);
+  printDeniedReads(root);
   console.log(`log         : ${logFilePaths(root).current}`);
   try {
     const scanner = verifyScanner();

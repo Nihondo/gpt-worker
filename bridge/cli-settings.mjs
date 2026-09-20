@@ -2,8 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   allowReadPath,
-  denyReadPath,
+  unallowReadPath,
   readAllowedReadPaths,
+  denyReadPath,
+  undenyReadPath,
+  readDeniedReadPaths,
 } from "./state.mjs";
 import { WorkspaceTools } from "./tools.mjs";
 import {
@@ -79,7 +82,7 @@ export async function cmdLimits(args) {
 }
 
 export function allowedReadFile(root, input, { mustExist = true, allowSensitive = false } = {}) {
-  if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-path> [-w <dir>]");
+  if (!input) throw new Error("Usage: gpt-worker allow-read|unallow-read|deny-read|undeny-read <workspace-relative-path> [-w <dir>]");
   if (path.isAbsolute(input)) throw new Error("OUT_OF_WORKSPACE");
   const tools = new WorkspaceTools(root);
   const resolved = tools.resolve(input);
@@ -107,20 +110,43 @@ export function cmdAllowRead(args) {
   const root = workspaceRoot(args);
   const relPath = allowedReadFile(root, args._[0]);
   allowReadPath(root, relPath);
-  console.log(`Allowed direct MCP reads for ${relPath}. It remains hidden from listing and search.`);
+  console.log(`Added allow-read exception for ${relPath}. It remains hidden from listing and search.`);
 }
 
-export function cmdDenyRead(args) {
+export function cmdUnallowRead(args) {
   const root = workspaceRoot(args);
   const relPath = allowedReadFile(root, args._[0], { mustExist: false, allowSensitive: true });
-  denyReadPath(root, relPath);
-  console.log(`Removed direct-read permission for ${relPath}.`);
+  unallowReadPath(root, relPath);
+  console.log(`Removed allow-read exception for ${relPath}.`);
 }
 
 export function cmdAllowList(args) {
   const paths = readAllowedReadPaths(workspaceRoot(args));
   if (paths.length === 0) {
     console.log("(no explicitly allowed paths)");
+    return;
+  }
+  for (const relPath of paths) console.log(relPath);
+}
+
+export function cmdDenyRead(args) {
+  const root = workspaceRoot(args);
+  const relPath = allowedReadFile(root, args._[0], { mustExist: true, allowSensitive: true });
+  denyReadPath(root, relPath);
+  console.log(`Denied reads for ${relPath}. Explicit deny overrides allow-read.`);
+}
+
+export function cmdUndenyRead(args) {
+  const root = workspaceRoot(args);
+  const relPath = allowedReadFile(root, args._[0], { mustExist: false, allowSensitive: true });
+  undenyReadPath(root, relPath);
+  console.log(`Removed explicit deny for ${relPath}.`);
+}
+
+export function cmdDenyList(args) {
+  const paths = readDeniedReadPaths(workspaceRoot(args));
+  if (paths.length === 0) {
+    console.log("(no explicitly denied paths)");
     return;
   }
   for (const relPath of paths) console.log(relPath);

@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { WorkspaceTools, parseGitHubRemote } from "../bridge/tools.mjs";
 import { BridgeLink } from "../bridge/link.mjs";
 import { allowedReadFile } from "../bridge/cli-settings.mjs";
-import { workspaceStateDir, recordsDir, workspaceSlug } from "../bridge/state.mjs";
+import { workspaceStateDir, recordsDir, workspaceSlug, readDeniedReadPaths } from "../bridge/state.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -274,34 +274,149 @@ describe("WorkspaceTools: Git-ignored paths", () => {
   test("CLI stores and removes exact-file and directory exceptions in private local state", () => {
     const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gw-allow-state-"));
     dirsToClean.push(stateRoot);
-    assert.match(cli(["allow-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    assert.match(cli(["allow-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Added allow-read exception for ignored\.txt/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored.txt");
-    assert.match(cli(["deny-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.match(cli(["unallow-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Removed allow-read exception for ignored\.txt/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
 
-    // Directory allow and deny roundtrip
-    assert.match(cli(["allow-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    // Directory allow and unallow roundtrip
+    assert.match(cli(["allow-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Added allow-read exception for ignored-dir\//);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored-dir/");
-    assert.match(cli(["deny-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.match(cli(["unallow-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed allow-read exception for ignored-dir\//);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
 
-    // Stale directory can be revoked even after deletion
+    // Stale directory can be unallowed even after deletion
     const staleDir = path.join(workspace, "stale-dir");
     fs.mkdirSync(staleDir);
-    assert.match(cli(["allow-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    assert.match(cli(["allow-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Added allow-read exception for stale-dir\//);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "stale-dir/");
     fs.rmdirSync(staleDir);
-    assert.match(cli(["deny-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.match(cli(["unallow-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed allow-read exception for stale-dir/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
 
-    // Sensitive markers can be revoked via CLI deny-read even while sensitive paths exist
+    // Sensitive markers can be removed via CLI unallow-read even while sensitive paths exist
     const { dirName } = workspaceSlug(workspace);
     const allowlistPath = path.join(stateRoot, dirName, "read-allowlist.json");
     fs.mkdirSync(path.dirname(allowlistPath), { recursive: true });
     fs.writeFileSync(allowlistPath, JSON.stringify({ paths: [".env", ".ssh/"] }) + "\n");
-    assert.match(cli(["deny-read", ".ssh", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
-    assert.match(cli(["deny-read", ".env", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.match(cli(["unallow-read", ".ssh", "-w", workspace], { cwd: workspace, stateRoot }), /Removed allow-read exception for \.ssh/);
+    assert.match(cli(["unallow-read", ".env", "-w", workspace], { cwd: workspace, stateRoot }), /Removed allow-read exception for \.env/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
+  });
+
+  test("CLI stores and removes explicit deny-read rules in private local state", () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gw-deny-state-"));
+    dirsToClean.push(stateRoot);
+    assert.match(cli(["deny-read", "README.md", "-w", workspace], { cwd: workspace, stateRoot }), /Denied reads for README\.md/);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "README.md");
+    assert.match(cli(["undeny-read", "README.md", "-w", workspace], { cwd: workspace, stateRoot }), /Removed explicit deny for README\.md/);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly denied paths)");
+
+    // Directory deny and undeny roundtrip
+    assert.match(cli(["deny-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Denied reads for ignored-dir\//);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored-dir/");
+    assert.match(cli(["undeny-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed explicit deny for ignored-dir\//);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly denied paths)");
+
+    // Stale directory can be undenied even after deletion
+    const staleDir = path.join(workspace, "stale-deny-dir");
+    fs.mkdirSync(staleDir);
+    assert.match(cli(["deny-read", "stale-deny-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Denied reads for stale-deny-dir\//);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "stale-deny-dir/");
+    fs.rmdirSync(staleDir);
+    assert.match(cli(["undeny-read", "stale-deny-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed explicit deny for stale-deny-dir/);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly denied paths)");
+
+    // Sensitive markers can be removed via undeny-read
+    const { dirName } = workspaceSlug(workspace);
+    const denylistPath = path.join(stateRoot, dirName, "read-denylist.json");
+    fs.mkdirSync(path.dirname(denylistPath), { recursive: true });
+    fs.writeFileSync(denylistPath, JSON.stringify({ paths: [".env", ".ssh/"] }) + "\n");
+    assert.match(cli(["undeny-read", ".ssh", "-w", workspace], { cwd: workspace, stateRoot }), /Removed explicit deny for \.ssh/);
+    assert.match(cli(["undeny-read", ".env", "-w", workspace], { cwd: workspace, stateRoot }), /Removed explicit deny for \.env/);
+    assert.equal(cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly denied paths)");
+  });
+
+  test("explicit deny-read takes precedence over allow-read and restores on undeny", () => {
+    // 1. Git-ignored file: allow-read enables it, deny-read blocks it, undeny-read restores it
+    const toolsAllowed = new WorkspaceTools(workspace, {
+      allowedReadPaths: () => ["ignored.txt"],
+      deniedReadPaths: () => [],
+    });
+    const resAllowed = toolsAllowed.readFile({ path: "ignored.txt" });
+    assert.equal(resAllowed.error, undefined);
+    assert.match(resAllowed.text, /ignored searchable value/);
+
+    const toolsBoth = new WorkspaceTools(workspace, {
+      allowedReadPaths: () => ["ignored.txt"],
+      deniedReadPaths: () => ["ignored.txt"],
+    });
+    const resBoth = toolsBoth.readFile({ path: "ignored.txt" });
+    assert.deepEqual(resBoth, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "ignored.txt" });
+
+    // Restored when deny removed
+    const resRestored = toolsAllowed.readFile({ path: "ignored.txt" });
+    assert.equal(resRestored.error, undefined);
+    assert.match(resRestored.text, /ignored searchable value/);
+
+    // 2. Normal tracked file: deny-read hides it from browse/search/gitDiff/gitLog
+    const toolsTrackedDenied = new WorkspaceTools(workspace, {
+      allowedReadPaths: () => [],
+      deniedReadPaths: () => ["README.md"],
+    });
+    const resTracked = toolsTrackedDenied.readFile({ path: "README.md" });
+    assert.deepEqual(resTracked, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "README.md" });
+
+    const listing = toolsTrackedDenied.listDirectory({ path: "" });
+    assert.equal(listing.entries.some((entry) => entry.path === "README.md"), false);
+
+    const search = toolsTrackedDenied.searchWorkspace({ query: "visible" });
+    assert.equal(search.hits.length, 0);
+
+    const diff = toolsTrackedDenied.gitDiff({ path: "README.md" });
+    assert.deepEqual(diff, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "README.md" });
+
+    const log = toolsTrackedDenied.gitLog({ path: "README.md" });
+    assert.deepEqual(log, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "README.md" });
+  });
+
+  test("directory deny-read covers the directory entry and all descendants", () => {
+    const subDir = path.join(workspace, "tracked-sub");
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(path.join(subDir, "file1.txt"), "sub file content\n");
+
+    const tools = new WorkspaceTools(workspace, {
+      deniedReadPaths: () => ["tracked-sub/"],
+    });
+    assert.equal(tools.isExplicitlyDenied("tracked-sub"), true);
+    assert.equal(tools.isExplicitlyDenied("tracked-sub/"), true);
+    assert.equal(tools.isExplicitlyDenied("tracked-sub/file1.txt"), true);
+    assert.equal(tools.isExplicitlyDenied("tracked-sub-other/file1.txt"), false);
+
+    const readSub = tools.readFile({ path: "tracked-sub/file1.txt" });
+    assert.deepEqual(readSub, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "tracked-sub/file1.txt" });
+
+    // Direct listing of the denied directory itself must be rejected
+    const dirListing = tools.listDirectory({ path: "tracked-sub" });
+    assert.deepEqual(dirListing, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "tracked-sub" });
+    const dirListingSlash = tools.listDirectory({ path: "tracked-sub/" });
+    assert.deepEqual(dirListingSlash, { error: "ACCESS_DENIED_EXPLICIT_READ", path: "tracked-sub" });
+
+    const listing = tools.listDirectory({ path: "" });
+    assert.equal(listing.entries.some((entry) => entry.path === "tracked-sub"), false);
+
+    const search = tools.searchWorkspace({ query: "sub file content" });
+    assert.equal(search.hits.length, 0);
+  });
+
+  test("sensitive files always remain blocked with ACCESS_DENIED_SENSITIVE_FILE regardless of deny or allow lists", () => {
+    fs.writeFileSync(path.join(workspace, ".env"), "secret\n");
+    const tools = new WorkspaceTools(workspace, {
+      allowedReadPaths: () => [".env"],
+      deniedReadPaths: () => [".env"],
+    });
+    const result = tools.readFile({ path: ".env" });
+    assert.equal(result.error, "ACCESS_DENIED_SENSITIVE_FILE");
   });
 
   test("keeps Git-ignored overview files unavailable unless explicitly allowed", () => {
@@ -313,6 +428,95 @@ describe("WorkspaceTools: Git-ignored paths", () => {
     const allowedClaude = allowed.files.find((file) => file.path === "CLAUDE.md");
     assert.equal(allowedClaude.status, "read");
     assert.match(allowedClaude.text, /ignored overview/);
+
+    // If also explicitly denied, status is unavailable with ACCESS_DENIED_EXPLICIT_READ
+    const both = new WorkspaceTools(workspace, {
+      allowedReadPaths: () => ["CLAUDE.md"],
+      deniedReadPaths: () => ["CLAUDE.md"],
+    }).workspaceOverview();
+    const bothClaude = both.files.find((file) => file.path === "CLAUDE.md");
+    assert.deepEqual(bothClaude, { path: "CLAUDE.md", status: "unavailable", reason: "ACCESS_DENIED_EXPLICIT_READ" });
+  });
+
+  test("corrupt denylist fails closed for tools and CLI operations", () => {
+    const denylistPath = path.join(workspaceStateDir(workspace), "read-denylist.json");
+    const stateRoot = path.dirname(workspaceStateDir(workspace));
+    try {
+      // 1. Missing denylist => empty array, reads work
+      try { fs.unlinkSync(denylistPath); } catch {}
+      assert.deepEqual(readDeniedReadPaths(workspace), []);
+
+      // 2. Corrupt JSON syntax
+      fs.writeFileSync(denylistPath, "{ not valid json\n");
+      // readDeniedReadPaths throws
+      assert.throws(() => readDeniedReadPaths(workspace), /Failed to parse/);
+      // CLI operations refuse rather than overwriting
+      assert.throws(() => cli(["deny-list", "-w", workspace], { cwd: workspace, stateRoot }));
+      assert.throws(() => cli(["deny-read", "README.md", "-w", workspace], { cwd: workspace, stateRoot }));
+      assert.throws(() => cli(["undeny-read", "README.md", "-w", workspace], { cwd: workspace, stateRoot }));
+      // Workspace read tools fail closed without returning file content
+      const corruptTools = new WorkspaceTools(workspace);
+      assert.throws(() => corruptTools.readFile({ path: "README.md" }));
+      assert.throws(() => corruptTools.listDirectory({ path: "" }));
+
+      // 3. Invalid schema (paths not an array)
+      fs.writeFileSync(denylistPath, JSON.stringify({ paths: "not-array" }) + "\n");
+      assert.throws(() => readDeniedReadPaths(workspace), /Invalid denylist schema/);
+
+      // 4. Non-string paths
+      fs.writeFileSync(denylistPath, JSON.stringify({ paths: [123] }) + "\n");
+      assert.throws(() => readDeniedReadPaths(workspace), /Invalid denylist schema/);
+    } finally {
+      try { fs.unlinkSync(denylistPath); } catch {}
+    }
+  });
+
+  test("workspace_info does not expose metadata from explicitly denied files", () => {
+    const metaRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gw-meta-"));
+    dirsToClean.push(metaRoot, workspaceStateDir(metaRoot));
+    git(metaRoot, ["init", "-q"]);
+    git(metaRoot, ["config", "user.email", "test@example.com"]);
+    git(metaRoot, ["config", "user.name", "Test"]);
+
+    fs.writeFileSync(
+      path.join(metaRoot, "package.json"),
+      JSON.stringify({
+        scripts: { build: "echo build" },
+        dependencies: { react: "^18.0.0" },
+      }) + "\n"
+    );
+    fs.writeFileSync(path.join(metaRoot, "Cargo.toml"), "[package]\nname = \"foo\"\n");
+    fs.writeFileSync(path.join(metaRoot, "yarn.lock"), "# yarn lockfile\n");
+    git(metaRoot, ["add", "-A"]);
+    git(metaRoot, ["commit", "-q", "-m", "init"]);
+
+    // Default: discovers node, React framework, scripts, yarn packageManager
+    const normalTools = new WorkspaceTools(metaRoot);
+    const normalInfo = normalTools.workspaceInfo();
+    assert.equal(normalInfo.projectType, "node");
+    assert.deepEqual(normalInfo.frameworks, ["React"]);
+    assert.deepEqual(normalInfo.scripts, { build: "echo build" });
+    assert.equal(normalInfo.packageManager, "yarn");
+
+    // Denying package.json hides scripts, frameworks, and falls back projectType to rust (Cargo.toml)
+    const deniedPkgTools = new WorkspaceTools(metaRoot, {
+      deniedReadPaths: () => ["package.json"],
+    });
+    const deniedPkgInfo = deniedPkgTools.workspaceInfo();
+    assert.equal(deniedPkgInfo.projectType, "rust");
+    assert.deepEqual(deniedPkgInfo.frameworks, []);
+    assert.deepEqual(deniedPkgInfo.scripts, {});
+    assert.equal(deniedPkgInfo.packageManager, "yarn");
+
+    // Denying Cargo.toml and yarn.lock skips those markers as well
+    const deniedAllTools = new WorkspaceTools(metaRoot, {
+      deniedReadPaths: () => ["package.json", "Cargo.toml", "yarn.lock"],
+    });
+    const deniedAllInfo = deniedAllTools.workspaceInfo();
+    assert.equal(deniedAllInfo.projectType, "unknown");
+    assert.deepEqual(deniedAllInfo.frameworks, []);
+    assert.deepEqual(deniedAllInfo.scripts, {});
+    assert.equal(deniedAllInfo.packageManager, null);
   });
 });
 
@@ -497,5 +701,38 @@ describe("BridgeLink: workspace_batch containment", () => {
     assert.equal(results[1].id, "c-ignored");
     assert.equal(results[1].ok, false);
     assert.equal(results[1].error.error, "ACCESS_DENIED_GITIGNORED_FILE");
+  });
+
+  test("denies explicitly denied files in batch calls", async () => {
+    const root = ignoredWorkspace();
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    link.tools.deniedReadPaths = () => ["README.md"];
+    const ws = fakeSocket();
+    link.ws = ws;
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "b-denied",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          calls: [
+            { id: "c-denied", name: "read_file", arguments: { path: "README.md" } },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    const results = ws.sent[0].result.results;
+    assert.equal(results.length, 1);
+    assert.equal(results[0].id, "c-denied");
+    assert.equal(results[0].ok, false);
+    assert.equal(results[0].error.error, "ACCESS_DENIED_EXPLICIT_READ");
   });
 });
