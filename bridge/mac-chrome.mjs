@@ -27,6 +27,7 @@
 // the same shared Project.
 
 import { execFileSync } from "node:child_process";
+import { isExecTimeout } from "./exec-limits.mjs";
 import fs from "node:fs";
 
 const CHROME_APP_PATH = "/Applications/Google Chrome.app";
@@ -387,6 +388,25 @@ export function buildChromeTabScript(url, scope, { enterDelayMs = 1500, tabId, c
  *  the task prompt is inserted into that conversation's composer instead.
  *  `prepared` reports whether that injection (or the new-tab URL prompt)
  *  succeeded. */
+/** Time budget for one osascript run. A healthy run is bounded by the retry
+ *  loops inside the generated script — up to 8 x 0.4s to prepare the composer,
+ *  the `enterDelayMs` pause (1.5s by default, user-configurable), then up to
+ *  8 x 0.4s to click send: roughly 8s plus Apple Event round-trips. The budget
+ *  is a fixed allowance well above that, plus twice the configured delay so a
+ *  user who raised `enterDelayMs` is not timed out by their own setting. */
+export function osascriptTimeoutMs(enterDelayMs = 1500) {
+  const delay = Number.isFinite(Number(enterDelayMs)) ? Math.max(0, Number(enterDelayMs)) : 1500;
+  return 25_000 + delay * 2;
+}
+
+/** Opens/reuses a Chrome tab and tries to submit. Returns false — never throws
+ *  — when automation is unavailable or fails; callers fall back to the plain OS
+ *  browser opener. Options besides the ones buildChromeTabScript() reads:
+ *   - `log`   : receives one line describing *why* a run failed. Without it the
+ *               reason (Chrome stuck behind a dialog, "Allow JavaScript from
+ *               Apple Events" off, ...) was thrown away with the catch.
+ *   - `_exec` : test seam replacing execFileSync, same convention as
+ *               nudgeChatGpt()'s `_openInChrome`. */
 export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!isChromeAutomationAvailable()) return false;
 
@@ -394,9 +414,16 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
   if (!scope) return false;
 
   const script = buildChromeTabScript(url, scope, options);
+  const exec = options._exec || execFileSync;
+  const log = typeof options.log === "function" ? options.log : () => {};
+  const timeoutMs = osascriptTimeoutMs(options.enterDelayMs);
 
   try {
-    const output = execFileSync("osascript", ["-e", script], { encoding: "utf8" }).trim();
+    // Without a timeout, Chrome sitting behind a modal dialog blocked this
+    // synchronous call forever — and with it `gpt-worker task`/`report`, or the
+    // whole bridge daemon when it came from a dashboard-created task. SIGKILL
+    // because osascript stuck on an Apple Event does not honor SIGTERM.
+    const output = exec("osascript", ["-e", script], { encoding: "utf8", timeout: timeoutMs, killSignal: "SIGKILL" }).trim();
     const [tabIdPart, submitOutcome, reuseFlag, prepareOutcome, selectedTabUrl] = output.split("|");
     const selectedTabId = normalizeChromeTabId(tabIdPart);
     return selectedTabId
@@ -409,7 +436,11 @@ export function openInChromeAndSubmit(url, chatUrl, options = {}) {
           conversationUrl: chatGptConversationUrl(selectedTabUrl, chatUrl),
         }
       : false;
-  } catch {
+  } catch (err) {
+    const detail = isExecTimeout(err)
+      ? `timed out after ${timeoutMs}ms (Chrome may be showing a modal dialog)`
+      : String((err && err.stderr) || (err && err.message) || err).trim().slice(0, 500);
+    log(`chrome automation failed: ${detail}`);
     return false;
   }
 }

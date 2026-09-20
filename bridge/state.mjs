@@ -67,6 +67,10 @@ function chmodIfExists(filePath, mode) {
 export function fixPermissions() {
   chmodIfExists(CONFIG_DIR, 0o700);
   chmodIfExists(WORKER_CONFIG_PATH, 0o600);
+  // A lock left behind by a killed process is the one thing that makes every
+  // later config update fail until someone removes a file by hand — and this
+  // runs at the start of every CLI invocation, so it is where that heals.
+  removeStaleLock(WORKER_CONFIG_LOCK_PATH);
   chmodIfExists(STATE_ROOT, 0o700);
   let workspaceDirs;
   try {
@@ -77,6 +81,7 @@ export function fixPermissions() {
   for (const d of workspaceDirs) {
     const wsDir = path.join(STATE_ROOT, d.name);
     chmodIfExists(wsDir, 0o700);
+    removeStaleLock(path.join(wsDir, "tokens.json.lock"));
     for (const f of ["tokens.json", "state.json", "guidance.md", "read-allowlist.json", "bridge.pid", "bridge.log", "bridge.log.1"]) {
       chmodIfExists(path.join(wsDir, f), 0o600);
     }
@@ -113,37 +118,181 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+// ---------------------------------------------------------------------------
+// Lock files (worker.json.lock, tokens.json.lock)
+//
+// A lock is a file created with O_EXCL. A process killed while holding one
+// (SIGKILL, power loss) never runs its `finally`, so the file outlives it — and
+// without a way to tell that, every later config/token update failed with the
+// same timeout until someone happened to `rm` the file. So a lock now records
+// who took it, and a lock whose holder is gone is broken rather than waited on.
+// ---------------------------------------------------------------------------
+
+const LOCK_ACQUIRE_TIMEOUT_MS = 5_000;
+// A critical section here is a small read-modify-write, i.e. milliseconds. A
+// lock that records no holder (one written before holders were recorded, or a
+// process that died between creating the file and writing its identity) can
+// only be judged by age.
+const STALE_LOCK_NO_HOLDER_MS = 30_000;
+
+let ownProcessStart;
+/** This process's start-time fingerprint, computed once: it is written into
+ *  every lock it takes, and spawning `ps` per lock would be wasteful. */
+function ownStartTime() {
+  if (ownProcessStart === undefined) ownProcessStart = processStartTime(process.pid);
+  return ownProcessStart;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists but belongs to someone else — still alive.
+    return err?.code === "EPERM";
+  }
+}
+
+/** Why `lockPath` is stale (a string), or null when it is not — including
+ *  when the file is already gone. `ino` identifies the exact file inspected so
+ *  a caller can refuse to delete a different lock created since. */
+function inspectLock(lockPath) {
+  let stat;
+  try {
+    stat = fs.statSync(lockPath);
+  } catch {
+    return { reason: null, ino: null };
+  }
+  let holder = null;
+  try {
+    holder = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  } catch {
+    /* empty or half-written: no holder recorded (yet) */
+  }
+  if (holder && Number.isInteger(holder.pid)) {
+    if (!isProcessAlive(holder.pid)) return { reason: `its holder (pid ${holder.pid}) is gone`, ino: stat.ino, holderPid: holder.pid };
+    // "Alive" is not enough: the pid may have been reused. The start-time
+    // fingerprint settles that, but only when there is one to compare — the
+    // holder may not have been able to record it, and `ps` may fail now.
+    let verified = false;
+    if (holder.startedAt) {
+      const now = processStartTime(holder.pid);
+      if (now) {
+        if (now !== holder.startedAt) {
+          return { reason: `pid ${holder.pid} has been reused by another process`, ino: stat.ino, holderPid: holder.pid };
+        }
+        verified = true;
+      }
+    }
+    if (!verified && Date.now() - stat.mtimeMs > STALE_LOCK_NO_HOLDER_MS) {
+      // A live pid that cannot be confirmed as the same process is
+      // indistinguishable from a reused one; without an age limit, a holder that
+      // died and whose pid was later reused would keep the lock "held" forever.
+      // A real critical section is milliseconds, so the limit that judges a
+      // holder-less lock applies.
+      return {
+        reason: `pid ${holder.pid} is alive but its start time cannot be confirmed (none was recorded, or ps could not read it), and the lock is older than 30s`,
+        ino: stat.ino,
+        holderPid: holder.pid,
+      };
+    }
+    return { reason: null, ino: stat.ino, holderPid: holder.pid };
+  }
+  if (Date.now() - stat.mtimeMs > STALE_LOCK_NO_HOLDER_MS) {
+    return { reason: "it records no holder and is older than 30s", ino: stat.ino, holderPid: null };
+  }
+  return { reason: null, ino: stat.ino, holderPid: null };
+}
+
+/** Deletes `lockPath` if — and only if — it is stale. True when the way is now
+ *  clear (removed, or already gone); false when the lock is live or could not
+ *  be removed.
+ *
+ *  Residual race, stated plainly: two processes can find the same stale lock
+ *  and both remove it, and the inode re-check narrows but cannot close the
+ *  window between check and unlink. The worst outcome is two processes briefly
+ *  believing they hold the lock, i.e. one lost update of a small JSON file
+ *  (every write is temp-file + rename, so the file itself is never torn). That
+ *  is preferable to failing every config update forever. */
+function removeStaleLock(lockPath) {
+  const inspected = inspectLock(lockPath);
+  if (inspected.ino === null) return true; // already gone
+  if (!inspected.reason) return false;
+  try {
+    if (fs.statSync(lockPath).ino !== inspected.ino) return false; // replaced since: not ours to break
+    fs.unlinkSync(lockPath);
+    return true;
+  } catch (err) {
+    return err?.code === "ENOENT";
+  }
+}
+
+/** Exported for tests, which need a short `timeoutMs` to exercise the timeout
+ *  path without waiting out the real 5s. Production callers use the defaults
+ *  through updateWorkerConfigAtomic()/updateTokensAtomic(). */
+export function acquireFileLock(lockPath, label, timeoutMs = LOCK_ACQUIRE_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid, startedAt: ownStartTime(), createdAt: Date.now() }));
+      } catch {
+        /* an identity-less lock is still a valid lock; it is just judged by age */
+      }
+      return fd;
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      if (Date.now() < deadline && removeStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        const { holderPid } = inspectLock(lockPath);
+        throw new Error(
+          `Timed out acquiring the gpt-worker ${label} lock (${lockPath}). ` +
+            (holderPid ? `It is held by pid ${holderPid}. ` : "") +
+            `If no gpt-worker process is running, remove it: rm ${lockPath}`
+        );
+      }
+      sleepSync(10);
+    }
+  }
+}
+
+/** Exported for tests; see acquireFileLock(). */
+export function releaseFileLock(fd, lockPath) {
+  // Only remove the lock file if it is still the one *we* created: if another
+  // process judged it stale and took a fresh lock meanwhile, unlinking by path
+  // would delete that process's live lock.
+  let ours = false;
+  try {
+    ours = fs.fstatSync(fd).ino === fs.statSync(lockPath).ino;
+  } catch {
+    /* lock already gone */
+  }
+  try {
+    fs.closeSync(fd);
+  } finally {
+    if (ours) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        /* already cleaned up */
+      }
+    }
+  }
+}
+
 /** Serialize small machine-wide config mutations across simultaneous CLI
  *  processes. The lock protects read-modify-write callers from replacing a
  *  tab association another workspace just added. */
 export function updateWorkerConfigAtomic(update) {
-  const deadline = Date.now() + 5_000;
-  let lockFd;
-  while (lockFd === undefined) {
-    try {
-      lockFd = fs.openSync(WORKER_CONFIG_LOCK_PATH, "wx", 0o600);
-    } catch (err) {
-      if (err?.code !== "EEXIST") throw err;
-      if (Date.now() >= deadline) throw new Error("Timed out acquiring the gpt-worker config lock.");
-      sleepSync(10);
-    }
-  }
-
+  const lockFd = acquireFileLock(WORKER_CONFIG_LOCK_PATH, "config");
   try {
     const current = readWorkerConfig();
     const next = update(current);
     if (next && next !== current) writeWorkerConfigAtomic(next);
     return next;
   } finally {
-    try {
-      fs.closeSync(lockFd);
-    } finally {
-      try {
-        fs.unlinkSync(WORKER_CONFIG_LOCK_PATH);
-      } catch {
-        /* lock already cleaned up by a failed process */
-      }
-    }
+    releaseFileLock(lockFd, WORKER_CONFIG_LOCK_PATH);
   }
 }
 
@@ -207,35 +356,16 @@ function tokensLockPath(workspaceRoot) {
 }
 
 export function updateTokensAtomic(workspaceRoot, update) {
-  const deadline = Date.now() + 5_000;
   const lockFile = tokensLockPath(workspaceRoot);
   ensurePrivateDir(path.dirname(lockFile));
-  let lockFd;
-  while (lockFd === undefined) {
-    try {
-      lockFd = fs.openSync(lockFile, "wx", 0o600);
-    } catch (err) {
-      if (err?.code !== "EEXIST") throw err;
-      if (Date.now() >= deadline) throw new Error("Timed out acquiring the gpt-worker tokens lock.");
-      sleepSync(10);
-    }
-  }
-
+  const lockFd = acquireFileLock(lockFile, "tokens");
   try {
     const current = readTokens(workspaceRoot);
     const next = update(current);
     if (next && next !== current) writeTokensAtomic(workspaceRoot, next);
     return next;
   } finally {
-    try {
-      fs.closeSync(lockFd);
-    } finally {
-      try {
-        fs.unlinkSync(lockFile);
-      } catch {
-        /* lock already cleaned up */
-      }
-    }
+    releaseFileLock(lockFd, lockFile);
   }
 }
 

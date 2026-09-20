@@ -707,7 +707,11 @@ export class BridgeDO {
         enqueue: (body) => this.localEnqueue(body),
         start_task: (body) => this.localStartTask(body),
         report_task: (body) => this.localReportTask(body),
-        active_task: () => ({ task: this.taskView(this.activeTask()) }),
+        // The read window is an MCP-domain concern and the protocol domain may
+        // not import it (one-way dependency), so the two are joined here in
+        // the composition root. The CLI needs it to show how much of the
+        // window is left without holding its own copy of the constant.
+        active_task: () => ({ task: this.taskView(this.activeTask()), taskWindow: this.taskWindowInfo() }),
         migrate_legacy_state: (body) => this.localMigrateLegacyState(body),
         settings_get: () => this.localSettingsGet(),
         settings_set: (body) => this.localSettingsSet(body),
@@ -1437,6 +1441,14 @@ export class BridgeDO {
 
   isActiveTaskWindow() {
     return this.mcp.isActiveTaskWindow();
+  }
+
+  taskWindowState() {
+    return this.mcp.taskWindowState();
+  }
+
+  taskWindowInfo() {
+    return this.mcp.taskWindowInfo();
   }
 
   workspaceGuidance() {

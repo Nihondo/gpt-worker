@@ -102,7 +102,13 @@ describe("complete and continue command dispatch", () => {
     const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
     assert.match(cliSource, /case "complete":\s*\n\s*return cmdComplete\(args\);/);
     assert.match(cliSource, /case "continue":\s*\n\s*return cmdContinue\(args\);/);
-    assert.match(cliSource, /Usage: gpt-worker.*\|complete\|continue>/);
+    assert.match(cliSource, /Usage: gpt-worker.*\|complete\|continue\|/);
+  });
+
+  test("main() dispatches discard-task and lists it in Usage", async () => {
+    const cliSource = fs.readFileSync(new URL("../bridge/cli.mjs", import.meta.url), "utf8");
+    assert.match(cliSource, /case "discard-task":\s*\n\s*return cmdDiscardTask\(args\);/);
+    assert.match(cliSource, /Usage: gpt-worker.*\|discard-task>/);
   });
 });
 
@@ -127,7 +133,7 @@ describe("CLI module boundaries", () => {
   test("retains the active_task RPC and the facade daemon entrypoint", () => {
     const runtime = fs.readFileSync(new URL("../bridge/cli-runtime.mjs", import.meta.url), "utf8");
     const daemon = fs.readFileSync(new URL("../bridge/cli-daemon.mjs", import.meta.url), "utf8");
-    assert.match(runtime, /localCall\(cfg, "active_task"\)/);
+    assert.match(runtime, /localCall\(cfg, "active_task"[,)]/);
     assert.match(daemon, /new URL\("\.\/cli\.mjs", import\.meta\.url\)/);
     assert.doesNotMatch(daemon, /\[fileURLToPath\(import\.meta\.url\), "start"/);
   });

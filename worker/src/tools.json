@@ -4,7 +4,7 @@
     {
       "name": "workspace_info",
       "title": "Workspace info",
-      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. When a safe github.com remote is configured, repository includes its sanitized owner/name, canonical public URL, local HEAD commit and branch. If a GitHub connector is available, use it only for a clean tracked file after matching repository and commit SHA; otherwise use this local workspace as authoritative. Call this first to confirm which workspace this connector is bound to.",
+      "description": "Identity of the connected workspace: root name, git branch/commit/dirty state, detected languages, frameworks and package scripts. When a safe github.com remote is configured, repository includes its sanitized owner/name, canonical public URL, local HEAD commit and branch. If a GitHub connector is available, use it only for a clean tracked file after matching repository and commit SHA; otherwise use this local workspace as authoritative. Call this first to confirm which workspace this connector is bound to. If git does not answer in time, git.isRepo is null (unknown; it does not mean the directory is not a repository) with error GIT_TIMEOUT.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "local",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
@@ -62,7 +62,7 @@
     {
       "name": "search_workspace",
       "title": "Search workspace",
-      "description": "Search file contents in the workspace (ripgrep semantics). Noisy, sensitive, and Git-ignored paths are excluded from results, including explicitly allowed direct-read files.",
+      "description": "Search file contents in the workspace (ripgrep semantics). Noisy, sensitive, and Git-ignored paths are excluded from results, including explicitly allowed direct-read files. A search that ends abnormally after printing some hits returns them with partial: true and a warning — treat that list as possibly incomplete. Failures are errors, not empty results: SEARCH_TIMEOUT (took too long; narrow the query or use a glob) and SEARCH_FAILED (e.g. a malformed regex).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -78,7 +78,7 @@
     {
       "name": "git_status",
       "title": "Git status",
-      "description": "Structured git status of the workspace: branch, staged/unstaged/untracked files. Entries touching sensitive, noisy, or Git-ignored paths are redacted.",
+      "description": "Structured git status of the workspace: branch, staged/unstaged/untracked files. Entries touching sensitive, noisy, or Git-ignored paths are redacted. Answers GIT_TIMEOUT if git does not respond in time.",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
       "location": "local",
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
@@ -86,7 +86,7 @@
     {
       "name": "git_diff",
       "title": "Git diff",
-      "description": "Git diff of the workspace (working tree or staged), optionally scoped to a path. Git-ignored paths cannot be scoped, and hunks touching sensitive, noisy, or Git-ignored files are redacted.",
+      "description": "Git diff of the workspace (working tree or staged), optionally scoped to a path. Git-ignored paths cannot be scoped, and hunks touching sensitive, noisy, or Git-ignored files are redacted. Answers GIT_TIMEOUT if git does not respond in time.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -101,7 +101,7 @@
     {
       "name": "git_log",
       "title": "Git log",
-      "description": "Recent commit history (hash, date, author, subject), optionally scoped to a path. Unlike git_diff/git_status (a single current snapshot), this shows how the workspace got here — use it to understand prior changes before proposing new ones.",
+      "description": "Recent commit history (hash, date, author, subject), optionally scoped to a path. Unlike git_diff/git_status (a single current snapshot), this shows how the workspace got here — use it to understand prior changes before proposing new ones. Answers GIT_TIMEOUT if git does not respond in time.",
       "inputSchema": {
         "type": "object",
         "properties": {

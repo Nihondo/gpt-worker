@@ -9,6 +9,8 @@ import {
   isChromeAutomationAvailable,
   matchesChatGptProjectScope,
   normalizeChromeTabId,
+  openInChromeAndSubmit,
+  osascriptTimeoutMs,
   stableGizmoId,
 } from "../bridge/mac-chrome.mjs";
 
@@ -286,5 +288,88 @@ describe("ChatGPT Project tab scope: slug-independent gizmo id matching", () => 
 
     const fallbackScript = buildChromeTabScript(`${projectURL}?prompt=test`, scope, { tabId: "540586144" });
     assert.match(fallbackScript, /set stableGizmoPrefix to ""/);
+  });
+});
+
+describe("osascriptTimeoutMs", () => {
+  test("scales with enterDelayMs so a raised delay is never timed out by its own setting", () => {
+    assert.equal(osascriptTimeoutMs(), 28_000);
+    assert.equal(osascriptTimeoutMs(1500), 28_000);
+    assert.equal(osascriptTimeoutMs(5000), 35_000);
+    assert.equal(osascriptTimeoutMs(0), 25_000);
+  });
+
+  test("falls back to the default for unusable values instead of NaN", () => {
+    for (const bad of ["soon", NaN, undefined]) {
+      assert.equal(osascriptTimeoutMs(bad), 28_000, String(bad));
+    }
+    assert.equal(osascriptTimeoutMs(-500), 25_000);
+  });
+});
+
+// openInChromeAndSubmit returns false before it ever runs osascript when Chrome
+// automation is unavailable (non-macOS, or no Chrome installed), so these can
+// only run where it is.
+describe("openInChromeAndSubmit: osascript time budget", { skip: !isChromeAutomationAvailable() }, () => {
+  const url = "https://chatgpt.com/g/g-p-example-gpt-worker/project?prompt=hi";
+  const chatUrl = "https://chatgpt.com/g/g-p-example-gpt-worker/project";
+
+  test("runs osascript with a timeout and SIGKILL, never bare", () => {
+    let seen;
+    openInChromeAndSubmit(url, chatUrl, {
+      enterDelayMs: 2000,
+      _exec: (command, args, options) => {
+        seen = { command, args, options };
+        return "101|CLICKED|NEW|READY|https://chatgpt.com/g/g-p-example-gpt-worker/c/abc";
+      },
+    });
+    assert.equal(seen.command, "osascript");
+    assert.equal(seen.options.timeout, 29_000);
+    assert.equal(seen.options.killSignal, "SIGKILL");
+  });
+
+  test("a timed-out run returns false and logs why, instead of blocking or failing silently", () => {
+    const lines = [];
+    const result = openInChromeAndSubmit(url, chatUrl, {
+      log: (line) => lines.push(line),
+      _exec: () => {
+        throw Object.assign(new Error("spawnSync osascript ETIMEDOUT"), { code: "ETIMEDOUT" });
+      },
+    });
+    assert.equal(result, false);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^chrome automation failed: timed out after 28000ms \(Chrome may be showing a modal dialog\)$/);
+  });
+
+  test("any other failure returns false and logs the stderr instead of discarding it", () => {
+    const lines = [];
+    const result = openInChromeAndSubmit(url, chatUrl, {
+      log: (line) => lines.push(line),
+      _exec: () => {
+        throw Object.assign(new Error("Command failed"), { stderr: "execution error: Chrome got an error: AppleEvent timed out. (-1712)" });
+      },
+    });
+    assert.equal(result, false);
+    assert.match(lines[0], /chrome automation failed: execution error: Chrome got an error: AppleEvent timed out/);
+  });
+
+  test("a missing log callback is harmless", () => {
+    assert.equal(
+      openInChromeAndSubmit(url, chatUrl, {
+        _exec: () => {
+          throw new Error("boom");
+        },
+      }),
+      false
+    );
+  });
+
+  test("a successful run still parses the result", () => {
+    const result = openInChromeAndSubmit(url, chatUrl, {
+      _exec: () => "101|CLICKED|REUSED|READY|https://chatgpt.com/g/g-p-example-gpt-worker/c/abc",
+    });
+    assert.equal(result.tabId, "101");
+    assert.equal(result.submitted, true);
+    assert.equal(result.reused, true);
   });
 });

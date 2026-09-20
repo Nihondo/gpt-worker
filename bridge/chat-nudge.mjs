@@ -16,6 +16,7 @@
 // unchanged.
 
 import { execFileSync } from "node:child_process";
+import { openTimeoutMs } from "./exec-limits.mjs";
 import { updateWorkerConfigAtomic } from "./state.mjs";
 import { chatGptConversationUrl, isChromeAutomationAvailable, openInChromeAndSubmit } from "./mac-chrome.mjs";
 
@@ -27,9 +28,10 @@ import { chatGptConversationUrl, isChromeAutomationAvailable, openInChromeAndSub
  *  environment, unknown platform, ...). */
 export function openBrowser(url) {
   try {
-    if (process.platform === "darwin") execFileSync("open", [url], { stdio: "ignore" });
-    else if (process.platform === "win32") execFileSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
-    else execFileSync("xdg-open", [url], { stdio: "ignore" });
+    const opts = { stdio: "ignore", timeout: openTimeoutMs() };
+    if (process.platform === "darwin") execFileSync("open", [url], opts);
+    else if (process.platform === "win32") execFileSync("cmd", ["/c", "start", "", url], opts);
+    else execFileSync("xdg-open", [url], opts);
     return true;
   } catch {
     return false;
@@ -243,12 +245,14 @@ export async function nudgeChatGpt(
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
         conversationUrl,
+        log,
       })
     : isChromeAutomationAvailable()
     ? openInChromeAndSubmit(url, chatUrl, {
         enterDelayMs: settings.enterDelayMs,
         tabId: workspaceChromeTabId(settings, workspaceId),
         conversationUrl,
+        log,
       })
     : false;
   if (chromeResult) {

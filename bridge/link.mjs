@@ -2,11 +2,17 @@
 // Reconnects with exponential backoff (1s -> 30s) so a bridge restart, laptop
 // sleep, or network blip never requires touching the ChatGPT connector again.
 //
-// Access gating (6.5 of the plan): while no task is active, the 6 tools that
-// can reveal file/diff content answer {"status":"no_active_task"} without
-// running. `workspace_info` is exempt — it only reveals workspace identity
-// (name/branch/languages), which the Phase-5 first-connection check needs to
-// work before any task has ever been created.
+// Access gating (6.5 of the plan): while no task is active, the tools that can
+// reveal file/diff content (GATED_METHODS below) answer
+// {"status":"no_active_task"} without running, or
+// {"status":"task_window_expired"} when a task does exist but its read window
+// has gone idle — two different situations that need two different recoveries
+// from the operator. `workspace_info`/`workspace_guidance` are exempt: they
+// only reveal workspace identity (name/branch/languages) and the owner's own
+// guidance, which the first-connection check needs before any task exists.
+//
+// The window itself is Worker-owned state, never recomputed here (see
+// handleMessage).
 
 import os from "node:os";
 import { WorkspaceTools } from "./tools.mjs";
@@ -27,6 +33,11 @@ const GATED_METHODS = new Set([
   "workspace_batch",
 ]);
 
+// The three values the Worker may stamp onto a relay as __gptWorkerTaskWindow.
+// Anything else (including a missing key, i.e. an older Worker) falls back to
+// deriving the state from the boolean __gptWorkerActiveTask.
+const TASK_WINDOW_STATES = new Set(["none", "expired", "active"]);
+
 const MAX_BATCH_CALLS = 8;
 const BATCH_WHITELIST = new Set([
   "workspace_info",
@@ -46,6 +57,23 @@ const BATCH_WHITELIST = new Set([
 // content, so it can't be mistaken for a field boundary by any secret
 // pattern's character class. Never sent over the wire.
 const FIELD_SEP = "\x1e";
+
+/** One-line, content-free summary of a dispatch result for bridge.log. Never
+ *  includes file contents, diffs, or search hits — only the outcome shape: a
+ *  bare success, a status string, an error code, or a batch's ok/err tally.
+ *  bridge.log is a local 0600 file, but it is a debugging aid, not a data
+ *  sink; keeping bodies out of it is what makes it safe to read and paste. */
+function describeResultForLog(result) {
+  if (!result || typeof result !== "object") return "ok";
+  if (Array.isArray(result.results)) {
+    const failed = result.results.filter((r) => r && r.ok === false).length;
+    return `ok batch ${result.results.length} calls, ${result.results.length - failed} ok / ${failed} err`;
+  }
+  if (typeof result.error === "string") return `err ${result.error}`;
+  if (result.status === "error") return `err ${result.code || "error"}`;
+  if (typeof result.status === "string") return `ok ${result.status}`;
+  return "ok";
+}
 
 function collectStringLeaves(value, out) {
   if (typeof value === "string") {
@@ -166,6 +194,11 @@ export class BridgeLink {
     this.pathContext = { root: this.tools.root, home: os.homedir(), tmpdir: os.tmpdir(), username };
   }
 
+  /** Appends one line to the workspace's bridge.log (0600, rotated at 10MB by
+   *  appendLog). Records only outcomes — method names, error codes, paths,
+   *  window states, durations — and never response bodies: no file contents,
+   *  no diffs, no search hits. Anything that would need the secret scanner
+   *  before leaving this process does not belong in the log either. */
   log(line) {
     try {
       appendLog(this.root, `link: ${line}`);
@@ -272,18 +305,52 @@ export class BridgeLink {
     // The Worker owns task state and appends this authenticated metadata to
     // every relay. Do not reconstruct an active task from a local file: that
     // would make the bridge a second workflow-state authority.
+    //
+    // Two keys arrive. __gptWorkerActiveTask is the long-standing boolean;
+    // __gptWorkerTaskWindow (newer Workers) additionally distinguishes "no
+    // task at all" from "a task exists but its read window went idle". When
+    // the newer key is absent or unrecognized the state is derived from the
+    // boolean, so an older Worker behaves exactly as before. The derivation
+    // only ever goes boolean -> state, never state -> permission: a Worker
+    // that sends a non-"active" state can never widen access here.
     const workerSaysTaskIsActive = !!(params && params.__gptWorkerActiveTask);
-    if (params && typeof params === "object") delete params.__gptWorkerActiveTask;
-    if (GATED_METHODS.has(method) && !this.alwaysAllow && !workerSaysTaskIsActive) {
-      this.reply(rid, true, { status: "no_active_task" });
+    const rawWindow = params && params.__gptWorkerTaskWindow;
+    const windowState = TASK_WINDOW_STATES.has(rawWindow)
+      ? rawWindow
+      : workerSaysTaskIsActive
+        ? "active"
+        : "none";
+    if (params && typeof params === "object") {
+      delete params.__gptWorkerActiveTask;
+      delete params.__gptWorkerTaskWindow;
+    }
+    if (GATED_METHODS.has(method) && !this.alwaysAllow && windowState !== "active") {
+      // The only local trace that a read was refused, and why — without it an
+      // expired window is indistinguishable from "ChatGPT never called".
+      this.log(`gated ${method}: ${windowState}`);
+      this.reply(
+        rid,
+        true,
+        windowState === "expired"
+          ? {
+              status: "task_window_expired",
+              message:
+                "A task exists but its read window has gone idle. Retrying will not help; the operator has to advance the task (gpt-worker report / continue) or start a new one.",
+            }
+          : { status: "no_active_task" }
+      );
       return;
     }
 
+    const startedAt = Date.now();
     try {
       const result = this.dispatch(method, params || {});
+      this.log(`rpc ${method} ${describeResultForLog(result)} ${Date.now() - startedAt}ms`);
       this.reply(rid, true, result);
     } catch (err) {
-      this.reply(rid, false, { status: "error", message: String((err && err.message) || err) });
+      const message = String((err && err.message) || err);
+      this.log(`rpc ${method} threw ${Date.now() - startedAt}ms: ${message}`);
+      this.reply(rid, false, { status: "error", message });
     }
   }
 
@@ -346,7 +413,11 @@ export class BridgeLink {
     const results = [];
     for (const call of params.calls) {
       const callArgs = { ...(call.arguments || {}) };
+      // Both control keys are stripped from every sub-call's arguments, the
+      // same way handleMessage strips them from a single call's params: a
+      // batch must never become a way to smuggle them into a tool.
       delete callArgs.__gptWorkerActiveTask;
+      delete callArgs.__gptWorkerTaskWindow;
 
       try {
         const subResult = this.dispatch(call.name, callArgs);
@@ -386,6 +457,10 @@ export class BridgeLink {
       payload = ok ? { rid, ok: true, result: value } : { rid, ok: false, error: value };
     } catch (err) {
       const message = redactLocalPaths(String((err && err.message) || err), this.pathContext);
+      // A scanner failure is the one error that silently degrades the whole
+      // egress guarantee, so it must leave a local trace even though the
+      // caller already gets an error response.
+      this.log(`sanitize_failed rid=${rid}: ${message}`);
       payload = { rid, ok: false, error: { status: "error", message: `sanitize_failed: ${message}` } };
     }
     try {

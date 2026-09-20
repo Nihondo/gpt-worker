@@ -3,7 +3,7 @@
 // Command implementations live in focused cli-*.mjs modules.
 
 import { fixPermissions } from "./state.mjs";
-import { parseArgs } from "./cli-runtime.mjs";
+import { EXIT_WORKER_UNREACHABLE, WorkerCallError, WorkerUnreachableError, parseArgs } from "./cli-runtime.mjs";
 import {
   cmdInit,
   cmdRemove,
@@ -34,6 +34,7 @@ import {
   buildExecutedBody,
   cmdComplete,
   cmdContinue,
+  cmdDiscardTask,
   cmdHandoff,
   cmdQueue,
   cmdReport,
@@ -126,14 +127,26 @@ async function main() {
       return cmdComplete(args);
     case "continue":
       return cmdContinue(args);
+    case "discard-task":
+      return cmdDiscardTask(args);
     default:
-      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|handoff|limits|state|rotate|complete|continue> [options]`);
+      console.error(`Usage: gpt-worker <init|url|workspaces|remove|chat-url|chat|show-config|guidance|allow-read|deny-read|allow-list|start|stop|status|queue|task|wait|report|handoff|limits|state|rotate|complete|continue|discard-task> [options]`);
       process.exit(cmd ? 1 : 0);
   }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((err) => {
+    // Failures the user can act on get a plain message, not a stack trace.
+    // Anything else is unexpected, so it keeps the stack.
+    if (err instanceof WorkerUnreachableError) {
+      console.error(`${err.message}\nCheck your network, then: gpt-worker status`);
+      process.exit(EXIT_WORKER_UNREACHABLE);
+    }
+    if (err instanceof WorkerCallError) {
+      console.error(err.message);
+      process.exit(1);
+    }
     console.error(err && err.stack ? err.stack : err);
     process.exit(1);
   });

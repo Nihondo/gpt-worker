@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-worker-config-test-"));
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-worker-state-test-"));
@@ -17,6 +18,10 @@ const {
   writeTokensAtomic,
   updateTokensAtomic,
   stripLegacyWorkspaceGptToken,
+  acquireFileLock,
+  releaseFileLock,
+  fixPermissions,
+  workspaceStateDir,
 } = await import("../bridge/state.mjs?worker-config-test");
 const { loadChatSettings, nudgeChatGpt, cmdChatUrl, ensureRemoteSettingsBeforeKeepRemote } = await import("../bridge/cli.mjs?worker-config-test");
 
@@ -534,5 +539,195 @@ test("ensureRemoteSettingsBeforeKeepRemote aborts cleanup when migration or read
     assert.equal(successResult.ok, true);
   } finally {
     globalThis.fetch = origFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Lock files. A process killed while holding a lock never removes it, and the
+// lock used to outlive it forever: every later config/token update failed with
+// the same timeout until someone deleted the file by hand. A lock now records
+// its holder, and one whose holder is gone is broken instead of waited on.
+// ---------------------------------------------------------------------------
+
+/** A pid that certainly is not running: a child that has already exited. */
+function deadPid() {
+  return spawnSync(process.execPath, ["-e", ""]).pid;
+}
+
+const CONFIG_LOCK = path.join(configDir, "worker.json.lock");
+
+function writeLock(lockPath, holder, { ageMs = 0 } = {}) {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, holder === null ? "" : JSON.stringify(holder), { mode: 0o600 });
+  if (ageMs) {
+    const t = new Date(Date.now() - ageMs);
+    fs.utimesSync(lockPath, t, t);
+  }
+}
+
+function freshLockPath() {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "gw-lock-")), "test.lock");
+}
+
+test("a lock left by a killed process is broken instead of blocking every update", () => {
+  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-a/project" });
+  writeLock(CONFIG_LOCK, { pid: deadPid(), startedAt: "whenever", createdAt: Date.now() });
+
+  const next = updateWorkerConfigAtomic((current) => ({ ...current, marker: "written" }));
+
+  assert.equal(next.marker, "written");
+  assert.equal(readWorkerConfig().marker, "written");
+  assert.equal(fs.existsSync(CONFIG_LOCK), false, "the lock is released after the update");
+});
+
+test("a holder-less lock (written before holders were recorded) is broken once it is old", () => {
+  writeWorkerConfigAtomic({ chatUrl: "https://chatgpt.com/g/g-p-a/project" });
+  writeLock(CONFIG_LOCK, null, { ageMs: 60_000 });
+
+  assert.equal(updateWorkerConfigAtomic((current) => ({ ...current, marker: "after-old-lock" })).marker, "after-old-lock");
+});
+
+test("a fresh holder-less lock is respected, and the timeout names the file and how to clear it", () => {
+  // A fresh, empty lock is what a live holder looks like for an instant between
+  // creating the file and writing its identity — it must not be stolen.
+  const lockPath = freshLockPath();
+  writeLock(lockPath, null);
+
+  assert.throws(
+    () => acquireFileLock(lockPath, "config", 80),
+    (err) => {
+      assert.match(err.message, /^Timed out acquiring the gpt-worker config lock/);
+      assert.ok(err.message.includes(lockPath), "names the lock file");
+      assert.match(err.message, /rm /);
+      return true;
+    }
+  );
+  assert.equal(fs.existsSync(lockPath), true, "a live-looking lock is left in place");
+});
+
+test("a lock held by a live process is respected and the timeout says who holds it", () => {
+  const lockPath = freshLockPath();
+  writeLock(lockPath, { pid: process.pid, createdAt: Date.now() });
+
+  assert.throws(
+    () => acquireFileLock(lockPath, "tokens", 80),
+    (err) => err.message.includes(`held by pid ${process.pid}`) && /gpt-worker tokens lock/.test(err.message)
+  );
+  assert.equal(fs.existsSync(lockPath), true);
+});
+
+test("a lock whose pid has been reused by an unrelated process is treated as stale", () => {
+  // The pid is alive (it is this test process), but its start time does not
+  // match what the holder recorded, so it is a different process by now.
+  const lockPath = freshLockPath();
+  writeLock(lockPath, { pid: process.pid, startedAt: "Thu Jan  1 00:00:00 1970", createdAt: 0 });
+
+  const fd = acquireFileLock(lockPath, "config", 500);
+  releaseFileLock(fd, lockPath);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("a live pid with no recorded start time is judged by age, so a reused pid cannot hold a lock forever", () => {
+  // The holder could not record when its process started (ps failed), so a live
+  // pid cannot be told from a reused one. Old enough -> stale; fresh -> respected.
+  const oldLock = freshLockPath();
+  writeLock(oldLock, { pid: process.pid, createdAt: 0 }, { ageMs: 60_000 });
+  const fd = acquireFileLock(oldLock, "config", 500);
+  releaseFileLock(fd, oldLock);
+  assert.equal(fs.existsSync(oldLock), false);
+
+  const freshLock = freshLockPath();
+  writeLock(freshLock, { pid: process.pid, createdAt: Date.now() });
+  assert.throws(() => acquireFileLock(freshLock, "config", 80), /held by pid/);
+  assert.equal(fs.existsSync(freshLock), true);
+});
+
+test("when ps cannot read the holder's current start time, a recorded fingerprint is not enough: age decides", () => {
+  // Same reused-pid hazard, other way round: the holder DID record a start
+  // time, but `ps` fails now, so it cannot be compared. Simulated by putting
+  // no `ps` on PATH.
+  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-no-ps-"));
+  const savedPath = process.env.PATH;
+  try {
+    process.env.PATH = emptyDir;
+
+    const oldLock = freshLockPath();
+    writeLock(oldLock, { pid: process.pid, startedAt: "Thu Jan  1 00:00:00 1970", createdAt: 0 }, { ageMs: 60_000 });
+    const fd = acquireFileLock(oldLock, "config", 500);
+    releaseFileLock(fd, oldLock);
+    assert.equal(fs.existsSync(oldLock), false, "an old, unverifiable live-pid lock is broken");
+
+    const freshLock = freshLockPath();
+    writeLock(freshLock, { pid: process.pid, startedAt: "Thu Jan  1 00:00:00 1970", createdAt: Date.now() });
+    assert.throws(() => acquireFileLock(freshLock, "config", 80), /held by pid/);
+    assert.equal(fs.existsSync(freshLock), true, "a fresh one is still respected");
+  } finally {
+    process.env.PATH = savedPath;
+    fs.rmSync(emptyDir, { recursive: true, force: true });
+  }
+});
+
+test("an acquired lock records who holds it", () => {
+  const lockPath = freshLockPath();
+  const fd = acquireFileLock(lockPath, "config");
+  const holder = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+
+  assert.equal(holder.pid, process.pid);
+  assert.equal(typeof holder.createdAt, "number");
+  assert.equal(fs.statSync(lockPath).mode & 0o777, 0o600);
+  releaseFileLock(fd, lockPath);
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("releasing does not delete a lock that another process has since taken", () => {
+  // If our lock was judged stale and replaced while we still held it, unlinking
+  // by path on release would delete the *new* holder's live lock.
+  const lockPath = freshLockPath();
+  const fd = acquireFileLock(lockPath, "config");
+  fs.unlinkSync(lockPath);
+  writeLock(lockPath, { pid: process.pid, createdAt: Date.now() });
+
+  releaseFileLock(fd, lockPath);
+
+  assert.equal(fs.existsSync(lockPath), true, "the other holder's lock survives our release");
+});
+
+test("updateTokensAtomic breaks a dead holder's lock too", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-lock-ws-")));
+  try {
+    writeTokensAtomic(root, { workspaceId: "0123456789abcdef", cliToken: "t" });
+    writeLock(path.join(workspaceStateDir(root), "tokens.json.lock"), { pid: deadPid(), createdAt: Date.now() });
+
+    const next = updateTokensAtomic(root, (current) => ({ ...current, marker: "ok" }));
+
+    assert.equal(next.marker, "ok");
+    assert.equal(readTokens(root).marker, "ok");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fixPermissions heals stale locks left by killed processes and leaves live ones alone", () => {
+  // This runs at the start of every CLI invocation, so it is where a stale lock
+  // stops being a permanent failure.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-lock-heal-")));
+  try {
+    writeTokensAtomic(root, { workspaceId: "0123456789abcdef", cliToken: "t" });
+    const tokensLock = path.join(workspaceStateDir(root), "tokens.json.lock");
+
+    writeLock(CONFIG_LOCK, { pid: deadPid(), createdAt: Date.now() });
+    writeLock(tokensLock, { pid: deadPid(), createdAt: Date.now() });
+    fixPermissions();
+    assert.equal(fs.existsSync(CONFIG_LOCK), false, "stale worker.json.lock is removed");
+    assert.equal(fs.existsSync(tokensLock), false, "stale tokens.json.lock is removed");
+
+    writeLock(CONFIG_LOCK, { pid: process.pid, createdAt: Date.now() });
+    writeLock(tokensLock, { pid: process.pid, createdAt: Date.now() });
+    fixPermissions();
+    assert.equal(fs.existsSync(CONFIG_LOCK), true, "a live holder's lock is kept");
+    assert.equal(fs.existsSync(tokensLock), true);
+  } finally {
+    fs.rmSync(CONFIG_LOCK, { force: true });
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

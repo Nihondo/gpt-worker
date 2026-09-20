@@ -323,3 +323,197 @@ describe("BridgeLink: workspace_batch", () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 });
+
+// The read-window gate. The Worker stamps two authenticated keys onto every
+// relay: the long-standing boolean __gptWorkerActiveTask and the three-valued
+// __gptWorkerTaskWindow. The bridge must (a) distinguish "no task" from "the
+// window went idle" so ChatGPT is told which recovery is needed, (b) keep
+// working against an older Worker that only sends the boolean, and (c) never
+// let either key reach a tool.
+describe("BridgeLink: read-window gate", () => {
+  function makeGateWorkspace() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-gate-test-"));
+    fs.writeFileSync(path.join(dir, "hello.txt"), "hello world\n");
+    return dir;
+  }
+
+  /** A link whose log() is captured in memory rather than appended to the real
+   *  per-workspace bridge.log — the assertions here are about *which* lines get
+   *  written, and a test must not write into the user's own state directory. */
+  function makeGateLink(root) {
+    const link = new BridgeLink({
+      workerUrl: "https://example.test",
+      workspaceId: "0123456789abcdef",
+      linkToken: "tok",
+      workspaceRoot: root,
+    });
+    const logged = [];
+    link.log = (line) => logged.push(line);
+    return { link, ws: attachFakeSocket(link), logged };
+  }
+
+  test("an expired window answers task_window_expired, not no_active_task", async () => {
+    const root = makeGateWorkspace();
+    const { link, ws, logged } = makeGateLink(root);
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "g1",
+        method: "read_file",
+        params: { path: "hello.txt", __gptWorkerActiveTask: false, __gptWorkerTaskWindow: "expired" },
+      })
+    );
+
+    assert.equal(ws.sent.length, 1);
+    assert.equal(ws.sent[0].ok, true);
+    assert.equal(ws.sent[0].result.status, "task_window_expired");
+    // The message has to tell the operator what to do; a retry never helps.
+    assert.match(ws.sent[0].result.message, /report/);
+    assert.match(ws.sent[0].result.message, /Retrying will not help/);
+    // The refusal is the only local trace that a read was attempted at all.
+    assert.deepEqual(logged, ["gated read_file: expired"]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("no window state and a falsy boolean still answer no_active_task", async () => {
+    const root = makeGateWorkspace();
+    const { link, ws, logged } = makeGateLink(root);
+
+    await link.handleMessage(JSON.stringify({ rid: "g2", method: "read_file", params: { path: "hello.txt" } }));
+
+    assert.deepEqual(ws.sent[0].result, { status: "no_active_task" });
+    assert.deepEqual(logged, ["gated read_file: none"]);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("an older Worker that sends only the boolean still opens the gate", async () => {
+    const root = makeGateWorkspace();
+    const { link, ws } = makeGateLink(root);
+
+    await link.handleMessage(
+      JSON.stringify({ rid: "g3", method: "read_file", params: { path: "hello.txt", __gptWorkerActiveTask: true } })
+    );
+
+    assert.equal(ws.sent[0].ok, true);
+    assert.equal(ws.sent[0].result.text, "hello world\n");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("an unrecognized window state falls back to the boolean, never to open access", async () => {
+    const root = makeGateWorkspace();
+
+    // Garbage state + falsy boolean -> refuse (derived "none").
+    const denied = makeGateLink(root);
+    await denied.link.handleMessage(
+      JSON.stringify({
+        rid: "g4",
+        method: "read_file",
+        params: { path: "hello.txt", __gptWorkerActiveTask: false, __gptWorkerTaskWindow: "bogus" },
+      })
+    );
+    assert.deepEqual(denied.ws.sent[0].result, { status: "no_active_task" });
+
+    // Garbage state + truthy boolean -> allow (derived "active"), i.e. an
+    // unknown value never *tightens* into a refusal for a live task either.
+    const allowed = makeGateLink(root);
+    await allowed.link.handleMessage(
+      JSON.stringify({
+        rid: "g5",
+        method: "read_file",
+        params: { path: "hello.txt", __gptWorkerActiveTask: true, __gptWorkerTaskWindow: "bogus" },
+      })
+    );
+    assert.equal(allowed.ws.sent[0].result.text, "hello world\n");
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("both control keys are stripped before a tool sees them, for single calls and batch sub-calls", async () => {
+    const root = makeGateWorkspace();
+    const { link, ws } = makeGateLink(root);
+    const seen = [];
+    link.tools.readFile = (params) => {
+      seen.push({ ...params });
+      return { text: "stubbed" };
+    };
+
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "g6",
+        method: "read_file",
+        params: { path: "hello.txt", __gptWorkerActiveTask: true, __gptWorkerTaskWindow: "active" },
+      })
+    );
+    await link.handleMessage(
+      JSON.stringify({
+        rid: "g7",
+        method: "workspace_batch",
+        params: {
+          __gptWorkerActiveTask: true,
+          __gptWorkerTaskWindow: "active",
+          calls: [
+            {
+              id: "c1",
+              name: "read_file",
+              // A sub-call must not be able to smuggle the keys in either.
+              arguments: { path: "hello.txt", __gptWorkerActiveTask: true, __gptWorkerTaskWindow: "active" },
+            },
+          ],
+        },
+      })
+    );
+
+    assert.equal(ws.sent.length, 2);
+    assert.equal(seen.length, 2);
+    for (const params of seen) {
+      assert.equal("__gptWorkerActiveTask" in params, false);
+      assert.equal("__gptWorkerTaskWindow" in params, false);
+      assert.equal(params.path, "hello.txt");
+    }
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a dispatch that throws is logged as well as replied to", async () => {
+    const root = makeGateWorkspace();
+    const { link, ws, logged } = makeGateLink(root);
+    link.tools.readFile = () => {
+      throw new Error("boom");
+    };
+
+    await link.handleMessage(
+      JSON.stringify({ rid: "g8", method: "read_file", params: { path: "hello.txt", __gptWorkerTaskWindow: "active" } })
+    );
+
+    assert.equal(ws.sent[0].ok, false);
+    assert.equal(ws.sent[0].error.status, "error");
+    assert.match(ws.sent[0].error.message, /boom/);
+    assert.equal(logged.length, 1);
+    assert.match(logged[0], /^rpc read_file threw \d+ms: .*boom/);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a served call logs its outcome without leaking the response body", async () => {
+    const root = makeGateWorkspace();
+    const { link, logged } = makeGateLink(root);
+
+    await link.handleMessage(
+      JSON.stringify({ rid: "g9", method: "read_file", params: { path: "hello.txt", __gptWorkerTaskWindow: "active" } })
+    );
+    await link.handleMessage(
+      JSON.stringify({ rid: "g10", method: "read_file", params: { path: "missing.txt", __gptWorkerTaskWindow: "active" } })
+    );
+
+    assert.equal(logged.length, 2);
+    assert.match(logged[0], /^rpc read_file ok \d+ms$/);
+    // An error *code* is recorded; the failing path's contents never are.
+    assert.match(logged[1], /^rpc read_file err NOT_FOUND \d+ms$/);
+    for (const line of logged) assert.equal(line.includes("hello world"), false);
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+});

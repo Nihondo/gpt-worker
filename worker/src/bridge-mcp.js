@@ -16,7 +16,7 @@
 //  - queueNext(taskId) / queueSubmit(args) / queueSetTitle(args) /
 //    taskHistory(args) / activeTask(): protocol/queue domain operations
 //    (bridge-protocol.js), reached only through the tools/call dispatch in
-//    invokeTool() and isActiveTaskWindow().
+//    invokeTool() and taskWindowState().
 //  - workspaceGuidance() / registeredWorkspaces() / maxWorkspaceRequestBytes():
 //    admin/settings/registry domain reads (bridge-admin.js). registeredWorkspaces()
 //    is also used by the dashboard (bridge-dashboard.js), which is why it
@@ -80,7 +80,19 @@ const HUB_TOOLS = [
 
 const PROTOCOL_VERSIONS = new Set(["2025-06-18", "2025-03-26"]);
 const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
-const ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+// Idle ceiling for the workspace-read window. Anchored on `tasks.updated_at`
+// (the timestamp of the last protocol transition), NOT on
+// `tasks.task_started_at`: a multi-round task that is still being worked on
+// must not lose its read access mid-task, while a task left untouched still
+// closes its window this long after the last real activity, so the time
+// bound is preserved. `task_started_at` is display-only (taskView ->
+// dashboard's "started <time>") and is deliberately never UPDATEd.
+//
+// ChatGPT cannot extend this window at will: queueSubmit() requires a
+// not-yet-acked to_gpt row for the current iteration and moves the task to
+// WAITING_LOCAL, so at most one transition per round comes from the GPT
+// side, and the next one needs a cliToken-authenticated local ack.
+const TASK_WINDOW_IDLE_MS = 60 * 60 * 1000;
 
 function checkProtocolVersion(request) {
   const v = request.headers.get("mcp-protocol-version");
@@ -99,6 +111,37 @@ function toolOk(data) {
 function toolError(code, message) {
   const data = { error: code, message };
   return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: true };
+}
+
+/** Maps a *failed* relay (transport's callLocal) to a tool error rather than a
+ *  successful result. This used to go through toolOk(), which left ChatGPT
+ *  unable to distinguish "the local bridge is down" from "the tool
+ *  legitimately returned nothing" — a disconnected bridge read as an empty
+ *  answer.
+ *
+ *  Note what is NOT routed here: {"status":"no_active_task"} and
+ *  {"status":"task_window_expired"} come back with relay.ok === true, so they
+ *  remain documented *successful* shapes (see reference/protocol.md). Only a
+ *  transport-level failure, or an ok:false reply from the bridge itself
+ *  (dispatch threw, or reply() failed closed on sanitization), lands here. */
+function relayFailureToolError(error) {
+  const status = error && error.status;
+  if (status === "local_offline") {
+    return toolError(
+      "LOCAL_OFFLINE",
+      "The local bridge is not connected to this workspace. Ask the operator to run: gpt-worker start"
+    );
+  }
+  if (status === "local_disconnected") {
+    return toolError(
+      "LOCAL_DISCONNECTED",
+      "The local bridge disconnected while this call was in flight. Report it and stop; do not retry in a loop. The operator can check the bridge with: gpt-worker status"
+    );
+  }
+  if (status === "timeout") {
+    return toolError("LOCAL_TIMEOUT", "The local bridge did not answer within the relay budget.");
+  }
+  return toolError("LOCAL_TOOL_ERROR", String((error && error.message) || status || "unknown local error"));
 }
 
 /**
@@ -316,24 +359,61 @@ function createBridgeMcp({
         if (tool.location === "queue_set_title") return queueSetTitle(args);
         if (tool.location === "queue_history") return toolOk(taskHistory(args));
         if (tool.location === "workspace_guidance") return toolOk(workspaceGuidance());
+        const windowState = this.taskWindowState();
         const relay = await relayWorkspaceTool(name, {
           ...args,
-          // The bridge treats this as Worker-authenticated control metadata,
-          // never as a value supplied by ChatGPT. It keeps workspace reads
+          // The bridge treats these as Worker-authenticated control metadata,
+          // never as values supplied by ChatGPT. They keep workspace reads
           // gated by the Worker-owned task state without persisting a local
           // copy of the active task ID.
-          __gptWorkerActiveTask: this.isActiveTaskWindow(),
+          //
+          // __gptWorkerActiveTask MUST remain a boolean. bridge/link.mjs reads
+          // it as `!!(params && params.__gptWorkerActiveTask)`, so stringifying
+          // it here would make an older bridge treat a *closed* window
+          // ("expired") as truthy and allow the read — a fail-open. The
+          // three-valued state therefore travels in its own key, which an
+          // older bridge simply ignores while still refusing correctly.
+          __gptWorkerActiveTask: windowState === "active",
+          __gptWorkerTaskWindow: windowState,
         });
-        if (!relay.ok) return toolOk(relay.error);
+        if (!relay.ok) return relayFailureToolError(relay.error);
         return toolOk(relay.result);
       } catch (err) {
         return toolError("INTERNAL_ERROR", String((err && err.message) || err));
       }
     },
 
-    isActiveTaskWindow() {
+    /** Three-valued view of the read window: "none" (no non-terminal task at
+     *  all), "expired" (a task exists but its last protocol transition is
+     *  older than TASK_WINDOW_IDLE_MS) or "active". Split out from
+     *  isActiveTaskWindow() so the bridge can tell ChatGPT *why* a gated tool
+     *  refused: "no task" and "window closed" need different recoveries from
+     *  the operator, and retrying fixes neither. */
+    taskWindowState() {
       const task = activeTask();
-      return !!task && Date.now() - task.task_started_at < ACTIVE_WINDOW_MS;
+      if (!task) return "none";
+      return Date.now() - task.updated_at < TASK_WINDOW_IDLE_MS ? "active" : "expired";
+    },
+
+    /** Boolean form, kept with its original name and shape: BridgeDO delegates
+     *  it (see index.js) and invokeTool stamps it onto every relay for older
+     *  bridges. */
+    isActiveTaskWindow() {
+      return this.taskWindowState() === "active";
+    },
+
+    /** The window as data, for the CLI's `status` output. The idle ceiling is
+     *  Worker-side truth, so it is reported from here rather than duplicated
+     *  as a constant in bridge/: the CLI must never hold a second copy of a
+     *  value that decides access. `expiresAt` is null when there is no task. */
+    taskWindowInfo() {
+      const task = activeTask();
+      const state = this.taskWindowState();
+      return {
+        state,
+        idleMs: TASK_WINDOW_IDLE_MS,
+        expiresAt: task ? task.updated_at + TASK_WINDOW_IDLE_MS : null,
+      };
     },
   };
 }

@@ -583,6 +583,92 @@ describe("localAck / localDiscard / localDiscardTask", () => {
     // next_task() no longer offers the discarded task's message
     assert.equal(doo.queueNext("t1").empty, true);
   });
+
+  // localAck reports whether the state actually advanced. Without this, a
+  // wedged task (message delivered, task left in WAITING_LOCAL, to_local queue
+  // now empty so `wait` can never return it again) was indistinguishable from a
+  // clean success for the caller.
+  function startAndSubmit(doo, state, { body = "reply text", taskId = "t1" } = {}) {
+    doo.localStartTask({ task_id: taskId, goal: "g", text: "GOAL:\ng" });
+    doo.queueNext(taskId);
+    return doo.queueSubmit({ task_id: taskId, iteration: 0, state, body }).structuredContent.message_id;
+  }
+
+  test("localAck reports an applied transition", () => {
+    const doo = makeDO();
+    const messageId = startAndSubmit(doo, "PLAN");
+    const res = doo.localAck({ message_id: messageId });
+
+    assert.equal(res.ok, true);
+    assert.equal(res.acked, true);
+    assert.equal(res.transitioned, true);
+    assert.equal(res.already_acked, undefined);
+    assert.equal(res.reason, undefined);
+    assert.equal(res.task.protocolState, "EXECUTING");
+  });
+
+  test("re-acking the same message is flagged as already_acked, not as a wedge", () => {
+    const doo = makeDO();
+    const messageId = startAndSubmit(doo, "PLAN");
+    doo.localAck({ message_id: messageId });
+
+    // A CLI retry after a dropped HTTP response: the state legitimately no
+    // longer matches, but this must not be reported as a stuck task.
+    const again = doo.localAck({ message_id: messageId });
+    assert.equal(again.acked, true);
+    assert.equal(again.already_acked, true);
+    assert.equal(again.transitioned, false);
+    assert.equal(again.task.protocolState, "EXECUTING");
+  });
+
+  test("localAck reports why a transition did not apply", () => {
+    // STATE_MISMATCH: the task moved on before the ack arrived.
+    const stateMismatch = makeDO();
+    const planId = startAndSubmit(stateMismatch, "PLAN");
+    stateMismatch.sql.exec("UPDATE tasks SET protocol_state = 'EXECUTING' WHERE task_id = 't1'");
+    const stateRes = stateMismatch.localAck({ message_id: planId });
+    assert.equal(stateRes.acked, true);
+    assert.equal(stateRes.transitioned, false);
+    assert.equal(stateRes.reason, "STATE_MISMATCH");
+    assert.equal(stateRes.task.protocolState, "EXECUTING");
+
+    // ITERATION_MISMATCH: a stale reply for an earlier round.
+    const iterMismatch = makeDO();
+    const iterId = startAndSubmit(iterMismatch, "PLAN");
+    iterMismatch.sql.exec("UPDATE tasks SET iteration = 7 WHERE task_id = 't1'");
+    assert.equal(iterMismatch.localAck({ message_id: iterId }).reason, "ITERATION_MISMATCH");
+
+    // KIND_MISMATCH: the task is waiting for a different kind of ack.
+    const kindMismatch = makeDO();
+    const kindId = startAndSubmit(kindMismatch, "PLAN");
+    kindMismatch.sql.exec("UPDATE tasks SET waiting_for = 'LOCAL_DONE_ACK' WHERE task_id = 't1'");
+    assert.equal(kindMismatch.localAck({ message_id: kindId }).reason, "KIND_MISMATCH");
+
+    // NO_TASK: the message outlived its task row.
+    const noTask = makeDO();
+    const orphanId = startAndSubmit(noTask, "PLAN");
+    noTask.sql.exec("DELETE FROM tasks WHERE task_id = 't1'");
+    const orphan = noTask.localAck({ message_id: orphanId });
+    assert.equal(orphan.reason, "NO_TASK");
+    assert.equal(orphan.task, null);
+  });
+
+  test("an unknown message_id reports NOT_FOUND without claiming an ack", () => {
+    const doo = makeDO();
+    const res = doo.localAck({ message_id: "no-such-message" });
+    assert.deepEqual(res, { ok: true, acked: false, transitioned: false, reason: "NOT_FOUND", task: null });
+  });
+
+  test("acking an iteration-0 DONE still parks the task in LOCAL_DECISION", () => {
+    // Regression guard for the existing review-round behavior: a DONE on the
+    // very first iteration is a decision point, not a terminal state.
+    const doo = makeDO();
+    const doneId = startAndSubmit(doo, "DONE", { body: "nothing to do" });
+    const res = doo.localAck({ message_id: doneId });
+    assert.equal(res.transitioned, true);
+    assert.equal(res.task.protocolState, "WAITING_LOCAL");
+    assert.equal(res.task.waitingFor, "LOCAL_DECISION");
+  });
 });
 
 describe("taskHistory", () => {
@@ -1300,5 +1386,197 @@ describe("local transport delegates", () => {
     assert.equal((await post(cliToken, { op: "no_such_op" })).status, 400);
     assert.deepEqual(await (await post(cliToken, { op: "status" })).json(), { connected: false, pendingToGpt: 1, pendingToLocal: 0 });
     assert.equal((await (await post(cliToken, { op: "active_task" })).json()).task.taskId, "t1");
+  });
+});
+
+// The workspace-read window. Anchored on tasks.updated_at (the last protocol
+// transition), NOT tasks.task_started_at: a task that is still being worked on
+// must keep its read access across rounds, while an abandoned one still closes
+// after the idle ceiling. task_started_at stays display-only.
+describe("read window: taskWindowState", () => {
+  const IDLE_MS = 60 * 60 * 1000;
+
+  test("no task at all is 'none'", () => {
+    const doo = makeDO();
+    assert.equal(doo.taskWindowState(), "none");
+    assert.equal(doo.isActiveTaskWindow(), false);
+    assert.equal(doo.taskWindowInfo().expiresAt, null);
+  });
+
+  test("a freshly started task is 'active'", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    assert.equal(doo.taskWindowState(), "active");
+    assert.equal(doo.isActiveTaskWindow(), true);
+  });
+
+  test("a task idle past the ceiling is 'expired' and the boolean form is false", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    doo.sql.exec("UPDATE tasks SET updated_at = ? WHERE task_id = 't1'", Date.now() - IDLE_MS - 1);
+
+    assert.equal(doo.taskWindowState(), "expired");
+    assert.equal(doo.isActiveTaskWindow(), false);
+  });
+
+  test("an old task that is still being worked on keeps its window open", () => {
+    // The regression this whole change exists for. Before it, the window was
+    // anchored on task_started_at, which is never UPDATEd, so a task that had
+    // been progressing for over an hour silently lost every gated read tool
+    // mid-round — while ChatGPT could not tell that from "no task exists".
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    doo.queueNext("t1");
+    const plan = doo.queueSubmit({ task_id: "t1", iteration: 0, state: "PLAN", body: "do it" });
+    doo.localAck({ message_id: plan.structuredContent.message_id });
+    doo.localReportTask({ task_id: "t1", text: "EXECUTED:\ndone", changed: "a.js", tests: "npm test" });
+
+    // Started two hours ago, but the round above just advanced the task.
+    doo.sql.exec("UPDATE tasks SET task_started_at = ? WHERE task_id = 't1'", Date.now() - 2 * IDLE_MS);
+
+    const task = doo.getTask("t1");
+    assert.equal(task.protocol_state, "WAITING_REVIEW");
+    assert.ok(Date.now() - task.task_started_at > IDLE_MS, "task_started_at is deliberately stale");
+    assert.equal(doo.taskWindowState(), "active");
+    assert.equal(doo.isActiveTaskWindow(), true);
+  });
+
+  test("a terminal task leaves no window behind", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    doo.queueNext("t1");
+    const done = doo.queueSubmit({ task_id: "t1", iteration: 0, state: "BLOCKED", body: "cannot" });
+    doo.localAck({ message_id: done.structuredContent.message_id });
+
+    assert.equal(doo.getTask("t1").protocol_state, "BLOCKED");
+    assert.equal(doo.taskWindowState(), "none");
+  });
+
+  test("taskWindowInfo reports the ceiling and expiry so the CLI need not copy the constant", () => {
+    const doo = makeDO();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+    const info = doo.taskWindowInfo();
+
+    assert.equal(info.state, "active");
+    assert.equal(info.idleMs, IDLE_MS);
+    assert.equal(info.expiresAt, doo.getTask("t1").updated_at + IDLE_MS);
+  });
+
+  test("the active_task op carries the window alongside the task", async () => {
+    const doo = makeDO();
+    const { cliToken } = doo.provision();
+    doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+
+    const res = await doo.handleLocalRoute(
+      new Request("https://x/local", { method: "POST", body: JSON.stringify({ op: "active_task" }) }),
+      cliToken
+    );
+    const body = await res.json();
+
+    assert.equal(body.task.taskId, "t1");
+    assert.equal(body.taskWindow.state, "active");
+    assert.equal(body.taskWindow.idleMs, IDLE_MS);
+  });
+});
+
+// What invokeTool stamps onto a relay, and how it reports a relay that failed.
+describe("invokeTool: relay metadata and relay failures", () => {
+  function makeDOWithSockets() {
+    const ctx = makeFakeCtx();
+    const sockets = [];
+    ctx.getWebSockets = () => sockets;
+    return { doo: new BridgeDO(ctx, makeFakeEnv()), sockets };
+  }
+
+  /** Runs one relayed tool call and answers it with `reply`, returning both the
+   *  frame the Worker sent and the tool result ChatGPT would see. */
+  async function relayRoundTrip(doo, sockets, reply) {
+    const frames = [];
+    sockets.push({ send: (frame) => frames.push(JSON.parse(frame)) });
+    const call = doo.invokeTool("read_file", { path: "a.txt" });
+    doo.webSocketMessage(null, JSON.stringify({ rid: frames[0].rid, ...reply }));
+    return { frame: frames[0], result: await call };
+  }
+
+  test("the active-task flag stays a boolean while the window state travels separately", async () => {
+    // bridge/link.mjs reads __gptWorkerActiveTask with !!(...), so stringifying
+    // it would make an older bridge treat "expired" as truthy and allow the
+    // read. The boolean must stay a boolean in every window state.
+    for (const [setup, expectedState, expectedBoolean] of [
+      [() => {}, "none", false],
+      [(doo) => doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" }), "active", true],
+      [
+        (doo) => {
+          doo.localStartTask({ task_id: "t1", goal: "g", text: "GOAL:\ng" });
+          doo.sql.exec("UPDATE tasks SET updated_at = ? WHERE task_id = 't1'", Date.now() - 60 * 60 * 1000 - 1);
+        },
+        "expired",
+        false,
+      ],
+    ]) {
+      const { doo, sockets } = makeDOWithSockets();
+      setup(doo);
+      const { frame } = await relayRoundTrip(doo, sockets, { ok: true, result: { text: "x" } });
+
+      assert.equal(frame.params.__gptWorkerTaskWindow, expectedState);
+      assert.equal(frame.params.__gptWorkerActiveTask, expectedBoolean);
+      assert.equal(typeof frame.params.__gptWorkerActiveTask, "boolean", expectedState);
+    }
+  });
+
+  test("an offline bridge is an MCP error, not an empty success", async () => {
+    // This used to come back through toolOk(), leaving ChatGPT unable to tell a
+    // disconnected bridge from a tool that legitimately returned nothing.
+    const { doo } = makeDOWithSockets();
+    const res = await doo.invokeTool("read_file", { path: "a.txt" });
+
+    assert.equal(res.isError, true);
+    assert.equal(res.structuredContent.error, "LOCAL_OFFLINE");
+    assert.match(res.structuredContent.message, /gpt-worker start/);
+  });
+
+  test("a send that throws is reported as LOCAL_OFFLINE too", async () => {
+    const { doo, sockets } = makeDOWithSockets();
+    sockets.push({ send() { throw new Error("closed"); } });
+    const res = await doo.invokeTool("read_file", { path: "a.txt" });
+
+    assert.equal(res.isError, true);
+    assert.equal(res.structuredContent.error, "LOCAL_OFFLINE");
+  });
+
+  test("a bridge that drops mid-call is reported as LOCAL_DISCONNECTED", async () => {
+    const { doo, sockets } = makeDOWithSockets();
+    sockets.push({ send() {} });
+    const call = doo.invokeTool("read_file", { path: "a.txt" });
+    doo.webSocketClose();
+    const res = await call;
+
+    assert.equal(res.isError, true);
+    assert.equal(res.structuredContent.error, "LOCAL_DISCONNECTED");
+  });
+
+  test("an ok:false reply from the bridge becomes LOCAL_TOOL_ERROR with its message", async () => {
+    const { doo, sockets } = makeDOWithSockets();
+    const { result } = await relayRoundTrip(doo, sockets, {
+      ok: false,
+      error: { status: "error", message: "sanitize_failed: scanner missing" },
+    });
+
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.error, "LOCAL_TOOL_ERROR");
+    assert.match(result.structuredContent.message, /sanitize_failed/);
+  });
+
+  test("the gate's own refusals stay successful results, not errors", async () => {
+    // no_active_task and task_window_expired are documented successful shapes
+    // (reference/protocol.md) — they arrive with relay.ok === true and must not
+    // acquire isError, or ChatGPT would treat a normal closed window as a fault.
+    for (const status of ["no_active_task", "task_window_expired"]) {
+      const { doo, sockets } = makeDOWithSockets();
+      const { result } = await relayRoundTrip(doo, sockets, { ok: true, result: { status } });
+
+      assert.equal(result.isError, undefined, status);
+      assert.equal(result.structuredContent.status, status);
+    }
   });
 });

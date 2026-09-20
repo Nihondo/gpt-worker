@@ -37,6 +37,7 @@ Codex, Claude Code, Antigravity などの AI エージェントに「gpt-worker�
 
 - **OS**：macOS（Chrome 自動連携機能を使用する場合）
 - **Node.js**：v22 以上（未導入の場合は `brew install node`）
+- **Git**：必須。検査ツールがリポジトリの状態を Git 経由で読み取ります。ローカルブリッジは、Git-ignore されていないと確認できないファイルの読み取りを拒否するため、`git` が無い、または Git がリポジトリを開けないワークスペースは読み取れません。
 - **Google Chrome**：ChatGPT を操作するブラウザ
 - **ChatGPT アカウント**：Plus、Business、Pro のいずれか（Projects、Developer mode、カスタム MCP コネクタが利用可能なプラン。作者環境の Plus にて動作確認済み）
 - **Cloudflare アカウント**：無料プランで十分です（中継 Worker の設置に使用）
@@ -455,6 +456,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker complete -w <dir>` | LOCAL_DECISION（判断待ち）状態のレビュー/計画タスクの完了を確定 |
 | `gpt-worker continue -w <dir>` | LOCAL_DECISION 状態のレビュータスクを EXECUTING に戻して指摘事項の実装を継続 |
 | `gpt-worker handoff [-w <dir>] [--reason "<理由>"] [--title "<title>"]` | ラウンドを終えてタスクを別のエージェントに引き継ぐ（受け手は `wait` で再開） |
+| `gpt-worker discard-task [-w <dir>] [--task <id>] --yes` | アクティブなタスクを破棄する（BLOCKED にし、キュー内のメッセージを消去）。元に戻せないため `--yes` が必須。`wait` が終了コード 3 で終わって滞留したタスクからの復旧手段 |
 | `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | 保留中のキューメッセージの確認や、滞留したメッセージの破棄 |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | このワークスペースのメッセージ本文サイズ上限を表示・変更する（既定 16KB） |
 | `gpt-worker guidance "<text>" -w <dir>` | プロジェクト固有の開発ルールを設定 |
@@ -468,6 +470,18 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | 認証トークン（ワークスペースの GPT/link/CLI トークン、または共有 hub トークン）を再生成 |
 | `gpt-worker workspaces` | 登録済みプロジェクト一覧を表示 |
 | `gpt-worker remove -w <dir> --yes` | プロジェクトの登録を解除 |
+
+### 終了コード
+
+| コード | 意味 |
+|---|---|
+| `0` | 成功 |
+| `1` | エラー（メッセージに対処方法が出ます） |
+| `2` | `wait` がタイムアウトし、まだ返信がない — もう一度実行する |
+| `3` | `wait` は返信を受け取ったが、タスクが先に進まなかった。返信は表示されます。`gpt-worker state` で確認し、本当に滞留しているなら `gpt-worker discard-task --yes` |
+| `4` | Worker に接続できなかった。`task`/`report`/`handoff` ではリクエストが反映された可能性があるかどうかがメッセージに出ます — 再実行する前に `gpt-worker state` で確認してください。`wait` は、返信を表示した直後に、その確認応答（ack）を確認できなかった場合にも 4 で終わります。再配信されると決めつけず、表示される案内（`gpt-worker state` と `gpt-worker queue` の確認）に従ってください |
+
+コマンドは一時的なネットワーク障害を自動で再試行します（短い間隔で数回）。`wait` はさらに、自身のタイムアウトまで再試行を続けるので、長い待機中の短い接続断で終了することはありません。
 
 ---
 

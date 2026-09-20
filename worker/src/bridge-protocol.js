@@ -452,7 +452,8 @@ function createBridgeProtocol({ sql, maxBodyBytes, notifyPlanPushed, toolOk, too
       if (task && !["DONE", "BLOCKED"].includes(task.protocol_state)) {
         return {
           error: "USE_DISCARD_TASK",
-          message: "This message belongs to an active task; discard the task instead to keep protocol state consistent.",
+          message:
+            "This message belongs to an active task; discard the whole task instead to keep protocol state consistent: gpt-worker discard-task --task <task_id> --yes",
         };
       }
       sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ?`, body.message_id);
@@ -598,53 +599,82 @@ function createBridgeProtocol({ sql, maxBodyBytes, notifyPlanPushed, toolOk, too
       }
     },
 
+    /** Acks one to_local message and applies the protocol transition it
+     *  authorizes.
+     *
+     *  Always returns `{ ok: true }` for a well-formed request (an ack is not
+     *  a place to fail a caller), but reports *whether the state actually
+     *  advanced* alongside it:
+     *
+     *   - `acked`        — the message existed at all
+     *   - `already_acked`— it had been acked before (a CLI retry after a
+     *                      dropped HTTP response; NOT a wedge)
+     *   - `transitioned` — the task moved to its next protocol state
+     *   - `reason`       — why it did not, when it did not
+     *
+     *  Without these, a wedged task (message delivered, task left in
+     *  WAITING_LOCAL, to_local queue now empty so `wait` can never return it
+     *  again) looked like a clean success to the caller. cmdWait consumes
+     *  these fields to warn instead of exiting 0. */
     localAck(body) {
       if (!body || typeof body.message_id !== "string") return { error: "INVALID_ARGS" };
       const rows = sql
         .exec(`SELECT * FROM msgs WHERE message_id = ? AND dir = 'to_local'`, body.message_id)
         .toArray();
-      if (rows.length === 0) return { ok: true };
+      if (rows.length === 0) {
+        return { ok: true, acked: false, transitioned: false, reason: "NOT_FOUND", task: null };
+      }
       const msg = rows[0];
-      if (msg.state !== "acked") {
+      const alreadyAcked = msg.state === "acked";
+      if (!alreadyAcked) {
         sql.exec(`UPDATE msgs SET state = 'acked' WHERE message_id = ? AND dir = 'to_local'`, body.message_id);
       }
 
+      // Re-reads the task on every exit so the caller sees the state as it is
+      // *after* any transition this call applied.
+      const outcome = (transitioned, reason) => {
+        const out = { ok: true, acked: true, transitioned, task: this.taskView(this.getTask(msg.task_id)) };
+        if (alreadyAcked) out.already_acked = true;
+        if (reason) out.reason = reason;
+        return out;
+      };
+
       const task = this.getTask(msg.task_id);
-      if (
-        task &&
-        task.protocol_state === "WAITING_LOCAL" &&
-        task.iteration === msg.iteration
-      ) {
-        const now = Date.now();
-        if (msg.kind === "PLAN" && task.waiting_for === "LOCAL_PLAN_ACK") {
+      if (!task) return outcome(false, "NO_TASK");
+      if (task.protocol_state !== "WAITING_LOCAL") return outcome(false, "STATE_MISMATCH");
+      if (task.iteration !== msg.iteration) return outcome(false, "ITERATION_MISMATCH");
+
+      const now = Date.now();
+      if (msg.kind === "PLAN" && task.waiting_for === "LOCAL_PLAN_ACK") {
+        sql.exec(
+          `UPDATE tasks SET protocol_state = 'EXECUTING', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
+          now,
+          task.task_id
+        );
+      } else if (msg.kind === "BLOCKED" && task.waiting_for === "LOCAL_BLOCKED_ACK") {
+        sql.exec(
+          `UPDATE tasks SET protocol_state = 'BLOCKED', waiting_for = 'USER', updated_at = ? WHERE task_id = ?`,
+          now,
+          task.task_id
+        );
+      } else if (msg.kind === "DONE" && task.waiting_for === "LOCAL_DONE_ACK") {
+        if (msg.iteration >= 1) {
           sql.exec(
-            `UPDATE tasks SET protocol_state = 'EXECUTING', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
+            `UPDATE tasks SET protocol_state = 'DONE', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
             now,
             task.task_id
           );
-        } else if (msg.kind === "BLOCKED" && task.waiting_for === "LOCAL_BLOCKED_ACK") {
+        } else {
           sql.exec(
-            `UPDATE tasks SET protocol_state = 'BLOCKED', waiting_for = 'USER', updated_at = ? WHERE task_id = ?`,
+            `UPDATE tasks SET protocol_state = 'WAITING_LOCAL', waiting_for = 'LOCAL_DECISION', updated_at = ? WHERE task_id = ?`,
             now,
             task.task_id
           );
-        } else if (msg.kind === "DONE" && task.waiting_for === "LOCAL_DONE_ACK") {
-          if (msg.iteration >= 1) {
-            sql.exec(
-              `UPDATE tasks SET protocol_state = 'DONE', waiting_for = 'none', updated_at = ? WHERE task_id = ?`,
-              now,
-              task.task_id
-            );
-          } else {
-            sql.exec(
-              `UPDATE tasks SET protocol_state = 'WAITING_LOCAL', waiting_for = 'LOCAL_DECISION', updated_at = ? WHERE task_id = ?`,
-              now,
-              task.task_id
-            );
-          }
         }
+      } else {
+        return outcome(false, "KIND_MISMATCH");
       }
-      return { ok: true };
+      return outcome(true);
     },
 
     localMigrateLegacyState(body) {

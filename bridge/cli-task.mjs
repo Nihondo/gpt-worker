@@ -1,9 +1,13 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { recordsDir } from "./state.mjs";
+import { appendLog, recordsDir } from "./state.mjs";
 import { nudgeChatGpt } from "./chat-nudge.mjs";
 import {
+  EXIT_PROTOCOL_STATE,
+  EXIT_WORKER_UNREACHABLE,
+  WorkerCallError,
+  WorkerUnreachableError,
   localCall,
   migrateLegacyStateIfNeeded,
   remoteActiveTask,
@@ -123,6 +127,127 @@ export function selectWaitMessages(messages, taskId) {
   return taskId ? pending.filter((message) => message.task_id === taskId) : pending;
 }
 
+// The waiting_for values that mean "the Worker is waiting for the local side to
+// ack a reply". A transition that *did* apply always moves the task off these:
+// PLAN -> EXECUTING/none, BLOCKED -> BLOCKED/USER, DONE at iteration >= 1 ->
+// DONE, and DONE at iteration 0 -> WAITING_LOCAL/LOCAL_DECISION (not an _ACK).
+const AWAITING_LOCAL_ACK = new Set(["LOCAL_PLAN_ACK", "LOCAL_DONE_ACK", "LOCAL_BLOCKED_ACK"]);
+
+/** Decides whether an `ack` answer means the task is stuck: the message was
+ *  acked, yet the task did not advance and is still open. Returns
+ *  `{ reason, task }` for a stuck task, null otherwise.
+ *
+ *  Deliberately not flagged (none of these leave anything to recover):
+ *   - `transitioned` unset — an older Worker that predates these fields.
+ *   - a terminal task      — nothing left to advance.
+ *   - no task / no message — there is no task to be stuck.
+ *   - `already_acked` — usually a retry after a dropped response, where the
+ *     first ack did its work and the task has legitimately moved on.
+ *
+ *  That last exemption is not blanket, because a first ack can also mark the
+ *  message delivered and then fail to transition (say KIND_MISMATCH) with its
+ *  response lost; the retry then reports `already_acked` too. What tells the two
+ *  apart is where the task is now: after an applied transition it is never still
+ *  waiting for a local ack (see AWAITING_LOCAL_ACK), so a task that still is was
+ *  never advanced, whoever's ack it was. */
+export function findStuckAck(ack) {
+  if (!ack || ack.acked !== true) return null;
+  if (ack.transitioned !== false) return null;
+  const task = ack.task;
+  if (!task || ["DONE", "BLOCKED"].includes(task.protocolState)) return null;
+  if (ack.already_acked && !AWAITING_LOCAL_ACK.has(task.waitingFor)) return null;
+  return { reason: ack.reason || "UNKNOWN", task };
+}
+
+async function pollOrThrow(cfg, timeoutMs, deadlineMs) {
+  const result = await localCall(cfg, "poll", { timeout_ms: timeoutMs }, { deadlineMs });
+  // A structured error has no `messages`, which the loop below would read as
+  // "nothing yet" and immediately poll again — at full speed, until the
+  // deadline, for a condition (a rotated token, say) that will never clear.
+  if (result.error) throw new WorkerCallError(result.error, `The Worker rejected the poll: ${result.error}`);
+  return result;
+}
+
+/** Prints each delivered message and then acks it; exits non-zero if any of
+ *  them left the task stuck.
+ *
+ *  The order is deliberate: print, THEN ack. An ack that reaches the Worker but
+ *  whose reply is lost (and whose retries then fail too) still marks the message
+ *  delivered, so it is never redelivered. Acking first meant the body could be
+ *  removed from the queue without the agent ever having seen it. Printing first
+ *  means the agent always has the body.
+ *
+ *  What an unconfirmed ack leaves behind is NOT knowable from here, and the
+ *  message must not pretend otherwise. There are three outcomes, needing three
+ *  different next steps:
+ *   1. the ack landed and the task advanced — the reply will not come again, so
+ *      act on the printed one;
+ *   2. the ack never landed — the task still waits for it and the reply is still
+ *      queued, so `wait` delivers it again and acting first would fail;
+ *   3. the reply was recorded as delivered but the task did not advance
+ *      (localAck marks the message acked *before* it validates the transition,
+ *      so a mismatch plus lost responses does this) — the task waits for an ack
+ *      whose message is gone, and nothing will ever redeliver it.
+ *  The task's state separates (1) from the rest; only the queue separates (2)
+ *  from (3), which is why the guidance sends the agent to both. */
+async function deliverMessages(root, cfg, messages) {
+  const stuck = [];
+  for (const message of messages) {
+    handleIncoming(message);
+    let ack;
+    try {
+      ack = await localCall(cfg, "ack", { message_id: message.message_id });
+    } catch (err) {
+      if (err instanceof WorkerUnreachableError) {
+        appendLog(root, `wait: printed ${message.kind} for task ${message.task_id} but could not ack ${message.message_id}: ${err.message}`);
+        console.error(
+          `--- The reply above was printed, but its acknowledgement could not be confirmed ---\n` +
+            `The Worker could not be reached, so it is unknown whether it recorded the acknowledgement. Look at where things stand before acting:\n` +
+            `  gpt-worker state -w ${root}\n` +
+            `  gpt-worker queue -w ${root}\n` +
+            `  - The task has moved on (a PLAN reply -> EXECUTING; a DONE/BLOCKED reply -> no active task, or LOCAL_DECISION for a review-only DONE):\n` +
+            `    the acknowledgement landed and 'gpt-worker wait' will NOT deliver this reply again. Act on the reply above, once.\n` +
+            `  - Still WAITING_LOCAL with waiting_for LOCAL_PLAN_ACK / LOCAL_DONE_ACK / LOCAL_BLOCKED_ACK, and 'queue' lists this reply as pending:\n` +
+            `    it did not land. Do not act yet; run 'gpt-worker wait -w ${root}', which delivers the same reply again.\n` +
+            `  - Still waiting for one of those, but 'queue' shows nothing pending: the reply was recorded as delivered while the task never advanced,\n` +
+            `    and 'wait' will never return it. The task is stuck. Tell the user; if abandoning it is authorized,\n` +
+            `    'gpt-worker discard-task -w ${root} --yes' marks it BLOCKED so a new one can start.\n` +
+            `Check your network first if 'state' cannot reach the Worker either.`
+        );
+      }
+      throw err;
+    }
+    const found = findStuckAck(ack);
+    if (found) stuck.push({ message, ...found });
+  }
+  if (stuck.length === 0) return;
+
+  for (const { message, reason, task } of stuck) {
+    appendLog(root, `wait: ack did not advance task ${task.taskId} (${reason}, state=${task.protocolState}, waiting_for=${task.waitingFor})`);
+    console.error(
+      `--- WARNING: the task did not advance ---\n` +
+        `The Worker delivered this ${message.kind} (task ${message.task_id}, iteration ${message.iteration}), but the task did not\n` +
+        `move to its next state (reason: ${reason}; it is ${task.protocolState}, waiting for ${task.waitingFor}).\n` +
+        `The reply is now acked and the queue is empty, so 'gpt-worker wait' will not return it again.\n` +
+        `Inspect : gpt-worker state -w ${root}\n` +
+        `Recover : gpt-worker discard-task -w ${root} --yes   (marks this task BLOCKED so a new one can start)\n`
+    );
+  }
+  process.exit(EXIT_PROTOCOL_STATE);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** How long `wait` pauses after the Worker proved unreachable before polling
+ *  again. GPT_WORKER_WAIT_RETRY_MS exists so the recovery path can be tested in
+ *  milliseconds; nothing in production sets it. */
+function waitRetryPauseMs() {
+  const value = Number(process.env.GPT_WORKER_WAIT_RETRY_MS);
+  return Number.isFinite(value) && value >= 0 ? value : 5_000;
+}
+
 export async function cmdWait(args) {
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
@@ -130,33 +255,53 @@ export async function cmdWait(args) {
   const totalTimeoutMs = (Number(args.timeout) || 900) * 1000;
   const deadline = Date.now() + totalTimeoutMs;
 
-  const task = await remoteActiveTask(cfg);
+  // `--timeout` is a promise about how long this command may take, so the
+  // deadline is handed to every call it makes rather than only checked between
+  // them: otherwise a Worker that accepts and never answers stretched a
+  // "--timeout 1" into tens of seconds of timeouts and retries.
+  const task = await remoteActiveTask(cfg, { deadlineMs: deadline });
   if (!task) {
-    const result = await localCall(cfg, "poll", { timeout_ms: 0 });
+    const result = await pollOrThrow(cfg, 0, deadline);
     const messages = selectWaitMessages(result.messages);
     if (messages.length > 0) {
-      for (const message of messages) {
-        await localCall(cfg, "ack", { message_id: message.message_id });
-        handleIncoming(message);
-      }
+      await deliverMessages(root, cfg, messages);
       return;
     }
     console.error("No active task. Run: gpt-worker task \"<goal>\"");
     process.exit(1);
   }
 
+  // This stays one blocking call by design (SKILL.md tells agents to call it
+  // once and let it block), so a connectivity blip inside the window must not
+  // end it: localCall already retries briefly, and beyond that the wait keeps
+  // trying until its own deadline instead of dying with a stack trace.
+  let unreachable = null;
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     const chunk = Math.max(0, Math.min(remaining, 20_000));
-    const result = await localCall(cfg, "poll", { timeout_ms: chunk });
+    let result;
+    try {
+      result = await pollOrThrow(cfg, chunk, deadline);
+    } catch (err) {
+      if (!(err instanceof WorkerUnreachableError)) throw err;
+      if (!unreachable) console.error(`Worker unreachable (${err.message}) — will keep trying until the wait times out.`);
+      unreachable = err;
+      appendLog(root, `wait: worker unreachable, still waiting: ${err.message}`);
+      await sleep(Math.min(waitRetryPauseMs(), Math.max(0, deadline - Date.now())));
+      continue;
+    }
+    unreachable = null;
     const messages = selectWaitMessages(result.messages, task.taskId);
     if (messages.length > 0) {
-      for (const m of messages) {
-        await localCall(cfg, "ack", { message_id: m.message_id });
-        handleIncoming(m);
-      }
+      await deliverMessages(root, cfg, messages);
       return;
     }
+  }
+  if (unreachable) {
+    // Ending on a failure is a different answer from "no message yet": the
+    // caller should check connectivity, not just wait again.
+    console.error(`The Worker stayed unreachable until the wait timed out (${unreachable.message}).\nCheck your network, then: gpt-worker status -w ${root}`);
+    process.exit(EXIT_WORKER_UNREACHABLE);
   }
   console.log("No message yet. Run 'gpt-worker wait' again once the user has asked ChatGPT to continue.");
   process.exit(2);
@@ -243,6 +388,51 @@ export async function cmdComplete(args) {
     process.exit(1);
   }
   console.log(`Task ${task.taskId} completed.`);
+}
+
+/** Abandons the active task: marks it BLOCKED and clears its queued messages.
+ *  This is the CLI's way out of a stuck task (previously the only routes were
+ *  `task --force`, which starts a *new* task as a side effect, or the Web
+ *  dashboard). Destructive and not resumable, so it needs an explicit --yes —
+ *  agents run non-interactively, which rules out a y/n prompt. */
+export async function cmdDiscardTask(args) {
+  const root = workspaceRoot(args);
+  const cfg = requireWorkspaceConfig(root);
+  await migrateLegacyStateIfNeeded(root, cfg);
+  const task = await remoteActiveTask(cfg);
+  if (!task) {
+    console.error("No active task to discard.");
+    process.exit(1);
+  }
+  // At most one task is ever non-terminal (start_task refuses a second one
+  // without --force, which blocks the old one), so --task can only confirm
+  // the target; it is never a way to reach some other task.
+  if (typeof args.task === "string" && args.task !== task.taskId) {
+    console.error(`Task ${args.task} is not the active task (active: ${task.taskId}); nothing was discarded.`);
+    process.exit(1);
+  }
+
+  if (args.yes !== true && args.yes !== "true") {
+    const goalLine = String(task.goal || "").split("\n").find((line) => line.trim()) || "";
+    console.error(
+      `This would discard the active task:\n` +
+        `  task id   : ${task.taskId}\n` +
+        (task.title ? `  title     : ${task.title}\n` : "") +
+        `  state     : ${task.protocolState} (waiting for ${task.waitingFor}), iteration ${task.iteration}\n` +
+        `  goal      : ${goalLine.length > 100 ? `${goalLine.slice(0, 100)}…` : goalLine}\n` +
+        `It is marked BLOCKED and its queued messages are cleared; it cannot be resumed.\n` +
+        `Re-run to confirm: gpt-worker discard-task -w ${root} --yes`
+    );
+    process.exit(1);
+  }
+
+  const result = await localCall(cfg, "discard_task", { task_id: task.taskId });
+  if (result.error) {
+    console.error(`Failed to discard task: ${result.error}`);
+    process.exit(1);
+  }
+  appendLog(root, `discard-task: ${task.taskId} (was ${task.protocolState})`);
+  console.log(`Task ${task.taskId} discarded (was ${task.protocolState}); it is now BLOCKED. Start a new one with: gpt-worker task "<goal>"`);
 }
 
 export async function cmdContinue(args) {

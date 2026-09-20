@@ -37,6 +37,7 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 
 - **OS**: macOS (for automated Chrome integration)
 - **Node.js**: v22 or higher (install with `brew install node` if not present)
+- **Git**: required. The inspection tools read repository state through it, and the local bridge denies reading any file it cannot confirm is not Git-ignored — so a workspace where `git` is missing or cannot open the repository cannot be read.
 - **Google Chrome**: Browser used to run ChatGPT
 - **ChatGPT Account**: Plus, Business, or Pro (any plan where Projects, Developer mode, and custom MCP connectors are available; verified on Plus by the maintainer)
 - **Cloudflare Account**: Free tier is sufficient (used to deploy the relay Worker)
@@ -456,6 +457,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker complete -w <dir>` | Confirm completion of a review/planning task left in LOCAL_DECISION |
 | `gpt-worker continue -w <dir>` | Transition a review task in LOCAL_DECISION back to EXECUTING to implement recommendations |
 | `gpt-worker handoff [-w <dir>] [--reason "<why>"] [--title "<title>"]` | End the round and hand the task to a different agent, which resumes with `wait` |
+| `gpt-worker discard-task [-w <dir>] [--task <id>] --yes` | Abandon the active task: mark it BLOCKED and clear its queued messages. Not resumable, so `--yes` is required. The way out of a task stuck after `wait` exits 3 |
 | `gpt-worker queue [-w <dir>] [--task <id>] [--discard <id>]` | Inspect pending queue messages or discard stuck messages |
 | `gpt-worker limits [<bytes>\|--reset] [-w <dir>]` | View or change this workspace's message body size limit (default 16 KB) |
 | `gpt-worker guidance "<text>" -w <dir>` | Set project-specific instructions |
@@ -469,6 +471,18 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | Rotate authentication tokens (workspace GPT/link/CLI token or shared hub token) |
 | `gpt-worker workspaces` | List all registered workspaces |
 | `gpt-worker remove -w <dir> --yes` | Deregister workspace and purge records |
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Error (the message says what to do) |
+| `2` | `wait` timed out with no reply yet — run it again |
+| `3` | `wait` delivered a reply, but the task did not advance. The reply is printed; inspect with `gpt-worker state`, and if the task is truly stuck, `gpt-worker discard-task --yes` |
+| `4` | The Worker could not be reached. For `task`/`report`/`handoff` the message says whether the request may still have been applied — check `gpt-worker state` before repeating it. `wait` can also exit 4 right after printing a reply whose acknowledgement could not be confirmed: follow the guidance it prints (check `gpt-worker state` and `gpt-worker queue`) rather than assuming a redelivery |
+
+Commands retry transient network failures on their own (a few short attempts). `wait` goes further and keeps trying until its own timeout, so a brief outage during a long wait does not end it.
 
 ---
 

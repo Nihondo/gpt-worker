@@ -41,6 +41,8 @@ When multiple independent workspace reads are known in advance (e.g. reading mul
 
 Where relevant, identify entry points and implementation paths, affected symbols, callers/consumers, data and control flow, persistence/schema behavior, existing conventions, related tests, configuration/dependencies, compatibility constraints, and behavior that must remain unchanged.
 
+When an inspection tool refuses or fails, read its status and stop rather than working around it. `{"status":"no_active_task"}` means no task is open for that workspace. `{"status":"task_window_expired"}` means a task exists but its read window has gone idle; retrying will not reopen it — report that the operator has to advance the task (`gpt-worker report` or `gpt-worker continue`) or start a new one. A `LOCAL_OFFLINE`, `LOCAL_DISCONNECTED`, `LOCAL_TIMEOUT`, or `LOCAL_TOOL_ERROR` tool error means the local bridge is unavailable, not that the workspace is empty. In none of these cases may you retry in a loop, switch to a different workspace, substitute another connector, or state file contents, diffs, or test results from memory or inference.
+
 Trace enough surrounding code to understand the change in context, and verify important facts from the workspace rather than memory. If the request rests on an incorrect or outdated premise, state that and plan from the verified repository state instead of forcing the implementation to match it. Do not ask the user for information the connector can inspect; respect denied paths, unavailable resources, permissions, and the authorized scope.
 
 ## 4. Handle uncertainty

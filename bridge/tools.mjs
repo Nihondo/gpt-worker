@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { IgnoreRules } from "./ignore.mjs";
+import { gitTimeoutMs, isExecTimeout } from "./exec-limits.mjs";
 import { recordsDir, appendLog, readAllowedReadPaths } from "./state.mjs";
 
 export const UNTRUSTED_NOTE =
@@ -26,7 +27,10 @@ let rgAvailableCache = null;
 function rgAvailable() {
   if (rgAvailableCache !== null) return rgAvailableCache;
   try {
-    execFileSync("rg", ["--version"], { stdio: ["ignore", "ignore", "ignore"] });
+    // Time-limited like every other child here: this probe runs synchronously on
+    // the daemon's only thread, so a hung `rg` would freeze every RPC. One that
+    // does not answer is treated as unavailable, which falls back to `git grep`.
+    execFileSync("rg", ["--version"], { stdio: ["ignore", "ignore", "ignore"], timeout: gitTimeoutMs() });
     rgAvailableCache = true;
   } catch {
     rgAvailableCache = false;
@@ -107,7 +111,15 @@ export class WorkspaceTools {
       return { error: "ACCESS_DENIED_SENSITIVE_FILE", path: relPath };
     }
     if (this.ignore.isGitIgnored(relPath) && !(directRead && this.isExplicitlyAllowed(relPath))) {
-      return { error: "ACCESS_DENIED_GITIGNORED_FILE", path: relPath };
+      // When git could not answer, the path is denied as a precaution rather
+      // than because it is ignored; say so, or the operator is left looking for
+      // a .gitignore rule that does not exist.
+      const reason = this.ignore.unknownReason;
+      return {
+        error: "ACCESS_DENIED_GITIGNORED_FILE",
+        path: relPath,
+        ...(reason ? { message: `Git could not confirm this path is not ignored (${reason}), so it is treated as ignored.` } : {}),
+      };
     }
     return null;
   }
@@ -166,7 +178,20 @@ export class WorkspaceTools {
       // report dirty=true for changes in sibling directories.
       const dirty = this.git(["status", "--porcelain", "--", "."]).trim().length > 0;
       return { isRepo: true, branch, commit, dirty };
-    } catch {
+    } catch (err) {
+      // Git not answering is not "this is not a repository": that would be
+      // reported to ChatGPT as a fact about the workspace. `isRepo: null` says
+      // "unknown", and githubRepository() already treats it like a non-repo.
+      if (isExecTimeout(err)) {
+        return {
+          isRepo: null,
+          branch: null,
+          commit: null,
+          dirty: null,
+          error: "GIT_TIMEOUT",
+          message: `git did not answer within ${gitTimeoutMs() / 1000}s, so the repository state is unknown.`,
+        };
+      }
       return { isRepo: false, branch: null, commit: null, dirty: false };
     }
   }
@@ -187,6 +212,7 @@ export class WorkspaceTools {
           cwd: this.root,
           encoding: "utf8",
           stdio: ["ignore", "pipe", "ignore"],
+          timeout: gitTimeoutMs(),
         }).trim();
         const parsed = parseGitHubRemote(rawUrl);
         if (parsed) return { ...parsed, remote, headCommit: git.commit, branch: git.branch };
@@ -358,6 +384,8 @@ export class WorkspaceTools {
     if (!query || typeof query !== "string") return { error: "INVALID_ARGS" };
 
     let raw;
+    // Set when the search ended abnormally after already printing some hits.
+    let incomplete = null;
     try {
       if (rgAvailable()) {
         const args = ["-n", "--no-heading", "--max-columns", "300"];
@@ -366,17 +394,36 @@ export class WorkspaceTools {
         // to any enclosing git repo) and, for the git-grep fallback below, the
         // pathspec that keeps a workspace-root-below-repo-root case scoped.
         args.push("--", query, ".");
-        raw = execFileSync("rg", args, { cwd: this.root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+        raw = execFileSync("rg", args, { cwd: this.root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: gitTimeoutMs() });
       } else {
         // Without an explicit pathspec, git-grep searches the *whole enclosing
         // repository*, not just this.root — a real leak when this.root is a
         // subdirectory of a larger repo. "-- ." pins the scope to this.root.
         const args = ["grep", "-n", "-I", "-e", query, "--", "."];
-        raw = execFileSync("git", args, { cwd: this.root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 });
+        raw = execFileSync("git", args, { cwd: this.root, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, timeout: gitTimeoutMs() });
       }
     } catch (err) {
-      // rg/git grep exit non-zero when there are simply no matches.
+      // A search cut off by the timeout has only *partial* output in err.stdout.
+      // Returning it below would present an incomplete result as a complete one
+      // ("no other matches"), so a timeout is reported as such instead.
+      if (isExecTimeout(err)) {
+        return { error: "SEARCH_TIMEOUT", message: `Search did not finish within ${gitTimeoutMs() / 1000}s; narrow the query or use a glob.` };
+      }
       raw = err.stdout || "";
+      // Exit 1 is how rg and git grep say "no matches". Any other failure used
+      // to fall through as if it were that, which made a malformed regex or a
+      // fatal git error read as "nothing found".
+      if (!(err && err.status === 1)) {
+        const how = err && err.status != null ? `exit status ${err.status}` : (err && err.code) || "an unknown error";
+        if (!raw) {
+          const detail = String((err && err.stderr) || "").split("\n").find((line) => line.trim());
+          return { error: "SEARCH_FAILED", message: `Search failed (${how})${detail ? `: ${detail.trim().slice(0, 200)}` : ""}` };
+        }
+        // Some hits came out before the failure. Keep them — rg exits 2 when it
+        // printed matches but could not read some paths, which is ordinary — but
+        // do not present the list as complete.
+        incomplete = `The search ended abnormally (${how}); the hits below may be incomplete.`;
+      }
     }
 
     const allLines = raw.split("\n").filter(Boolean);
@@ -390,13 +437,19 @@ export class WorkspaceTools {
       hits.push({ path: relPath, line: Number(m[2]), text: m[3].slice(0, 300) });
       if (hits.length >= MAX_SEARCH_HITS) break;
     }
-    return { query, hits, truncated: allLines.length > hits.length, note: UNTRUSTED_NOTE };
+    return {
+      query,
+      hits,
+      truncated: allLines.length > hits.length,
+      ...(incomplete ? { partial: true, warning: incomplete } : {}),
+      note: UNTRUSTED_NOTE,
+    };
   }
 
   // ------------------------------------------------------------------
 
   git(args) {
-    return execFileSync("git", args, { cwd: this.root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    return execFileSync("git", args, { cwd: this.root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: gitTimeoutMs() });
   }
 
   gitStatus() {
@@ -408,7 +461,9 @@ export class WorkspaceTools {
       // when this.root is a subdirectory of a larger one, which would leak
       // sibling paths outside the workspace.
       raw = this.git(["status", "--porcelain=v2", "-b", "--", "."]);
-    } catch {
+    } catch (err) {
+      // "Git did not answer in time" is not "this is not a repository".
+      if (isExecTimeout(err)) return { error: "GIT_TIMEOUT", message: `git status did not finish within ${gitTimeoutMs() / 1000}s.` };
       return { isRepo: false };
     }
     const lines = raw.split("\n").filter(Boolean);
@@ -478,6 +533,7 @@ export class WorkspaceTools {
     try {
       raw = this.git(args);
     } catch (err) {
+      if (isExecTimeout(err)) return { error: "GIT_TIMEOUT", message: `git did not finish within ${gitTimeoutMs() / 1000}s.` };
       return { error: "GIT_ERROR", message: String(err.message || err) };
     }
 
@@ -534,6 +590,7 @@ export class WorkspaceTools {
     try {
       raw = this.git(args);
     } catch (err) {
+      if (isExecTimeout(err)) return { error: "GIT_TIMEOUT", message: `git did not finish within ${gitTimeoutMs() / 1000}s.` };
       return { error: "GIT_ERROR", message: String(err.message || err) };
     }
 
