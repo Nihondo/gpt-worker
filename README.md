@@ -496,6 +496,7 @@ To run tests or deploy updates to gpt-worker itself:
 ```bash
 npm run check    # Run syntax checks
 npm test         # Run test suites
+npm run coverage # Run tests with Node's built-in coverage report (not part of verify)
 npm run verify   # Run check and tests
 npm run dry-run  # Dry-run Worker deployment
 npm run deploy   # Deploy Cloudflare Worker updates

@@ -495,6 +495,7 @@ gpt-worker 自体のテストや動作確認を行う場合のコマンドです
 ```bash
 npm run check    # 構文チェック
 npm test         # テストの実行
+npm run coverage # Node 組み込みのカバレッジレポート付きでテストを実行（verify には含まれません）
 npm run verify   # チェックとテストを一括実行
 npm run dry-run  # Worker デプロイの事前確認
 npm run deploy   # Cloudflare Worker のデプロイ

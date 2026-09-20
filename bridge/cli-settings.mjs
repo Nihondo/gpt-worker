@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import {
   allowReadPath,
   denyReadPath,
@@ -77,22 +78,22 @@ export async function cmdLimits(args) {
   console.log(`Saved. Message body limit is now ${result.maxBodyBytes} bytes.`);
 }
 
-function allowedReadFile(root, input, { mustExist = true } = {}) {
+export function allowedReadFile(root, input, { mustExist = true } = {}) {
   if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-file> [-w <dir>]");
+  if (path.isAbsolute(input)) throw new Error("OUT_OF_WORKSPACE");
   const tools = new WorkspaceTools(root);
   const resolved = tools.resolve(input);
   if (resolved.error) throw new Error(resolved.error);
   if (!resolved.relPath || resolved.relPath === ".") throw new Error("A workspace-relative file path is required.");
   if (tools.ignore.isSensitive(resolved.relPath)) throw new Error("ACCESS_DENIED_SENSITIVE_FILE");
-  if (mustExist) {
-    let stat;
-    try {
-      stat = fs.statSync(resolved.absPath);
-    } catch {
-      throw new Error("NOT_FOUND");
-    }
-    if (!stat.isFile()) throw new Error("Only an exact file path can be allowed.");
+  let stat;
+  try {
+    stat = fs.statSync(resolved.absPath);
+  } catch {
+    if (mustExist) throw new Error("NOT_FOUND");
+    return resolved.relPath;
   }
+  if (!stat.isFile()) throw new Error("Only an exact file path can be allowed.");
   return resolved.relPath;
 }
 
@@ -118,5 +119,3 @@ export function cmdAllowList(args) {
   }
   for (const relPath of paths) console.log(relPath);
 }
-
-

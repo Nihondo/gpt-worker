@@ -12,6 +12,7 @@
   "scripts": {
     "check": "node scripts/check.mjs",
     "test": "node --test --import ./tests/helpers/text-modules.mjs tests/",
+    "coverage": "node --experimental-test-coverage --test --import ./tests/helpers/text-modules.mjs tests/",
     "verify": "npm run check && npm test",
     "deploy": "cd worker && npx wrangler deploy",
     "dry-run": "cd worker && npx wrangler deploy --dry-run"

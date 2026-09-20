@@ -12,6 +12,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { WorkspaceTools, parseGitHubRemote } from "../bridge/tools.mjs";
 import { BridgeLink } from "../bridge/link.mjs";
+import { allowedReadFile } from "../bridge/cli-settings.mjs";
 import { workspaceStateDir, recordsDir } from "../bridge/state.mjs";
 
 function git(cwd, args) {
@@ -117,6 +118,49 @@ describe("WorkspaceTools: path containment", () => {
   test("rejects a path-traversal directory listing outside the workspace", () => {
     const r = tools.listDirectory({ path: "../sibling" });
     assert.equal(r.error, "OUT_OF_WORKSPACE");
+  });
+});
+
+describe("allowedReadFile: CLI allow-read containment", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gw-allowed-read-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "gw-allowed-read-outside-"));
+  dirsToClean.push(root, outside);
+  fs.writeFileSync(path.join(root, "ignored.txt"), "ignored\n");
+  fs.mkdirSync(path.join(root, "directory"));
+  fs.writeFileSync(path.join(root, ".env"), "secret\n");
+  fs.writeFileSync(path.join(root, "id_rsa"), "private key\n");
+  fs.mkdirSync(path.join(root, ".ssh"));
+  fs.writeFileSync(path.join(root, ".ssh", "config"), "Host example\n");
+  fs.writeFileSync(path.join(outside, "outside.txt"), "outside\n");
+  fs.symlinkSync(path.join(outside, "outside.txt"), path.join(root, "outside-link"));
+
+  test("returns only a canonical workspace-relative regular file", () => {
+    assert.equal(allowedReadFile(root, "ignored.txt"), "ignored.txt");
+  });
+
+  test("rejects traversal, absolute paths, and symlinks that escape the workspace", () => {
+    assert.throws(() => allowedReadFile(root, "../outside.txt"), /OUT_OF_WORKSPACE/);
+    assert.throws(() => allowedReadFile(root, path.join(outside, "outside.txt")), /OUT_OF_WORKSPACE/);
+    assert.throws(() => allowedReadFile(root, "outside-link"), /OUT_OF_WORKSPACE/);
+  });
+
+  test("rejects sensitive paths even when they exist", () => {
+    for (const relPath of [".env", "id_rsa", ".ssh/config"]) {
+      assert.throws(() => allowedReadFile(root, relPath), /ACCESS_DENIED_SENSITIVE_FILE/);
+    }
+  });
+
+  test("rejects empty paths, workspace root, and directories", () => {
+    assert.throws(() => allowedReadFile(root, ""), /Usage:/);
+    assert.throws(() => allowedReadFile(root, "."), /workspace-relative file path/);
+    assert.throws(() => allowedReadFile(root, "directory"), /Only an exact file path/);
+  });
+
+  test("allows a missing relative path only while revoking an exception", () => {
+    assert.throws(() => allowedReadFile(root, "missing.txt"), /NOT_FOUND/);
+    assert.equal(allowedReadFile(root, "missing.txt", { mustExist: false }), "missing.txt");
+    assert.throws(() => allowedReadFile(root, "directory", { mustExist: false }), /Only an exact file path/);
+    assert.throws(() => allowedReadFile(root, ".env", { mustExist: false }), /ACCESS_DENIED_SENSITIVE_FILE/);
   });
 });
 
