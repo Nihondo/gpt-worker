@@ -494,12 +494,19 @@ function logFilePath(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), "bridge.log");
 }
 
+/** The state directory is durable even after a workspace was moved or removed.
+ * `logs --all` must use it directly instead of re-hashing a stale path from
+ * tokens.json. */
+export function logFilePathsFromStateDir(stateDir) {
+  const current = path.join(stateDir, "bridge.log");
+  return { current, previous: `${current}.1` };
+}
+
 /** Paths for the current log and its single rotated predecessor. These are
  * intentionally available without tokens or Worker connectivity: logs remain
  * the primary local diagnostic when the Worker or bridge is unavailable. */
 export function logFilePaths(workspaceRoot) {
-  const current = logFilePath(workspaceRoot);
-  return { current, previous: `${current}.1` };
+  return logFilePathsFromStateDir(workspaceStateDir(workspaceRoot));
 }
 
 function readTailBytes(filePath, lineCount) {
@@ -534,8 +541,12 @@ function readTailBytes(filePath, lineCount) {
  * Reading starts at the end of each file so an old 10MB generation is not
  * routinely loaded just to display a few diagnostics. */
 export function readLogTail(workspaceRoot, lines = 50) {
+  return readLogTailFromStateDir(workspaceStateDir(workspaceRoot), lines);
+}
+
+export function readLogTailFromStateDir(stateDir, lines = 50) {
   const count = Math.max(1, Math.min(10_000, Number.parseInt(lines, 10) || 50));
-  const { current, previous } = logFilePaths(workspaceRoot);
+  const { current, previous } = logFilePathsFromStateDir(stateDir);
   const currentText = readTailBytes(current, count);
   const currentLines = currentText.split("\n").filter(Boolean);
   if (currentLines.length >= count) return currentLines.slice(-count).join("\n") + "\n";

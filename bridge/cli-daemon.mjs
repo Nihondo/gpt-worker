@@ -5,7 +5,9 @@ import {
   checkPid,
   listProvisionedWorkspaces,
   logFilePaths,
+  logFilePathsFromStateDir,
   readLogTail,
+  readLogTailFromStateDir,
   removePidFile,
   writePidFile,
 } from "./state.mjs";
@@ -186,21 +188,21 @@ export async function cmdLogs(args) {
     process.exit(1);
   }
   const roots = args.all
-    ? listProvisionedWorkspaces().map((workspace) => ({ root: workspace.workspacePath || workspace.stateDir, label: workspace.workspacePath || workspace.stateDir }))
+    ? listProvisionedWorkspaces().map((workspace) => ({ stateDir: workspace.stateDir, label: workspace.workspacePath || workspace.stateDir }))
     : [{ root: workspaceRoot(args), label: null }];
   if (roots.length === 0) {
     console.log("No provisioned workspaces have local logs.");
     return;
   }
-  for (const { root, label } of roots) {
-    const paths = logFilePaths(root);
+  for (const { root, stateDir, label } of roots) {
+    const paths = stateDir ? logFilePathsFromStateDir(stateDir) : logFilePaths(root);
     if (args.path) {
       if (label) console.log(`${label}:`);
       console.log(paths.current);
       console.log(paths.previous);
       continue;
     }
-    const text = readLogTail(root, lines);
+    const text = stateDir ? readLogTailFromStateDir(stateDir, lines) : readLogTail(root, lines);
     if (label) console.log(`== ${label} ==`);
     process.stdout.write(text || "(no log entries)\n");
   }
@@ -220,20 +222,14 @@ export async function cmdStatus(args) {
   } catch (err) {
     console.log(`secret scan : NOT WORKING — ${String(err.message || err).split("\n")[0]}`);
   }
+  // Keep every Worker read in this diagnostic pass under one deadline. Without
+  // this, status + active_task + body-limit could each retry for 45 seconds.
+  const remoteDeadlineMs = Date.now() + 25_000;
+  const remoteOpts = { deadlineMs: remoteDeadlineMs };
   try {
-    printChatStatus(await loadChatSettings(cfg), cfg.workspaceId);
-  } catch {
-    console.log("chat        : unavailable");
-  }
-  try {
-    await migrateLegacyStateIfNeeded(root, cfg);
-  } catch (err) {
-    console.log(`migration   : failed — ${err.message || err}`);
-  }
-  try {
-    const remote = await localCall(cfg, "status");
+    const remote = await localCall(cfg, "status", {}, remoteOpts);
     if (remote.error) throw new WorkerCallError(remote.error);
-    const { task, taskWindow } = await remoteActiveState(cfg);
+    const { task, taskWindow } = await remoteActiveState(cfg, remoteOpts);
     console.log(`worker link : ${remote.connected ? "connected" : "not connected"}`);
     console.log(`queue       : to_gpt=${remote.pendingToGpt} to_local=${remote.pendingToLocal}`);
     console.log(`task        : ${task ? task.taskId : "(none)"}`);
@@ -245,17 +241,32 @@ export async function cmdStatus(args) {
       console.log(`last change : ${formatTimestamp(task.updatedAt)}`);
       console.log(`read window : ${formatWindow(taskWindow)}`);
     }
+    if (Date.now() < remoteDeadlineMs) {
+      try {
+        const limit = await localCall(cfg, "max_body_bytes_get", {}, remoteOpts);
+        if (limit.error) throw new WorkerCallError(limit.error);
+        console.log(`body limit  : ${limit.maxBodyBytes} bytes (range ${limit.floor}–${limit.ceiling})`);
+      } catch {
+        console.log("body limit  : (unknown)");
+      }
+    } else {
+      console.log("body limit  : (unknown — diagnostic deadline reached)");
+    }
     try {
-      const limit = await localCall(cfg, "max_body_bytes_get");
-      if (limit.error) throw new WorkerCallError(limit.error);
-      console.log(`body limit  : ${limit.maxBodyBytes} bytes (range ${limit.floor}–${limit.ceiling})`);
+      await migrateLegacyStateIfNeeded(root, cfg);
+    } catch (err) {
+      console.log(`migration   : failed — ${err.message || err}`);
+    }
+    try {
+      printChatStatus(await loadChatSettings(cfg), cfg.workspaceId);
     } catch {
-      console.log("body limit  : (unknown)");
+      console.log("chat        : unavailable");
     }
   } catch (err) {
     if (err instanceof WorkerUnreachableError) console.log(`worker link : UNREACHABLE — ${err.message}`);
     else if (err instanceof WorkerCallError) console.log(`worker link : error ${err.code}`);
     else console.log(`worker link : error ${err.message || err}`);
     console.log("task        : (unknown — the Worker is the only source of task state)");
+    console.log("chat        : unavailable (Worker settings could not be verified)");
   }
 }

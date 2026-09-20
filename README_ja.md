@@ -445,12 +445,12 @@ gpt-worker remove -w /path/to/project --yes
 
 | コマンド | 説明 |
 |---|---|
-| `gpt-worker init -w <dir> [--worker-url <https-url>] [--skip-preflight]` | プロジェクトを登録（初回は Worker をデプロイ）。Cloudflare 操作の前に Node・Git・秘密スキャナを確認します。`--worker-url` は既にデプロイ済みの Worker を使い、`--skip-preflight` はローカル前提チェックを省略します。 |
+| `gpt-worker init -w <dir> [--worker-url <https-url>] [--skip-preflight]` | プロジェクトを登録（初回は Worker をデプロイ）。Cloudflare 操作の前に Node・Git・秘密スキャナを確認します。`--worker-url` は期待する `*.workers.dev` エンドポイントを任意で指定するもので、現在の Wrangler プロジェクトがデプロイした Worker と一致しない限り管理シークレットを設定しません。`--skip-preflight` はローカル前提チェックを省略します。 |
 | `gpt-worker url [-w <dir>]` | WebUI（ダッシュボード）URL、OAuth Server URL、認証トークンを表示（`-w` を付けるとそのワークスペース専用 URL を表示） |
 | `gpt-worker start -w <dir>` | ローカルブリッジ（通信プロセス）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
-| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、ログパス、チャット紐付け、Worker 接続、アクティブタスクの詳細を確認 |
-| `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | ローカルブリッジログの末尾50行を表示（保持しているローテーションも対象）。`--path` は `tail -f` 用のパス表示、`--all` はローカル登録済み全ワークスペースを対象にします。Worker への接続は不要です。 |
+| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、ログパス、検証済みのチャット紐付け、Worker 接続、アクティブタスクの詳細を確認。Worker 障害時は未紐付けと誤表示せず利用不可として表示します。 |
+| `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | ローカルブリッジログの末尾50行を表示（保持しているローテーションも対象）。`--path` は `tail -f` 用のパス表示、`--all` は移動・削除済みのものも含むローカル登録済み全ワークスペースを対象にします。Worker への接続は不要です。 |
 | `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | ChatGPT に新しいタスクを依頼 |
 | `gpt-worker wait -w <dir>` | ChatGPT の応答（計画またはレビュー結果）を待機 |
 | `gpt-worker report [-w <dir>] [--title "<title>"]` | 実装結果やテスト内容を ChatGPT に報告 |

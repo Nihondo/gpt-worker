@@ -31,7 +31,7 @@ import {
   nudgeChatGpt,
 } from "../bridge/cli.mjs";
 import { COMMANDS, commandNames, formatHelp } from "../bridge/cli-help.mjs";
-import { extractWorkerUrl } from "../bridge/cli-provision.mjs";
+import { deployedWorkerUrl, extractWorkerUrl } from "../bridge/cli-provision.mjs";
 
 describe("parseArgs", () => {
   test("-w after a bare boolean flag is not swallowed as that flag's value", () => {
@@ -150,9 +150,15 @@ describe("extractWorkerUrl", () => {
     assert.equal(extractWorkerUrl(output), "https://my-worker.workers.dev");
   });
 
-  test("accepts a non-dashboard custom origin when no workers.dev URL is present", () => {
-    assert.equal(extractWorkerUrl("Published at https://worker.example.com/path"), "https://worker.example.com");
+  test("rejects arbitrary custom origins that could be documentation links", () => {
+    assert.equal(extractWorkerUrl("Published at https://worker.example.com/path"), null);
     assert.equal(extractWorkerUrl("only https://dash.cloudflare.com/example"), null);
+  });
+
+  test("requires --worker-url to match the Worker deployed by this Wrangler project", () => {
+    const output = "Published: https://gpt-worker.workers.dev";
+    assert.deepEqual(deployedWorkerUrl(output, "https://gpt-worker.workers.dev"), { workerUrl: "https://gpt-worker.workers.dev" });
+    assert.match(deployedWorkerUrl(output, "https://other-worker.workers.dev").error, /does not match/);
   });
 });
 

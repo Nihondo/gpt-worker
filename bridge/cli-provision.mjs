@@ -126,32 +126,46 @@ function runWrangler(args, { input, cwd } = {}) {
   });
 }
 
-/** Extract the public Worker origin from Wrangler output. Wrangler may print
- * dashboard and documentation links too, so prefer a workers.dev origin and
- * never mistake a Cloudflare dashboard URL for the deployed endpoint. */
+/** Extract the public Worker origin from Wrangler output. A deployment always
+ * identifies its workers.dev endpoint; accepting an arbitrary HTTPS URL here
+ * could mistake a documentation link for the Worker that receives ADMIN_TOKEN.
+ */
 export function extractWorkerUrl(deployOutput) {
   const urls = String(deployOutput || "").match(/https:\/\/[^\s)\]}>"']+/g) || [];
-  const candidates = [];
   for (const value of urls) {
     try {
       const url = new URL(value);
-      if (url.protocol !== "https:" || /(^|\.)dash\.cloudflare\.com$/i.test(url.hostname)) continue;
-      candidates.push(url.origin);
+      if (url.protocol === "https:" && /\.workers\.dev$/i.test(url.hostname)) return url.origin;
     } catch {
       /* not a usable URL */
     }
   }
-  return candidates.find((url) => /\.workers\.dev$/i.test(new URL(url).hostname)) || candidates[0] || null;
+  return null;
 }
 
 function suppliedWorkerUrl(value) {
   if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.pathname === "/" ? url.origin : null;
+    return url.protocol === "https:" && url.pathname === "/" && /\.workers\.dev$/i.test(url.hostname) ? url.origin : null;
   } catch {
     return null;
   }
+}
+
+/** Verify an optional operator-supplied endpoint against the Worker that this
+ * invocation actually deployed. `wrangler secret put` targets the deployment
+ * selected by the local Wrangler configuration, so this check must happen
+ * before handing its newly generated ADMIN_TOKEN to either endpoint. */
+export function deployedWorkerUrl(deployOutput, suppliedUrl = null) {
+  const deployedUrl = extractWorkerUrl(deployOutput);
+  if (!deployedUrl) return { error: "Could not find the deployed workers.dev URL in wrangler's output." };
+  if (suppliedUrl && suppliedUrl !== deployedUrl) {
+    return {
+      error: `--worker-url (${suppliedUrl}) does not match the Worker deployed by this Wrangler project (${deployedUrl}).`,
+    };
+  }
+  return { workerUrl: deployedUrl };
 }
 
 function printPreflight(result) {
@@ -197,32 +211,28 @@ export async function cmdInit(args) {
       console.error("Invalid --worker-url: provide an HTTPS origin such as https://example.workers.dev");
       process.exit(1);
     }
-    let workerUrl = overrideUrl;
-    if (!workerUrl) {
-      console.log("Checking Cloudflare login...");
-      try {
-        runWrangler(["whoami"]);
-      } catch {
-        console.error("Not logged in to Cloudflare. Run this in an interactive terminal first:\n  npx wrangler login\nThen re-run: gpt-worker init");
-        process.exit(1);
-      }
-
-      console.log("Deploying the relay Worker...");
-      let deployOut;
-      try {
-        deployOut = runWrangler(["deploy"]);
-      } catch (err) {
-        console.error("Deploy failed:\n" + (err.stdout || err.message || err));
-        process.exit(1);
-      }
-      workerUrl = extractWorkerUrl(deployOut);
-      if (!workerUrl) {
-        console.error("Could not find the deployed Worker URL in wrangler's output. Re-run with --worker-url https://your-worker.example:\n" + deployOut);
-        process.exit(1);
-      }
-    } else {
-      console.log(`Using supplied Worker URL: ${workerUrl}`);
+    console.log("Checking Cloudflare login...");
+    try {
+      runWrangler(["whoami"]);
+    } catch {
+      console.error("Not logged in to Cloudflare. Run this in an interactive terminal first:\n  npx wrangler login\nThen re-run: gpt-worker init");
+      process.exit(1);
     }
+
+    console.log("Deploying the relay Worker...");
+    let deployOut;
+    try {
+      deployOut = runWrangler(["deploy"]);
+    } catch (err) {
+      console.error("Deploy failed:\n" + (err.stdout || err.message || err));
+      process.exit(1);
+    }
+    const deployed = deployedWorkerUrl(deployOut, overrideUrl);
+    if (deployed.error) {
+      console.error(`${deployed.error}\nRefusing to set ADMIN_TOKEN for an endpoint that was not verified by this deployment.\n${deployOut}`);
+      process.exit(1);
+    }
+    const workerUrl = deployed.workerUrl;
     const adminToken = crypto.randomBytes(32).toString("hex");
 
     console.log("Setting the admin secret...");

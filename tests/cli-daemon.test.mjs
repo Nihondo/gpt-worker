@@ -75,7 +75,9 @@ test("status distinguishes an unreachable Worker from no active task", async () 
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /worker link\s+: UNREACHABLE/);
     assert.match(result.stdout, /task\s+: \(unknown — the Worker is the only source of task state\)/);
+    assert.match(result.stdout, /chat\s+: unavailable \(Worker settings could not be verified\)/);
     assert.doesNotMatch(result.stdout, /task\s+: \(none\)/);
+    assert.doesNotMatch(result.stdout, /chat\s+: unbound/);
   } finally {
     ws.cleanup();
   }
@@ -95,6 +97,21 @@ test("logs reads local entries without Worker connectivity and --path prints bot
     assert.equal(paths.code, 0, paths.stderr);
     assert.match(paths.stdout, /bridge\.log\n/);
     assert.match(paths.stdout, /bridge\.log\.1/);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test("logs --all reads the saved state directory after a workspace path moved", async () => {
+  const ws = makeWorkspace(null);
+  try {
+    appendLog(ws.root, "moved workspace diagnostic");
+    const tokenPath = path.join(workspaceStateDir(ws.root), "tokens.json");
+    const tokens = JSON.parse(fs.readFileSync(tokenPath, "utf8"));
+    fs.writeFileSync(tokenPath, JSON.stringify({ ...tokens, workspacePath: "/no/longer/here" }));
+    const logs = await ws.run(["logs", "--all"]);
+    assert.equal(logs.code, 0, logs.stderr);
+    assert.match(logs.stdout, /moved workspace diagnostic/);
   } finally {
     ws.cleanup();
   }
