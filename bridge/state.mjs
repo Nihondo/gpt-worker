@@ -433,7 +433,7 @@ export function clearGuidance(workspaceRoot) {
   }
 }
 
-// Owner-controlled exceptions for Git-ignored files. This is deliberately
+// Owner-controlled exceptions for Git-ignored paths. This is deliberately
 // outside the repository so untrusted workspace content cannot grant itself
 // access. It is access policy, not task/protocol state.
 function readAllowlistFilePath(workspaceRoot) {
@@ -454,13 +454,16 @@ function writeAllowedReadPaths(workspaceRoot, paths) {
 }
 
 export function allowReadPath(workspaceRoot, relPath) {
-  const paths = readAllowedReadPaths(workspaceRoot);
+  const opposite = relPath.endsWith("/") ? relPath.slice(0, -1) : `${relPath}/`;
+  const paths = readAllowedReadPaths(workspaceRoot).filter((p) => p !== opposite);
   if (!paths.includes(relPath)) paths.push(relPath);
   writeAllowedReadPaths(workspaceRoot, paths.sort());
 }
 
 export function denyReadPath(workspaceRoot, relPath) {
-  const paths = readAllowedReadPaths(workspaceRoot).filter((p) => p !== relPath);
+  const stripped = relPath.endsWith("/") ? relPath.slice(0, -1) : relPath;
+  const withSlash = `${stripped}/`;
+  const paths = readAllowedReadPaths(workspaceRoot).filter((p) => p !== stripped && p !== withSlash);
   writeAllowedReadPaths(workspaceRoot, paths);
 }
 

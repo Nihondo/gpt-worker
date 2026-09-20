@@ -13,7 +13,7 @@ const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-daemon-config-"));
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-daemon-state-"));
 process.env.GPT_WORKER_CONFIG_DIR = configDir;
 process.env.GPT_WORKER_STATE_ROOT = stateDir;
-const { appendLog, writeTokensAtomic, workspaceStateDir } = await import("../bridge/state.mjs?cli-daemon-test");
+const { allowReadPath, appendLog, writeTokensAtomic, workspaceStateDir } = await import("../bridge/state.mjs?cli-daemon-test");
 
 const ENV = { GPT_WORKER_CONFIG_DIR: configDir, GPT_WORKER_STATE_ROOT: stateDir, GPT_WORKER_RETRY_BASE_MS: "1" };
 const WORKSPACE_ID = "0123456789abcdef";
@@ -55,11 +55,33 @@ test("status shows local diagnostics, task timing, read gate, and body limit", a
     const result = await ws.run(["status"]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /read gate\s+: unknown \(bridge not running\)/);
+    assert.match(result.stdout, /read allowed:\s+\(none\)/);
     assert.ok(result.stdout.includes(`${workspaceStateDir(ws.root)}/bridge.log`));
     assert.match(result.stdout, /task\s+: t1/);
     assert.match(result.stdout, /waiting for\s+: GPT_PLAN/);
     assert.match(result.stdout, /read window\s+: active; expires/);
     assert.match(result.stdout, /body limit\s+: 16384 bytes/);
+  } finally {
+    await server.close();
+    ws.cleanup();
+  }
+});
+
+test("status displays allowed read files and directories", async () => {
+  const server = await startFakeWorker((call) => {
+    if (call.op === "status") return { body: { connected: true, pendingToGpt: 0, pendingToLocal: 0 } };
+    if (call.op === "active_task") return { body: { task: null } };
+    return { body: {} };
+  });
+  const ws = makeWorkspace(server);
+  try {
+    allowReadPath(ws.root, "config/test.json");
+    allowReadPath(ws.root, "fixtures/");
+    const result = await ws.run(["status"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /read allowed:\s+2/);
+    assert.match(result.stdout, /file\s+:\s+config\/test\.json/);
+    assert.match(result.stdout, /directory\s+:\s+fixtures\//);
   } finally {
     await server.close();
     ws.cleanup();

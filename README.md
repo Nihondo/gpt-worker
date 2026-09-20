@@ -276,20 +276,24 @@ gpt-worker guidance --clear -w .
 ```
 > 💬 **In chat:** "Set standing guidance for gpt-worker on this project: always write tests in Vitest, prefer functional components" — or "Clear the gpt-worker guidance for this project."
 
-### Allowing a Specific Git-Ignored File to Be Read
-Files listed in `.gitignore` are hidden from ChatGPT by default. You can explicitly allow direct reads for a specific file:
+### Allowing a Specific Git-Ignored File or Directory to Be Read
+Files listed in `.gitignore` are hidden from ChatGPT by default. You can explicitly allow direct reads for a specific file or directory:
 
 ```bash
 # Allow one exact file
 gpt-worker allow-read config/test-fixture.json -w .
 
-# List allowed files
+# Allow an entire directory (and its descendant files)
+gpt-worker allow-read fixtures -w .
+
+# List allowed paths
 gpt-worker allow-list -w .
 
 # Revoke permission
 gpt-worker deny-read config/test-fixture.json -w .
+gpt-worker deny-read fixtures -w .
 ```
-*Note*: Sensitive files (like `.env` or private keys) remain protected and cannot be unblocked.
+*Note*: Allowing a directory permits direct MCP `read_file` calls for its descendant files, but it remains hidden from directory browsing and search. Sensitive files (like `.env` or private keys) remain protected and cannot be unblocked even inside an allowed directory.
 
 ### Inspecting Configuration
 Inspect configured Project URLs and auto-submit preferences:
@@ -450,7 +454,7 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker url [-w <dir>]` | Display WebUI (dashboard) URL, OAuth Server URL, and owner token (`-w` displays URLs dedicated to that workspace) |
 | `gpt-worker start -w <dir>` | Start the local bridge process |
 | `gpt-worker stop -w <dir>` | Stop the local bridge process |
-| `gpt-worker status -w <dir>` | Check local bridge diagnostics, read-gate state, log path, verified chat binding, Worker link, and active task details. A Worker outage is reported as unavailable rather than as an unbound chat. |
+| `gpt-worker status -w <dir>` | Check local bridge diagnostics, read-gate state, read-allowed paths, log path, verified chat binding, Worker link, and active task details. A Worker outage is reported as unavailable rather than as an unbound chat. |
 | `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | Show the last 50 local bridge log lines (including the retained rotation). `--path` prints log paths for `tail -f`; `--all` covers every locally provisioned workspace, including a workspace later moved or deleted. Does not require Worker connectivity. |
 | `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | Queue a new task for ChatGPT |
 | `gpt-worker wait -w <dir>` | Wait for ChatGPT response (PLAN / DONE / instructions) |
@@ -465,9 +469,9 @@ Your Cloudflare Worker (deployed to your own account in Step 3) retains task tra
 | `gpt-worker chat-url "<url>" -w <dir>` | Save or inspect ChatGPT Project URL |
 | `gpt-worker chat <new\|attach\|status> ... -w <dir>` | Start a fresh chat, attach a manually opened conversation, or inspect chat recovery state |
 | `gpt-worker show-config [-w <dir>]` | Display browser settings without credentials |
-| `gpt-worker allow-read <file> -w <dir>` | Allow reading a specific Git-ignored file |
-| `gpt-worker allow-list -w <dir>` | List allowed Git-ignored files |
-| `gpt-worker deny-read <file> -w <dir>` | Revoke reading permission for a file |
+| `gpt-worker allow-read <path> -w <dir>` | Allow reading a specific Git-ignored file or directory |
+| `gpt-worker allow-list -w <dir>` | List allowed Git-ignored paths |
+| `gpt-worker deny-read <path> -w <dir>` | Revoke reading permission for a file or directory |
 | `gpt-worker state -w <dir>` | Display active task checkpoint in JSON |
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | Rotate authentication tokens (workspace GPT/link/CLI token or shared hub token) |
 | `gpt-worker workspaces` | List all registered workspaces |

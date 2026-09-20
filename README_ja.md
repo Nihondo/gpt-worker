@@ -275,20 +275,24 @@ gpt-worker guidance --clear -w .
 ```
 > 💬 **チャットでは:** 「このプロジェクトの gpt-worker のガイダンスを設定して：テストは必ず Vitest で書き、関数コンポーネントを優先すること」／「このプロジェクトの gpt-worker のガイダンスを解除して」
 
-### Git で無視されている特定ファイルを読み取らせたい
-`.gitignore` に含まれるファイルは通常 ChatGPT から隠されます。特定の 1 ファイルだけ読み取りを許可したい場合は次のように実行します。
+### Git で無視されている特定ファイル・ディレクトリを読み取らせたい
+`.gitignore` に含まれるファイルは通常 ChatGPT から隠されます。特定のファイルやディレクトリの読み取りを個別許可したい場合は次のように実行します。
 
 ```bash
 # 特定のファイルを許可
 gpt-worker allow-read config/test-fixture.json -w .
 
-# 許可中のファイル一覧を確認
+# ディレクトリ全体（配下ファイル含む）を許可
+gpt-worker allow-read fixtures -w .
+
+# 許可中のパス一覧を確認
 gpt-worker allow-list -w .
 
 # 許可を取り消す
 gpt-worker deny-read config/test-fixture.json -w .
+gpt-worker deny-read fixtures -w .
 ```
-※ `.env` や秘密鍵などの機密ファイルは、このコマンドを使っても安全のため保護され、読み取ることはできません。
+※ ディレクトリを許可した場合、配下ファイルへの直接読み取り (`read_file`) が可能になりますが、一覧表示 (`list_directory`) や検索 (`search_workspace`) からは引き続き隠蔽されます。また、`.env` や秘密鍵などの機密ファイルは、許可されたディレクトリ配下にあっても安全のため保護され、読み取ることはできません。
 
 ### 設定内容を確認したい
 登録されている Project URL や自動送信の設定を確認できます。
@@ -449,7 +453,7 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker url [-w <dir>]` | WebUI（ダッシュボード）URL、OAuth Server URL、認証トークンを表示（`-w` を付けるとそのワークスペース専用 URL を表示） |
 | `gpt-worker start -w <dir>` | ローカルブリッジ（通信プロセス）を起動 |
 | `gpt-worker stop -w <dir>` | ローカルブリッジを停止 |
-| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、ログパス、検証済みのチャット紐付け、Worker 接続、アクティブタスクの詳細を確認。Worker 障害時は未紐付けと誤表示せず利用不可として表示します。 |
+| `gpt-worker status -w <dir>` | ローカルブリッジの診断、読取ゲート、READ許可パス、ログパス、検証済みのチャット紐付け、Worker 接続、アクティブタスクの詳細を確認。Worker 障害時は未紐付けと誤表示せず利用不可として表示します。 |
 | `gpt-worker logs [-w <dir>] [-n <lines>] [--all] [--path]` | ローカルブリッジログの末尾50行を表示（保持しているローテーションも対象）。`--path` は `tail -f` 用のパス表示、`--all` は移動・削除済みのものも含むローカル登録済み全ワークスペースを対象にします。Worker への接続は不要です。 |
 | `gpt-worker task "<goal>" [-w <dir>] [--title "<title>"]` | ChatGPT に新しいタスクを依頼 |
 | `gpt-worker wait -w <dir>` | ChatGPT の応答（計画またはレビュー結果）を待機 |
@@ -464,9 +468,9 @@ gpt-worker remove -w /path/to/project --yes
 | `gpt-worker chat-url "<url>" -w <dir>` | ChatGPT Project の URL を登録・変更 |
 | `gpt-worker chat <new\|attach\|status> ... -w <dir>` | 新しいチャットの開始、手動で開いた会話の紐付け、または復旧状態の確認 |
 | `gpt-worker show-config [-w <dir>]` | ブラウザ連携の設定内容を確認 |
-| `gpt-worker allow-read <file> -w <dir>` | Git 無視ファイルの個別読み取りを許可 |
-| `gpt-worker allow-list -w <dir>` | 個別許可されたファイル一覧を表示 |
-| `gpt-worker deny-read <file> -w <dir>` | 個別読み取りの許可を取り消し |
+| `gpt-worker allow-read <path> -w <dir>` | Git 無視ファイル・ディレクトリの個別読み取りを許可 |
+| `gpt-worker allow-list -w <dir>` | 個別許可されたファイル・ディレクトリ一覧を表示 |
+| `gpt-worker deny-read <path> -w <dir>` | 個別読み取りの許可を取り消し |
 | `gpt-worker state -w <dir>` | 現在のタスク状態を JSON で確認 |
 | `gpt-worker rotate <--gpt\|--link\|--cli\|--hub> [-w <dir>]` | 認証トークン（ワークスペースの GPT/link/CLI トークン、または共有 hub トークン）を再生成 |
 | `gpt-worker workspaces` | 登録済みプロジェクト一覧を表示 |

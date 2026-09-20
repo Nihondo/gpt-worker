@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { WorkspaceTools, parseGitHubRemote } from "../bridge/tools.mjs";
 import { BridgeLink } from "../bridge/link.mjs";
 import { allowedReadFile } from "../bridge/cli-settings.mjs";
-import { workspaceStateDir, recordsDir } from "../bridge/state.mjs";
+import { workspaceStateDir, recordsDir, workspaceSlug } from "../bridge/state.mjs";
 
 function git(cwd, args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -131,11 +131,15 @@ describe("allowedReadFile: CLI allow-read containment", () => {
   fs.writeFileSync(path.join(root, "id_rsa"), "private key\n");
   fs.mkdirSync(path.join(root, ".ssh"));
   fs.writeFileSync(path.join(root, ".ssh", "config"), "Host example\n");
+  fs.mkdirSync(path.join(root, ".aws"));
+  fs.symlinkSync(path.join(root, ".ssh"), path.join(root, "ssh-link"));
   fs.writeFileSync(path.join(outside, "outside.txt"), "outside\n");
   fs.symlinkSync(path.join(outside, "outside.txt"), path.join(root, "outside-link"));
 
-  test("returns only a canonical workspace-relative regular file", () => {
+  test("returns only a canonical workspace-relative regular file or directory", () => {
     assert.equal(allowedReadFile(root, "ignored.txt"), "ignored.txt");
+    assert.equal(allowedReadFile(root, "directory"), "directory/");
+    assert.equal(allowedReadFile(root, "directory/"), "directory/");
   });
 
   test("rejects traversal, absolute paths, and symlinks that escape the workspace", () => {
@@ -145,22 +149,23 @@ describe("allowedReadFile: CLI allow-read containment", () => {
   });
 
   test("rejects sensitive paths even when they exist", () => {
-    for (const relPath of [".env", "id_rsa", ".ssh/config"]) {
+    for (const relPath of [".env", "id_rsa", ".ssh/config", ".ssh", ".ssh/", ".aws", "ssh-link"]) {
       assert.throws(() => allowedReadFile(root, relPath), /ACCESS_DENIED_SENSITIVE_FILE/);
     }
   });
 
-  test("rejects empty paths, workspace root, and directories", () => {
+  test("rejects empty paths and workspace root", () => {
     assert.throws(() => allowedReadFile(root, ""), /Usage:/);
     assert.throws(() => allowedReadFile(root, "."), /workspace-relative file path/);
-    assert.throws(() => allowedReadFile(root, "directory"), /Only an exact file path/);
   });
 
   test("allows a missing relative path only while revoking an exception", () => {
     assert.throws(() => allowedReadFile(root, "missing.txt"), /NOT_FOUND/);
     assert.equal(allowedReadFile(root, "missing.txt", { mustExist: false }), "missing.txt");
-    assert.throws(() => allowedReadFile(root, "directory", { mustExist: false }), /Only an exact file path/);
+    assert.equal(allowedReadFile(root, "missing-dir", { mustExist: false }), "missing-dir");
     assert.throws(() => allowedReadFile(root, ".env", { mustExist: false }), /ACCESS_DENIED_SENSITIVE_FILE/);
+    assert.equal(allowedReadFile(root, ".env", { mustExist: false, allowSensitive: true }), ".env");
+    assert.equal(allowedReadFile(root, ".ssh", { mustExist: false, allowSensitive: true }), ".ssh/");
   });
 });
 
@@ -225,29 +230,78 @@ describe("WorkspaceTools: Git-ignored paths", () => {
     assert.match(allowed.text, /ignored searchable value/);
   });
 
+  test("allows direct reads for descendant files when a directory is allowed", () => {
+    const denied = new WorkspaceTools(workspace).readFile({ path: "ignored-dir/hidden.js" });
+    assert.equal(denied.error, "ACCESS_DENIED_GITIGNORED_FILE");
+
+    const tools = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored-dir/"] });
+    const allowed = tools.readFile({ path: "ignored-dir/hidden.js" });
+    assert.equal(allowed.error, undefined);
+    assert.match(allowed.text, /const hidden = true;/);
+
+    // Directory marker covers descendants only, not the directory itself
+    assert.equal(tools.isExplicitlyAllowed("ignored-dir/hidden.js"), true);
+    assert.equal(tools.isExplicitlyAllowed("ignored-dir"), false);
+
+    // Directory marker does not match sibling directory or file with shared prefix
+    fs.mkdirSync(path.join(workspace, "ignored-dir-other"));
+    fs.writeFileSync(path.join(workspace, "ignored-dir-other", "sibling.txt"), "sibling content\n");
+    assert.equal(tools.isExplicitlyAllowed("ignored-dir-other/sibling.txt"), false);
+  });
+
   test("does not let an allowlist override sensitive-file protection", () => {
     fs.writeFileSync(path.join(workspace, ".env"), "not-a-secret\n");
     const result = new WorkspaceTools(workspace, { allowedReadPaths: () => [".env"] }).readFile({ path: ".env" });
     assert.equal(result.error, "ACCESS_DENIED_SENSITIVE_FILE");
+
+    // Even if parent directory is allowed, sensitive descendant remains denied
+    fs.writeFileSync(path.join(workspace, "ignored-dir", ".env"), "secret-in-dir\n");
+    const sensitiveInDir = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored-dir/"] }).readFile({ path: "ignored-dir/.env" });
+    assert.equal(sensitiveInDir.error, "ACCESS_DENIED_SENSITIVE_FILE");
   });
 
   test("keeps ignored paths out of browsing, search, language detection and scoped Git tools", () => {
-    const tools = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored.txt"] });
+    const tools = new WorkspaceTools(workspace, { allowedReadPaths: () => ["ignored.txt", "ignored-dir/"] });
     const listing = tools.listDirectory({ path: "" });
     assert.equal(listing.entries.some((entry) => entry.path === "ignored.txt" || entry.path === "ignored-dir"), false);
     assert.equal(tools.searchWorkspace({ query: "ignored searchable value" }).hits.length, 0);
+    assert.equal(tools.searchWorkspace({ query: "const hidden = true" }).hits.length, 0);
     assert.equal(tools.workspaceInfo().languages.includes("JavaScript"), false);
     assert.equal(tools.gitDiff({ path: "ignored.txt" }).error, "ACCESS_DENIED_GITIGNORED_FILE");
     assert.equal(tools.gitLog({ path: "ignored.txt" }).error, "ACCESS_DENIED_GITIGNORED_FILE");
   });
 
-  test("CLI stores and removes exact-file exceptions in private local state", () => {
+  test("CLI stores and removes exact-file and directory exceptions in private local state", () => {
     const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gw-allow-state-"));
     dirsToClean.push(stateRoot);
     assert.match(cli(["allow-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
     assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored.txt");
     assert.match(cli(["deny-read", "ignored.txt", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
-    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed files)");
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
+
+    // Directory allow and deny roundtrip
+    assert.match(cli(["allow-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "ignored-dir/");
+    assert.match(cli(["deny-read", "ignored-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
+
+    // Stale directory can be revoked even after deletion
+    const staleDir = path.join(workspace, "stale-dir");
+    fs.mkdirSync(staleDir);
+    assert.match(cli(["allow-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Allowed direct MCP reads/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "stale-dir/");
+    fs.rmdirSync(staleDir);
+    assert.match(cli(["deny-read", "stale-dir", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
+
+    // Sensitive markers can be revoked via CLI deny-read even while sensitive paths exist
+    const { dirName } = workspaceSlug(workspace);
+    const allowlistPath = path.join(stateRoot, dirName, "read-allowlist.json");
+    fs.mkdirSync(path.dirname(allowlistPath), { recursive: true });
+    fs.writeFileSync(allowlistPath, JSON.stringify({ paths: [".env", ".ssh/"] }) + "\n");
+    assert.match(cli(["deny-read", ".ssh", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.match(cli(["deny-read", ".env", "-w", workspace], { cwd: workspace, stateRoot }), /Removed direct-read permission/);
+    assert.equal(cli(["allow-list", "-w", workspace], { cwd: workspace, stateRoot }).trim(), "(no explicitly allowed paths)");
   });
 
   test("keeps Git-ignored overview files unavailable unless explicitly allowed", () => {

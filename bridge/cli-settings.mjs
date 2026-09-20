@@ -78,14 +78,14 @@ export async function cmdLimits(args) {
   console.log(`Saved. Message body limit is now ${result.maxBodyBytes} bytes.`);
 }
 
-export function allowedReadFile(root, input, { mustExist = true } = {}) {
-  if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-file> [-w <dir>]");
+export function allowedReadFile(root, input, { mustExist = true, allowSensitive = false } = {}) {
+  if (!input) throw new Error("Usage: gpt-worker allow-read|deny-read <workspace-relative-path> [-w <dir>]");
   if (path.isAbsolute(input)) throw new Error("OUT_OF_WORKSPACE");
   const tools = new WorkspaceTools(root);
   const resolved = tools.resolve(input);
   if (resolved.error) throw new Error(resolved.error);
-  if (!resolved.relPath || resolved.relPath === ".") throw new Error("A workspace-relative file path is required.");
-  if (tools.ignore.isSensitive(resolved.relPath)) throw new Error("ACCESS_DENIED_SENSITIVE_FILE");
+  if (!resolved.relPath || resolved.relPath === ".") throw new Error("A workspace-relative file path or directory path is required.");
+  if (!allowSensitive && tools.ignore.isSensitive(resolved.relPath)) throw new Error("ACCESS_DENIED_SENSITIVE_FILE");
   let stat;
   try {
     stat = fs.statSync(resolved.absPath);
@@ -93,9 +93,15 @@ export function allowedReadFile(root, input, { mustExist = true } = {}) {
     if (mustExist) throw new Error("NOT_FOUND");
     return resolved.relPath;
   }
-  if (!stat.isFile()) throw new Error("Only an exact file path can be allowed.");
+  if (stat.isDirectory()) {
+    if (!allowSensitive && tools.ignore.isSensitive(resolved.relPath, true)) throw new Error("ACCESS_DENIED_SENSITIVE_FILE");
+    return `${resolved.relPath}/`;
+  }
+  if (!stat.isFile()) throw new Error("Only a regular file or directory path can be allowed.");
   return resolved.relPath;
 }
+
+export const allowedReadPath = allowedReadFile;
 
 export function cmdAllowRead(args) {
   const root = workspaceRoot(args);
@@ -106,7 +112,7 @@ export function cmdAllowRead(args) {
 
 export function cmdDenyRead(args) {
   const root = workspaceRoot(args);
-  const relPath = allowedReadFile(root, args._[0], { mustExist: false });
+  const relPath = allowedReadFile(root, args._[0], { mustExist: false, allowSensitive: true });
   denyReadPath(root, relPath);
   console.log(`Removed direct-read permission for ${relPath}.`);
 }
@@ -114,7 +120,7 @@ export function cmdDenyRead(args) {
 export function cmdAllowList(args) {
   const paths = readAllowedReadPaths(workspaceRoot(args));
   if (paths.length === 0) {
-    console.log("(no explicitly allowed files)");
+    console.log("(no explicitly allowed paths)");
     return;
   }
   for (const relPath of paths) console.log(relPath);

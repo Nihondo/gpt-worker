@@ -6,6 +6,7 @@ import {
   listProvisionedWorkspaces,
   logFilePaths,
   logFilePathsFromStateDir,
+  readAllowedReadPaths,
   readLogTail,
   readLogTailFromStateDir,
   removePidFile,
@@ -208,6 +209,19 @@ export async function cmdLogs(args) {
   }
 }
 
+function printAllowedReads(root) {
+  const paths = readAllowedReadPaths(root);
+  if (paths.length === 0) {
+    console.log("read allowed: (none)");
+    return;
+  }
+  console.log(`read allowed: ${paths.length}`);
+  for (const p of paths) {
+    const label = p.endsWith("/") ? "directory" : "file";
+    console.log(`  ${label.padEnd(10)}: ${p}`);
+  }
+}
+
 export async function cmdStatus(args) {
   const root = workspaceRoot(args);
   const cfg = requireWorkspaceConfig(root);
@@ -215,6 +229,7 @@ export async function cmdStatus(args) {
   console.log(`workspace   : ${root}`);
   console.log(`local process: ${pidCheck.status}${pidCheck.info ? ` (pid ${pidCheck.info.pid})` : ""}`);
   console.log(`read gate   : ${readGateStatus(pidCheck)}`);
+  printAllowedReads(root);
   console.log(`log         : ${logFilePaths(root).current}`);
   try {
     const scanner = verifyScanner();

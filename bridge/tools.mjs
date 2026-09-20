@@ -155,7 +155,14 @@ export class WorkspaceTools {
   }
 
   isExplicitlyAllowed(relPath) {
-    return this.allowedReadPaths().includes(relPath);
+    const allowed = this.allowedReadPaths();
+    return allowed.some((target) => {
+      if (target === relPath) return true;
+      if (target.endsWith("/")) {
+        return relPath.startsWith(target);
+      }
+      return false;
+    });
   }
 
   readPolicy(relPath, { directRead = false } = {}) {
