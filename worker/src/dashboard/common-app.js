@@ -146,17 +146,20 @@ export function mcpToolLabel(name) {
 }
 
 // Result kinds are shown as words, not only as a color, so they read the same
-// for everyone and in a printout.
+// for everyone and in a printout. `label` is the badge text: the badge column is
+// 38px wide (dashboard.css), which fits about four characters, so it is a short
+// form. `word` is the full wording, for places with room (the detail pane).
 var MCP_OUTCOMES = {
-  success: { label: "OK", className: "mcp-outcome-success" },
-  gate_denied: { label: "Blocked", className: "mcp-outcome-gate" },
-  access_denied: { label: "Denied", className: "mcp-outcome-denied" },
-  error: { label: "NG", className: "mcp-outcome-error" },
-  mixed: { label: "Mix", className: "mcp-outcome-mixed" },
+  success: { label: "OK", word: "OK", className: "mcp-outcome-success" },
+  gate_denied: { label: "Gate", word: "Blocked", className: "mcp-outcome-gate" },
+  access_denied: { label: "Deny", word: "Denied", className: "mcp-outcome-denied" },
+  error: { label: "NG", word: "NG", className: "mcp-outcome-error" },
+  mixed: { label: "Mix", word: "Mix", className: "mcp-outcome-mixed" },
 };
 
 export function mcpOutcomeInfo(outcome) {
-  return MCP_OUTCOMES[outcome] || { label: String(outcome || "Unknown"), className: "mcp-outcome-error" };
+  var unknown = String(outcome || "Unknown");
+  return MCP_OUTCOMES[outcome] || { label: unknown, word: unknown, className: "mcp-outcome-error" };
 }
 
 var MCP_CODE_TEXT = {

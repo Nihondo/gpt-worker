@@ -129,8 +129,8 @@ describe("opening the tab", () => {
     await t.openTab();
 
     const [gate, denied, error, mixed] = t.rows().map(rowText);
-    assert.match(gate, /Blocked/);
-    assert.match(denied, /Denied/);
+    assert.match(gate, /Gate/);
+    assert.match(denied, /Deny/);
     assert.match(error, /NG/);
     assert.match(mixed, /Mix/);
     assert.match(mixed, /Batch/);
@@ -153,7 +153,7 @@ describe("opening the tab", () => {
     const t = await setup(() => page([ev({ outcome: "access_denied", outcomeCode: "OUT_OF_WORKSPACE" })]));
     await t.openTab();
     const [badge] = withClass(t.rows()[0], "mcp-outcome");
-    assert.equal(badge.textContent, "Denied");
+    assert.equal(badge.textContent, "Deny");
     assert.ok(badge.hasClass("mcp-outcome-denied"));
   });
 });
@@ -471,7 +471,7 @@ describe("grouping repeated reads", () => {
     const texts = t.rows().map(rowText);
     assert.equal(texts.length, 4);
     assert.match(texts[0], /Read file × 3/);
-    assert.match(texts[1], /Denied/);
+    assert.match(texts[1], /Deny/);
     assert.doesNotMatch(texts[2], /×/);
     assert.doesNotMatch(texts[3], /×/);
 
@@ -528,7 +528,7 @@ describe("grouping repeated reads", () => {
 
     assert.equal(t.dom.threePane.hasClass("detail-open"), false);
     assert.ok(t.dom.focused(), "something was focused");
-    assert.match(rowText(t.dom.focused()), /Denied/);
+    assert.match(rowText(t.dom.focused()), /Deny/);
   });
 });
 
@@ -574,7 +574,7 @@ describe("the detail pane", () => {
     const calls = withClass(t.node("mcp-detail"), "mcp-call-row").map((row) => row.textContent);
     assert.equal(calls.length, 3);
     assert.match(calls[0], /OK.*Read file.*a\.js/);
-    assert.match(calls[1], /Denied.*Read file.*\.env.*Sensitive file/);
+    assert.match(calls[1], /Deny.*Read file.*\.env.*Sensitive file/);
     assert.match(calls[2], /NG.*Search.*workspace search.*took too long/);
     assert.match(t.node("mcp-detail").textContent, /Calls in this batch/);
   });
@@ -652,12 +652,24 @@ describe("presentation helpers (common-app.js)", () => {
     }
   });
 
+  test("badge labels are short enough for the 38px badge column; the full word is kept for the detail pane", () => {
+    // "Denied" and "Blocked" used to spill out of the badge. Four characters fit with room to spare
+    // (five touch the edges), so a longer label has to go in `word`, not `label`.
+    const kinds = { success: "OK", gate_denied: "Blocked", access_denied: "Denied", error: "NG", mixed: "Mix" };
+    for (const [outcome, word] of Object.entries(kinds)) {
+      const info = lib.mcpOutcomeInfo(outcome);
+      assert.ok(info.label.length <= 4, `${outcome}: badge label "${info.label}" is too long for the badge`);
+      assert.equal(info.word, word);
+    }
+  });
+
   test("labels, durations and codes have safe fallbacks", () => {
     assert.equal(lib.mcpToolLabel("read_file"), "Read file");
     assert.equal(lib.mcpToolLabel("brand_new_tool"), "brand_new_tool");
     assert.equal(lib.mcpToolLabel(undefined), "Unknown tool");
-    assert.deepEqual(lib.mcpOutcomeInfo("access_denied"), { label: "Denied", className: "mcp-outcome-denied" });
+    assert.deepEqual(lib.mcpOutcomeInfo("access_denied"), { label: "Deny", word: "Denied", className: "mcp-outcome-denied" });
     assert.equal(lib.mcpOutcomeInfo("something_new").label, "something_new");
+    assert.equal(lib.mcpOutcomeInfo("something_new").word, "something_new");
     assert.equal(lib.mcpCodeText("NO_ACTIVE_TASK").startsWith("No active task"), true);
     assert.equal(lib.mcpCodeText("SOME_NEW_CODE"), "SOME_NEW_CODE");
     assert.equal(lib.mcpCodeText(null), null);

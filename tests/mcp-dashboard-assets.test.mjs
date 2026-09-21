@@ -135,8 +135,8 @@ describe("stylesheet", () => {
   test("outcome badges never rely on color alone: the label text is rendered and the base rule sets contrast text", () => {
     assert.match(CSS, /\.mcp-outcome \{ color: #fff; \}/);
     assert.match(CSS, /\.mcp-outcome \{ color: #10111c; \}/);
-    assert.match(COMMON_JS, /label: "Denied"/);
-    assert.match(COMMON_JS, /label: "Blocked"/);
+    assert.match(COMMON_JS, /label: "Deny", word: "Denied"/);
+    assert.match(COMMON_JS, /label: "Gate", word: "Blocked"/);
   });
 
   test("no external resources", () => {

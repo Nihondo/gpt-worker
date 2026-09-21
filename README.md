@@ -383,7 +383,7 @@ The **MCP Access** tab lists every tool call ChatGPT made through the connector,
 
 - **What**: a plain-language tool name (Read file, Git diff, Search, Batch, …) with the raw tool name beneath it.
 - **Target**: the file or directory path, or a fixed description such as "workspace search" or "PLAN · iteration 2".
-- **Result**, as a text badge (never color alone): **OK**, **Blocked** (no active task, or the read window closed — see *Time-Bounded Access*), **Denied** (a sensitive, Git-ignored, or out-of-workspace file), **Error**, or **Mixed** (a batch with different outcomes; open it to see each call).
+- **Result**, as a text badge (never color alone): **OK**, **Gate** (blocked: no active task, or the read window closed — see *Time-Bounded Access*), **Deny** (denied: a sensitive, Git-ignored, or out-of-workspace file), **NG** (an error), or **Mix** (a batch with different outcomes; open it to see each call). The badge is kept short to fit; the detail pane spells the result out ("Blocked", "Denied").
 - **Time taken** and the **task** it belonged to.
 
 To keep the list readable, consecutive successful file reads of the same task (within 30 seconds of each other) fold into one "Read file × N" row. Denials, blocks, and errors are never folded. Untick **Group repeated reads** to see every call. The **Tool** and **Result** filters apply to the whole history, not just the loaded page — use **Load more** to go further back. The tab works the same in the per-workspace and hub dashboards.

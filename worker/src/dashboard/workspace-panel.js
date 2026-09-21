@@ -432,7 +432,7 @@ export function createWorkspacePanel(adapter) {
       mcpDetailRow(dl, "When", fmtTime(e.startedAt));
       mcpDetailRow(dl, "Duration", formatDuration(e.durationMs));
       mcpDetailRow(dl, "Target", e.target);
-      mcpDetailRow(dl, "Result", outcome.label + (e.outcomeCode ? " — " + mcpCodeText(e.outcomeCode) : ""));
+      mcpDetailRow(dl, "Result", outcome.word + (e.outcomeCode ? " — " + mcpCodeText(e.outcomeCode) : ""));
     }
     mcpDetailRow(dl, "Task", e.taskId ? e.taskId : "none was active");
     mcpDetailRow(dl, "Connector", e.connector === "shared" ? "Shared connector" : "Dedicated connector");
