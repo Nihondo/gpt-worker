@@ -17,7 +17,7 @@
 import os from "node:os";
 import { WorkspaceTools } from "./tools.mjs";
 import { appendLog } from "./state.mjs";
-import { sanitizeText, redactLocalPaths } from "./sanitize.mjs";
+import { sanitizeText, redactLocalPaths, PreScanned } from "./sanitize.mjs";
 
 const MIN_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 30_000;
@@ -31,6 +31,7 @@ const GATED_METHODS = new Set([
   "git_log",
   "execution_output",
   "workspace_batch",
+  "workspace_bundle",
 ]);
 
 // The three values the Worker may stamp onto a relay as __gptWorkerTaskWindow.
@@ -78,6 +79,8 @@ function describeResultForLog(result) {
 function collectStringLeaves(value, out) {
   if (typeof value === "string") {
     out.push(value);
+  } else if (value instanceof PreScanned) {
+    // Already scanned before packing; see PreScanned in sanitize.mjs.
   } else if (Array.isArray(value)) {
     for (const v of value) collectStringLeaves(v, out);
   } else if (value && typeof value === "object") {
@@ -91,6 +94,7 @@ function collectStringLeaves(value, out) {
  *  source object). Never mutates the original result. */
 function rebuildWithLeaves(value, iter) {
   if (typeof value === "string") return iter.next().value;
+  if (value instanceof PreScanned) return value;
   if (Array.isArray(value)) return value.map((v) => rebuildWithLeaves(v, iter));
   if (value && typeof value === "object") {
     const out = {};
@@ -162,6 +166,24 @@ function sanitizeResult(result, pathContext) {
   maskedLeaves = maskedLeaves.map((s) => redactLocalPaths(s, pathContext));
   const value = rebuildWithLeaves(result, maskedLeaves[Symbol.iterator]());
   return { value, redacted, rules, heavilyRedacted };
+}
+
+/** Turns each PreScanned in a sanitized result into its wire form and totals
+ *  the masking its pre-scan applied. Runs after sanitizeResult(), which passes
+ *  PreScanned values through untouched. */
+function expandPreScanned(value, tally) {
+  if (value instanceof PreScanned) {
+    tally.redacted += value.redacted;
+    for (const id of value.rules) tally.rules.add(id);
+    return { base64: value.base64, mimeType: value.mimeType, filename: value.filename };
+  }
+  if (Array.isArray(value)) return value.map((v) => expandPreScanned(v, tally));
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = expandPreScanned(value[k], tally);
+    return out;
+  }
+  return value;
 }
 
 export class BridgeLink {
@@ -378,6 +400,8 @@ export class BridgeLink {
         return this.tools.executionOutput(params);
       case "workspace_batch":
         return this.executeBatch(params);
+      case "workspace_bundle":
+        return this.tools.workspaceBundle(params);
       default:
         return { status: "unknown_method", method };
     }
@@ -450,9 +474,10 @@ export class BridgeLink {
     let payload;
     try {
       const sanitized = sanitizeResult(result, this.pathContext);
-      let value = sanitized.value;
-      if (sanitized.redacted > 0 && value && typeof value === "object" && !Array.isArray(value)) {
-        value = { ...value, sanitize: { redacted: sanitized.redacted, rules: sanitized.rules, heavilyRedacted: sanitized.heavilyRedacted } };
+      const tally = { redacted: sanitized.redacted, rules: new Set(sanitized.rules) };
+      let value = expandPreScanned(sanitized.value, tally);
+      if (tally.redacted > 0 && value && typeof value === "object" && !Array.isArray(value)) {
+        value = { ...value, sanitize: { redacted: tally.redacted, rules: [...tally.rules], heavilyRedacted: sanitized.heavilyRedacted } };
       }
       payload = ok ? { rid, ok: true, result: value } : { rid, ok: false, error: value };
     } catch (err) {

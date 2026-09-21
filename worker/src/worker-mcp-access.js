@@ -31,7 +31,7 @@ export const MAX_BATCH_DETAIL_CALLS = 8;
  *  tests/mcp-access.test.mjs keeps this equal to tools.json plus list_workspaces. */
 export const MCP_TOOL_NAMES = [
   "workspace_info", "workspace_guidance", "workspace_overview", "list_directory", "read_file",
-  "search_workspace", "git_status", "git_diff", "git_log", "execution_output", "workspace_batch",
+  "search_workspace", "git_status", "git_diff", "git_log", "execution_output", "workspace_batch", "workspace_bundle",
   "operating_instructions", "next_task", "submit_plan", "set_title", "task_history", "list_workspaces",
 ];
 
@@ -138,6 +138,8 @@ export function summarizeTarget(tool, args) {
       return "AGENTS.md / CLAUDE.md";
     case "workspace_guidance":
       return "workspace guidance";
+    case "workspace_bundle":
+      return "workspace archive";
     case "workspace_batch":
       return Array.isArray(a.calls) ? `${a.calls.length} call${a.calls.length === 1 ? "" : "s"}` : "batch";
     case "next_task":

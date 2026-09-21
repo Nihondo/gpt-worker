@@ -37,6 +37,13 @@ export function openTimeoutMs() {
   return override() ?? 10_000;
 }
 
+/** `tar` packing a workspace_bundle archive. Bounded because it blocks the
+ *  daemon's event loop like every other synchronous child, but generous
+ *  compared with the per-path probes: it is one process over the whole tree. */
+export function archiveTimeoutMs() {
+  return override() ?? 30_000;
+}
+
 /** True when execFileSync killed the child because `timeout` elapsed. Node
  *  reports that as an error with code ETIMEDOUT. */
 export function isExecTimeout(err) {

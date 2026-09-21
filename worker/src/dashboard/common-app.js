@@ -130,6 +130,7 @@ var MCP_TOOL_LABELS = {
   git_diff: "Git diff",
   git_log: "Git log",
   execution_output: "Execution output",
+  workspace_bundle: "Workspace bundle",
   workspace_info: "Workspace info",
   workspace_overview: "Project overview",
   workspace_guidance: "Guidance",

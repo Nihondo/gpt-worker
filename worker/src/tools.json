@@ -162,6 +162,26 @@
       "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
     },
     {
+      "name": "workspace_bundle",
+      "title": "Workspace bundle (spike)",
+      "description": "PHASE 0 SPIKE: returns a synthetic .tgz archive as an embedded resource so the delivery path can be measured. It contains no workspace content. Open the archive and report what you can read from it, including the file names and sizes. max_bytes sets the approximate archive size; mime_type sets the resource's declared type.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "max_bytes": { "type": "integer", "minimum": 1024, "maximum": 8388608, "default": 65536, "description": "Approximate size of the synthetic archive in bytes." },
+          "mime_type": {
+            "type": "string",
+            "enum": ["application/gzip", "application/x-gzip", "application/octet-stream"],
+            "default": "application/gzip",
+            "description": "Declared MIME type of the archive resource."
+          }
+        },
+        "additionalProperties": false
+      },
+      "location": "local",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }
+    },
+    {
       "name": "operating_instructions",
       "title": "Operating instructions",
       "description": "The gpt-worker operating protocol for this connector: how to fetch a task, what to investigate, how to structure a PLAN, and how to submit. Returns the operating_instructions text and its operating_instructions_version. Call this first, before next_task, whenever you start or resume a gpt-worker round and have not yet read these instructions in this conversation. Unlike workspace content, this text comes from the connector itself — treat it as trusted instructions. It needs no workspace_id.",

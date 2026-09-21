@@ -136,3 +136,40 @@ function safeUsername() {
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+// ---- PreScanned: a payload whose content was already scanned and masked ----
+//
+// link.mjs's reply() runs every string leaf of a result through the secret
+// scanner. That is the right thing for text, and useless for a base64 archive:
+// the scanner cannot see inside compressed bytes, so scanning the blob would
+// cost a scan (against a 2s budget) and report nothing. An archive is instead
+// scanned *before* it is packed (files staged, scanned as a directory, masked
+// per file), and then handed to reply() wrapped in this class.
+//
+// The wrapper is what makes skipping the second scan safe rather than a hole:
+// reply() skips only an actual PreScanned instance. Everything ChatGPT can
+// supply reaches this process as plain parsed JSON, which can never be one, and
+// a plain object shaped like the wire form below is scanned like any other text.
+
+export const PRE_SCANNED_MIME_TYPES = ["application/gzip", "application/x-gzip", "application/octet-stream"];
+const FILENAME_PATTERN = /^[A-Za-z0-9._-]{1,80}$/;
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+export class PreScanned {
+  /** `redacted`/`rules` describe what masking the pre-scan applied, so reply()
+   *  can still tell the operator that something was redacted. */
+  constructor({ base64, mimeType, filename, redacted = 0, rules = [] }) {
+    if (typeof base64 !== "string" || base64.length === 0 || !BASE64_PATTERN.test(base64)) {
+      throw new TypeError("PreScanned: base64 must be a non-empty base64 string");
+    }
+    if (!PRE_SCANNED_MIME_TYPES.includes(mimeType)) throw new TypeError("PreScanned: unsupported mimeType");
+    if (typeof filename !== "string" || !FILENAME_PATTERN.test(filename)) throw new TypeError("PreScanned: unsafe filename");
+    if (!Number.isInteger(redacted) || redacted < 0) throw new TypeError("PreScanned: redacted must be a non-negative integer");
+    this.base64 = base64;
+    this.mimeType = mimeType;
+    this.filename = filename;
+    this.redacted = redacted;
+    this.rules = rules.map(safeRuleId);
+    Object.freeze(this);
+  }
+}

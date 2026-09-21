@@ -115,6 +115,45 @@ function toolOk(data) {
   return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], structuredContent: data };
 }
 
+// A workspace_bundle archive is delivered as an MCP embedded resource, with the
+// metadata in the text part and structuredContent. The archive itself is kept
+// out of structuredContent on purpose: toolOk() puts the same data in both, so
+// carrying the blob there would double the payload. The local bridge scanned
+// and masked the archive before packing it (bridge/sanitize.mjs, PreScanned),
+// so this only checks that what arrives has the expected shape.
+const BUNDLE_MIME_TYPES = new Set(["application/gzip", "application/x-gzip", "application/octet-stream"]);
+const BUNDLE_FILENAME = /^[A-Za-z0-9._-]{1,80}$/;
+const BUNDLE_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function toolBlob(meta, { base64, mimeType, filename }) {
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(meta, null, 2) },
+      { type: "resource", resource: { uri: `gpt-worker://bundle/${filename}`, mimeType, blob: base64 } },
+    ],
+    structuredContent: meta,
+  };
+}
+
+/** Result of a workspace_bundle relay. A plain payload (a gate refusal, an
+ *  error, an argument problem) is an ordinary tool result; only a well-formed
+ *  `bundle` becomes a blob. Anything malformed is an error, never forwarded. */
+function bundleToolResult(result) {
+  if (!result || typeof result !== "object" || !("bundle" in result)) return toolOk(result);
+  const { bundle, ...meta } = result;
+  const valid =
+    bundle &&
+    typeof bundle === "object" &&
+    typeof bundle.base64 === "string" &&
+    bundle.base64.length > 0 &&
+    BUNDLE_BASE64.test(bundle.base64) &&
+    BUNDLE_MIME_TYPES.has(bundle.mimeType) &&
+    typeof bundle.filename === "string" &&
+    BUNDLE_FILENAME.test(bundle.filename);
+  if (!valid) return toolError("INTERNAL_ERROR", "The local bridge returned a malformed bundle.");
+  return toolBlob(meta, bundle);
+}
+
 function toolError(code, message) {
   const data = { error: code, message };
   return { content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: true };
@@ -431,6 +470,7 @@ function createBridgeMcp({
           __gptWorkerTaskWindow: windowState,
         });
         if (!relay.ok) return relayFailureToolError(relay.error);
+        if (name === "workspace_bundle") return bundleToolResult(relay.result);
         return toolOk(relay.result);
       } catch (err) {
         return toolError("INTERNAL_ERROR", String((err && err.message) || err));

@@ -6,10 +6,13 @@
 // SENSITIVE/NOISE pattern lists (see ignore.mjs).
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { IgnoreRules } from "./ignore.mjs";
-import { gitTimeoutMs, isExecTimeout } from "./exec-limits.mjs";
+import { gitTimeoutMs, archiveTimeoutMs, isExecTimeout } from "./exec-limits.mjs";
+import { PreScanned, PRE_SCANNED_MIME_TYPES } from "./sanitize.mjs";
 import { recordsDir, appendLog, readAllowedReadPaths, readDeniedReadPaths } from "./state.mjs";
 
 export const UNTRUSTED_NOTE =
@@ -22,6 +25,12 @@ const MAX_SEARCH_HITS = 100;
 const MAX_DIFF_BYTES = 128 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024;
 const OVERVIEW_FILES = ["AGENTS.md", "CLAUDE.md"];
+
+// PHASE 0 SPIKE (docs/plans/pending/workspace-bundle-tool.md): workspaceBundle()
+// below returns a synthetic archive, not workspace content, so the delivery
+// path (Worker -> ChatGPT) can be measured before any collection logic exists.
+const SPIKE_DEFAULT_BYTES = 64 * 1024;
+const SPIKE_MAX_BYTES = 8 * 1024 * 1024;
 
 let rgAvailableCache = null;
 function rgAvailable() {
@@ -241,6 +250,56 @@ export class WorkspaceTools {
       };
     });
     return { files, note: UNTRUSTED_NOTE };
+  }
+
+  /** PHASE 0 SPIKE — returns a synthetic .tgz (a few small text files plus
+   *  incompressible padding, so the archive is about `max_bytes` long) wrapped
+   *  in PreScanned, to measure whether ChatGPT can open a blob delivered as an
+   *  MCP embedded resource and where the size limits on the path are.
+   *
+   *  Deliberately reads nothing from the workspace: nothing here needs the
+   *  containment / sensitive / gitignore checks yet. Phase 1 replaces the body
+   *  with the real collect -> stage -> scan -> mask -> pack pipeline and must
+   *  keep this method's result shape (`bundle` is a PreScanned). */
+  workspaceBundle(args = {}) {
+    const requested = args.max_bytes === undefined ? SPIKE_DEFAULT_BYTES : args.max_bytes;
+    if (!Number.isInteger(requested) || requested < 1024 || requested > SPIKE_MAX_BYTES) {
+      return { error: "INVALID_ARGS", message: `max_bytes must be an integer between 1024 and ${SPIKE_MAX_BYTES}.` };
+    }
+    const mimeType = args.mime_type === undefined ? "application/gzip" : args.mime_type;
+    if (!PRE_SCANNED_MIME_TYPES.includes(mimeType)) {
+      return { error: "INVALID_ARGS", message: `mime_type must be one of: ${PRE_SCANNED_MIME_TYPES.join(", ")}.` };
+    }
+    this.log("workspace_bundle", `spike ${requested}`);
+
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-worker-bundle-"));
+    try {
+      const top = path.join(staging, "spike-bundle");
+      fs.mkdirSync(top, { mode: 0o700 });
+      fs.writeFileSync(path.join(top, "BUNDLE.md"), "# Spike bundle\n\nSynthetic archive for delivery testing. Contains no workspace content.\n");
+      fs.writeFileSync(path.join(top, "hello.txt"), "hello from gpt-worker\n");
+      fs.writeFileSync(path.join(top, "nested-a.txt"), "first line\nsecond line\n");
+      fs.writeFileSync(path.join(top, "padding.bin"), crypto.randomBytes(Math.max(requested - 1024, 0)));
+      const archive = path.join(staging, "out.tgz");
+      execFileSync("tar", ["-czf", archive, "-C", staging, "spike-bundle"], {
+        stdio: ["ignore", "ignore", "ignore"],
+        timeout: archiveTimeoutMs(),
+        killSignal: "SIGKILL",
+      });
+      const bytes = fs.readFileSync(archive);
+      return {
+        spike: true,
+        filesReturned: 4,
+        archiveBytes: bytes.length,
+        note: UNTRUSTED_NOTE,
+        bundle: new PreScanned({ base64: bytes.toString("base64"), mimeType, filename: "spike-bundle.tgz" }),
+      };
+    } catch (err) {
+      if (isExecTimeout(err)) return { error: "ARCHIVE_TIMEOUT" };
+      return { error: "ARCHIVE_FAILED" };
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
   }
 
   gitIdentity() {
