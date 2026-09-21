@@ -58,6 +58,33 @@ GPT's reply to it:
 responding to; the Worker rejects a mismatch with `NO_MATCHING_TASK` so a
 stale or duplicated reply can never be misapplied to the wrong round.
 
+## MCP access audit (dashboard metadata)
+
+Every MCP tool call — dedicated connector or shared connector (via the hub's
+binding-only `/hub` relay) — is recorded by the workspace's Durable Object as one
+row of metadata for the Web dashboard's **MCP Access** tab. This is a
+side-record only: **it never changes an MCP response**, and a failure to record
+is swallowed rather than surfaced to ChatGPT.
+
+Stored per call: start time, duration, tool name, connector kind
+(`dedicated`/`shared`), the active task ID at call time (or none), a *safe target*
+(a workspace-relative path, or a fixed label such as `workspace search`,
+`PLAN · iteration N`, `N calls`), a result class, a short reason code, and — for
+`workspace_batch` — up to 8 per-call summaries in the same shape.
+
+Result classes: `success`; `gate_denied` (`no_active_task` / `task_window_expired`);
+`access_denied` (`ACCESS_DENIED_*` and `OUT_OF_WORKSPACE` errors); `error` (any other
+tool error, including relay failures); `mixed` (a batch whose
+calls did not all end the same way). A `partial: true` result is a success with
+code `PARTIAL`.
+
+Never stored: file contents, diffs, search queries/globs/hits, message bodies or
+titles, result or error message text, raw arguments/results, secrets, absolute or
+outside-workspace paths. Every stored string is drawn from a closed set (known tool
+names, known reason codes — an unknown code is stored as `UNKNOWN`), never copied
+from a result. Retention: 24 hours and at most 1000 rows per workspace (a live activity view,
+not a long-term audit log).
+
 ## Task and message titles
 
 Each task has optional durable `title` metadata for compact dashboard rows.

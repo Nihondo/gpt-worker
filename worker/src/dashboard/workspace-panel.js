@@ -1,7 +1,8 @@
 import {
-  clearEl, el, fmtTime, formatTimelineTime, messageComparator, messageListLabel,
-  messageStage, mergeRows, renderStageIndicator, taskComparator, taskHistoryKindClass,
-  taskListLabel, taskStage,
+  clearEl, el, fmtTime, formatDuration, formatTimelineTime, groupMcpEvents, mcpCodeText,
+  mcpComparator, mcpEventLine, mcpOutcomeInfo, mcpTaskLabel, mcpToolLabel, messageComparator,
+  messageListLabel, messageStage, mergeRows, renderStageIndicator, taskComparator,
+  taskHistoryKindClass, taskListLabel, taskStage,
 } from "./common-app.js";
 
 // Selected-workspace controller shared by the direct workspace and hub shells.
@@ -10,10 +11,13 @@ import {
 export function createWorkspacePanel(adapter) {
   var currentTarget = null;
   var state = {};
+  // One trailing refresh after an MCP notification (see handleMcpInvalidate).
+  var mcpSettleTimer = null;
 
   function isCurrent(target) { return currentTarget === target && adapter.isCurrent(target); }
   function request(target, path, options) { return adapter.request(target, path, options); }
   function reset() {
+    clearMcpSettle();
     state = {
       activeTaskId: null, messagesCursor: null, tasksCursor: null,
       tasksExpanded: false, messagesExpanded: false, tasks: [], messages: [],
@@ -22,15 +26,20 @@ export function createWorkspacePanel(adapter) {
       taskHistoryTaskId: null, taskHistoryItems: [], taskHistoryLoading: false,
       taskHistoryError: null, taskHistoryRequestGen: (state.taskHistoryRequestGen || 0) + 1,
       messageDetailRequestGen: (state.messageDetailRequestGen || 0) + 1,
+      mcpEvents: [], mcpCursor: null, mcpExpanded: false, mcpItems: [],
+      mcpFilters: { tool: "", outcome: "" }, mcpGrouped: true,
+      selectedMcpId: null, selectedMcpRowEl: null,
+      mcpRequestGen: (state.mcpRequestGen || 0) + 1,
       activitySubview: "tasks",
     };
   }
   function node(id) { return document.getElementById(id); }
   function jsonOptions(body) { return { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }; }
   function clearPanel() {
-    ["overview", "tasks-list", "messages-list", "tasks-detail", "messages-detail"].forEach(function (id) { var n = node(id); if (n) clearEl(n); });
+    ["overview", "tasks-list", "messages-list", "mcp-list", "tasks-detail", "messages-detail", "mcp-detail"].forEach(function (id) { var n = node(id); if (n) clearEl(n); });
     node("tasks-load-more").hidden = true;
     node("messages-load-more").hidden = true;
+    node("mcp-load-more").hidden = true;
   }
   function threePane() { return document.querySelector(".three-pane"); }
   function openDetail() { threePane().classList.add("detail-open"); }
@@ -38,7 +47,7 @@ export function createWorkspacePanel(adapter) {
   function renderDetailPane(kind, content) { var d = node(kind + "-detail"); clearEl(d); d.appendChild(content); }
   function renderBackButton(kind) {
     var btn = el("button", { className: "secondary detail-back", text: "← Back to list" });
-    btn.addEventListener("click", function () { closeDetail(); var row = kind === "tasks" ? state.selectedTaskRowEl : state.selectedMessageRowEl; if (row && row.focus) row.focus(); });
+    btn.addEventListener("click", function () { closeDetail(); var row = kind === "tasks" ? state.selectedTaskRowEl : kind === "mcp" ? state.selectedMcpRowEl : state.selectedMessageRowEl; if (row && row.focus) row.focus(); });
     return btn;
   }
   function renderTextSection(containerId, label, fullText) {
@@ -56,18 +65,24 @@ export function createWorkspacePanel(adapter) {
     state.activitySubview = which;
     node("tab-tasks").setAttribute("aria-selected", which === "tasks" ? "true" : "false");
     node("tab-messages").setAttribute("aria-selected", which === "messages" ? "true" : "false");
+    node("tab-mcp").setAttribute("aria-selected", which === "mcp" ? "true" : "false");
     node("tasks-list-col").hidden = which !== "tasks";
     node("tasks-detail").hidden = which !== "tasks";
     node("messages-list-col").hidden = which !== "messages";
     node("messages-detail").hidden = which !== "messages";
+    node("mcp-list-col").hidden = which !== "mcp";
+    node("mcp-detail").hidden = which !== "mcp";
     closeDetail();
+    if (which !== "mcp") clearMcpSettle();
     if (changed && currentTarget) {
       if (which === "tasks") loadSnapshot(currentTarget, { messages: false });
       else if (which === "messages") loadSnapshot(currentTarget, { tasks: false });
+      else if (which === "mcp") loadMcpAccess(currentTarget, false);
     }
   }
   node("tab-tasks").addEventListener("click", function () { setActivityTab("tasks"); });
   node("tab-messages").addEventListener("click", function () { setActivityTab("messages"); });
+  node("tab-mcp").addEventListener("click", function () { setActivityTab("mcp"); });
 
   function renderOverview(data) {
     var prevActive = Boolean(state.activeTaskId);
@@ -308,6 +323,183 @@ export function createWorkspacePanel(adapter) {
   }
   node("messages-load-more").addEventListener("click", function () { if (currentTarget) loadMessages(currentTarget, true); });
 
+  // ---- MCP access history ----------------------------------------------------
+  // What ChatGPT did through MCP, newest first. The rows are metadata only (tool,
+  // a sanitized target, the kind of result, duration) — the Worker never stored a
+  // file's content, a query or a diff, so there is nothing of that sort to show.
+  // Filters are applied by the API so they hold across pages; grouping repeated
+  // reads is only a view over what is loaded.
+  function mcpQuery(more) {
+    var q = "?limit=50";
+    if (state.mcpFilters.tool) q += "&tool=" + encodeURIComponent(state.mcpFilters.tool);
+    if (state.mcpFilters.outcome) q += "&outcome=" + encodeURIComponent(state.mcpFilters.outcome);
+    if (more && state.mcpCursor) q += "&cursor=" + encodeURIComponent(state.mcpCursor);
+    return q;
+  }
+  function loadMcpAccess(target, more) {
+    // A fresh load (filter change, refresh) supersedes anything still in flight;
+    // "Load more" belongs to the load it was started from.
+    var gen = more ? state.mcpRequestGen : (state.mcpRequestGen = state.mcpRequestGen + 1);
+    return request(target, "/mcp-access" + mcpQuery(more)).then(function (res) {
+      if (gen !== state.mcpRequestGen) return;
+      applyMcpPage(res, target, more);
+    });
+  }
+  function loadMcpIfActive(target) { return state.activitySubview === "mcp" ? loadMcpAccess(target, false) : null; }
+  function mcpFiltersActive() { return Boolean(state.mcpFilters.tool || state.mcpFilters.outcome); }
+  function syncMcpControls() {
+    node("mcp-filter-tool").value = state.mcpFilters.tool;
+    node("mcp-filter-outcome").value = state.mcpFilters.outcome;
+    node("mcp-group").checked = state.mcpGrouped;
+  }
+  function applyMcpPage(res, target, more) {
+    if (!res.ok || !isCurrent(target)) return;
+    var rows = res.body.events || [];
+    if (more) {
+      state.mcpEvents = mergeRows(state.mcpEvents, rows, "eventId", mcpComparator);
+      state.mcpCursor = res.body.nextCursor;
+      state.mcpExpanded = true;
+    } else if (state.mcpExpanded) {
+      if (res.body.nextCursor) state.mcpEvents = mergeRows(state.mcpEvents, rows, "eventId", mcpComparator);
+      else { state.mcpEvents = rows; state.mcpCursor = null; state.mcpExpanded = false; }
+    } else {
+      state.mcpEvents = rows;
+      state.mcpCursor = res.body.nextCursor;
+    }
+    renderMcpList(target);
+    node("mcp-load-more").hidden = !state.mcpCursor;
+    var selected = state.mcpItems.filter(function (item) { return item.id === state.selectedMcpId; })[0];
+    if (selected) renderDetailPane("mcp", renderMcpDetail(selected));
+  }
+  function mcpItemEvent(item) { return item.type === "group" ? item.newest : item.event; }
+  function renderMcpRow(item, target) {
+    var e = mcpItemEvent(item), isGroup = item.type === "group";
+    var row = el("button", { className: "list-row mcp-row" });
+    row.type = "button"; row.setAttribute("role", "option"); row.setAttribute("aria-selected", state.selectedMcpId === item.id ? "true" : "false");
+    var head = el("div", { className: "row" }), outcome = mcpOutcomeInfo(isGroup ? "success" : e.outcome);
+    head.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
+    head.appendChild(el("span", { className: "meta", text: fmtTime(e.startedAt) }));
+    row.appendChild(head);
+    row.appendChild(el("div", { className: "mcp-title", text: mcpToolLabel(e.toolName) + (isGroup ? " × " + item.count : "") }));
+    row.appendChild(el("div", { className: "preview", text: isGroup ? "Latest: " + (e.target || "") : mcpEventLine(e) }));
+    var bits = [e.toolName];
+    if (isGroup) bits.push("over " + formatDuration(item.newest.startedAt - item.oldest.startedAt));
+    else if (e.durationMs !== undefined) bits.push(formatDuration(e.durationMs));
+    bits.push(mcpTaskLabel(e.taskId));
+    row.appendChild(el("div", { className: "meta mcp-meta", text: bits.filter(Boolean).join(" · ") }));
+    row.addEventListener("click", function () { selectMcp(item, row); });
+    return row;
+  }
+  function renderMcpList(target) {
+    var list = node("mcp-list"); clearEl(list);
+    state.mcpItems = state.mcpGrouped
+      ? groupMcpEvents(state.mcpEvents)
+      : state.mcpEvents.map(function (event) { return { type: "event", id: "event-" + event.eventId, event: event }; });
+    state.mcpItems.forEach(function (item) { list.appendChild(renderMcpRow(item, target)); });
+    if (!state.mcpItems.length) {
+      list.appendChild(el("p", { className: "note", text: mcpFiltersActive() ? "No MCP calls match these filters." : "No MCP calls recorded yet. They appear here as ChatGPT reads the workspace." }));
+    }
+  }
+  function mcpDetailRow(dl, label, value) {
+    if (value === null || value === undefined || value === "") return;
+    dl.appendChild(el("dt", { text: label }));
+    dl.appendChild(el("dd", { text: String(value) }));
+  }
+  function renderMcpBatchCalls(details) {
+    var wrap = el("section", { className: "detail-section" });
+    wrap.appendChild(el("h3", { text: "Calls in this batch" }));
+    var list = el("ol", { className: "task-history-list mcp-call-list" });
+    list.setAttribute("role", "list");
+    (details.calls || []).forEach(function (call) {
+      var outcome = mcpOutcomeInfo(call.outcome), row = el("li", { className: "task-history-row mcp-call-row" });
+      row.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
+      row.appendChild(el("strong", { text: mcpToolLabel(call.tool) }));
+      row.appendChild(el("span", { className: "mcp-call-target", text: call.target || "" }));
+      var code = mcpCodeText(call.code);
+      if (code) row.appendChild(el("span", { className: "task-history-iteration", text: code }));
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    return wrap;
+  }
+  function renderMcpDetail(item) {
+    var wrap = el("div"), e = mcpItemEvent(item), isGroup = item.type === "group";
+    wrap.appendChild(renderBackButton("mcp"));
+    var head = el("div", { className: "row" }), outcome = mcpOutcomeInfo(isGroup ? "success" : e.outcome);
+    head.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
+    head.appendChild(el("span", { className: "meta", text: mcpToolLabel(e.toolName) + (isGroup ? " × " + item.count : "") + " (" + e.toolName + ")" }));
+    wrap.appendChild(head);
+    var dl = el("dl", { className: "mcp-facts" });
+    if (isGroup) {
+      mcpDetailRow(dl, "Between", fmtTime(item.oldest.startedAt) + " and " + fmtTime(item.newest.startedAt));
+    } else {
+      mcpDetailRow(dl, "When", fmtTime(e.startedAt));
+      mcpDetailRow(dl, "Duration", formatDuration(e.durationMs));
+      mcpDetailRow(dl, "Target", e.target);
+      mcpDetailRow(dl, "Result", outcome.label + (e.outcomeCode ? " — " + mcpCodeText(e.outcomeCode) : ""));
+    }
+    mcpDetailRow(dl, "Task", e.taskId ? e.taskId : "none was active");
+    mcpDetailRow(dl, "Connector", e.connector === "shared" ? "Shared connector" : "Dedicated connector");
+    wrap.appendChild(dl);
+    if (isGroup) {
+      var section = el("section", { className: "detail-section" });
+      section.appendChild(el("h3", { text: "Files read (newest first)" }));
+      var list = el("ol", { className: "task-history-list mcp-call-list" });
+      list.setAttribute("role", "list");
+      item.events.forEach(function (event) {
+        var row = el("li", { className: "task-history-row mcp-call-row" });
+        row.appendChild(el("span", { className: "task-history-time", text: formatTimelineTime(event.startedAt) }));
+        row.appendChild(el("span", { className: "mcp-call-target", text: event.target || "" }));
+        row.appendChild(el("span", { className: "task-history-iteration", text: formatDuration(event.durationMs) }));
+        list.appendChild(row);
+      });
+      section.appendChild(list);
+      wrap.appendChild(section);
+    } else if (e.details && Array.isArray(e.details.calls)) {
+      wrap.appendChild(renderMcpBatchCalls(e.details));
+    }
+    return wrap;
+  }
+  function selectMcp(item, rowEl) {
+    state.selectedMcpId = item.id; state.selectedMcpRowEl = rowEl || null;
+    renderMcpList(currentTarget);
+    renderDetailPane("mcp", renderMcpDetail(item));
+    openDetail();
+  }
+  function resetMcpList() {
+    state.mcpEvents = []; state.mcpCursor = null; state.mcpExpanded = false; state.mcpItems = [];
+    state.selectedMcpId = null; state.selectedMcpRowEl = null;
+    clearEl(node("mcp-detail")); node("mcp-detail").appendChild(el("p", { className: "note detail-empty", text: "Select an access to see details." }));
+    closeDetail();
+  }
+  node("mcp-filter-tool").addEventListener("change", function () { state.mcpFilters.tool = node("mcp-filter-tool").value; resetMcpList(); if (currentTarget) loadMcpAccess(currentTarget, false); });
+  node("mcp-filter-outcome").addEventListener("change", function () { state.mcpFilters.outcome = node("mcp-filter-outcome").value; resetMcpList(); if (currentTarget) loadMcpAccess(currentTarget, false); });
+  node("mcp-group").addEventListener("change", function () { state.mcpGrouped = node("mcp-group").checked; if (currentTarget) renderMcpList(currentTarget); });
+  node("mcp-load-more").addEventListener("click", function () { if (currentTarget) loadMcpAccess(currentTarget, true); });
+  /** A scope "mcp" invalidation: refresh the history if — and only if — it is the
+   *  tab on screen. It must never fall through to the Tasks/Messages reload. */
+  // The Worker sends at most one "mcp" notification per MCP_NOTIFY_MIN_INTERVAL_MS
+  // (2 s, leading edge), and this dashboard stops polling while its WebSocket is
+  // healthy — so calls made just after a notification would otherwise not appear
+  // until the next one, which may never come. Each notification therefore reloads
+  // now AND schedules one trailing reload just past the throttle window; the
+  // latter picks up whatever the throttle swallowed. A newer notification replaces
+  // the pending timer, and leaving the tab / switching workspace cancels it.
+  var MCP_SETTLE_MS = 2500;
+  function clearMcpSettle() {
+    if (mcpSettleTimer !== null) { clearTimeout(mcpSettleTimer); mcpSettleTimer = null; }
+  }
+  function handleMcpInvalidate() {
+    if (!currentTarget || state.activitySubview !== "mcp") return null;
+    var target = currentTarget;
+    clearMcpSettle();
+    mcpSettleTimer = setTimeout(function () {
+      mcpSettleTimer = null;
+      if (isCurrent(target) && state.activitySubview === "mcp") loadMcpAccess(target, false);
+    }, MCP_SETTLE_MS);
+    return loadMcpAccess(target, false);
+  }
+
   function loadSnapshot(target, options) {
     var opts = options || {};
     var q = "?limit=20";
@@ -325,17 +517,20 @@ export function createWorkspacePanel(adapter) {
   function loadAll() {
     var target = currentTarget;
     if (!target) return;
-    return Promise.all([loadSnapshot(target), loadGuidance(target), loadLimits(target), loadBrowserSettings(target)]);
+    return Promise.all([loadSnapshot(target), loadGuidance(target), loadLimits(target), loadBrowserSettings(target), loadMcpIfActive(target)]);
   }
   function pollActivity() {
     var target = currentTarget;
     if (!target) return;
+    // The MCP tab has no snapshot of its own: its history and the overview strip
+    // (bridge connected, queue counts) are read separately.
+    if (state.activitySubview === "mcp") return Promise.all([loadMcpAccess(target, false), loadOverview(target)]);
     return state.activitySubview === "messages"
       ? loadSnapshot(target, { tasks: false })
       : loadSnapshot(target, { messages: false });
   }
   function refreshAll() { return loadAll(); }
   function hasActiveTask() { return Boolean(state.activeTaskId); }
-  function activate(target, options) { currentTarget = target; reset(); if (options && options.clearView) clearPanel(); setActivityTab("tasks"); return loadAll(); }
-  return { activate: activate, loadAll: loadAll, pollActivity: pollActivity, refreshAll: refreshAll, hasActiveTask: hasActiveTask };
+  function activate(target, options) { currentTarget = target; reset(); syncMcpControls(); if (options && options.clearView) clearPanel(); setActivityTab("tasks"); return loadAll(); }
+  return { activate: activate, loadAll: loadAll, pollActivity: pollActivity, refreshAll: refreshAll, hasActiveTask: hasActiveTask, handleMcpInvalidate: handleMcpInvalidate };
 }

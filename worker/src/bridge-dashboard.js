@@ -61,6 +61,12 @@
 //  - ackedMessageRetentionMs / terminalTaskRetentionMs: index.js's
 //    RETENTION_MS / TASK_RETENTION_MS (scalars, shared with alarm()),
 //    reported by dashboardOverview().
+//  - queryDashboardMcpAccess(args): keyset-paginated MCP access-history rows
+//    (bridge-mcp-access.js's dashboardRows, reached through index.js). Rows
+//    are metadata only — see worker-mcp-access.js for what they may contain.
+//  - mcpAccessRetentionMs / mcpAccessMaxRows: index.js's
+//    MCP_ACCESS_RETENTION_MS / MCP_ACCESS_MAX_ROWS (scalars), reported by
+//    dashboardOverview() so the tab can state its own retention.
 //
 // The workspace dashboard and the hub dashboard share *mechanism* but never
 // *authority*. The mechanism — asset/shell serving, login, logout, and the
@@ -119,6 +125,18 @@ const DASHBOARD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const DASHBOARD_HISTORY_DEFAULT_LIMIT = 50;
 const DASHBOARD_HISTORY_MAX_LIMIT = 100;
 
+/** The stored details of a batch call, or null. Parsed defensively: the column
+ *  holds JSON this Worker wrote, but a row is never trusted to still be one. */
+function parseMcpDetails(text) {
+  if (typeof text !== "string" || !text) return null;
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Builds the dashboard domain's operations against the narrow capabilities
  * documented in the header above.
@@ -162,6 +180,7 @@ function createBridgeDashboard({
   localContinueTask,
   queryDashboardMessages,
   queryDashboardTasks,
+  queryDashboardMcpAccess,
   messageDirection,
   localStatus,
   consumeDashboardRateLimit,
@@ -175,6 +194,8 @@ function createBridgeDashboard({
   maxSharedRequestBytes,
   ackedMessageRetentionMs,
   terminalTaskRetentionMs,
+  mcpAccessRetentionMs,
+  mcpAccessMaxRows,
 }) {
   // -------------------------------------------------------------------------
   // Dashboard HTML shell + same-origin browser assets (docs/plans/queue-dashboard.md).
@@ -491,6 +512,7 @@ function createBridgeDashboard({
       if (name === "snapshot" && method === "GET") return json(this.dashboardSnapshot(url.searchParams), 200, dashboardApiHeaders());
       if (name === "messages" && method === "GET") return json(this.dashboardMessages(url.searchParams), 200, dashboardApiHeaders());
       if (name === "tasks" && method === "GET") return json(this.dashboardTasks(url.searchParams), 200, dashboardApiHeaders());
+      if (name === "mcp-access" && method === "GET") return json(this.dashboardMcpAccess(url.searchParams), 200, dashboardApiHeaders());
       if (name === "guidance" && method === "GET") return json(workspaceGuidance(), 200, dashboardApiHeaders());
       if (name === "guidance" && method === "POST") return json(await this.dashboardSetGuidance(request), 200, dashboardApiHeaders());
       if (name === "limits" && method === "GET") return json(localMaxBodyBytesGet(), 200, dashboardApiHeaders());
@@ -525,7 +547,12 @@ function createBridgeDashboard({
         activeTask: taskView(activeTask()),
         guidanceSet: workspaceGuidance().set,
         maxBodyBytes: localMaxBodyBytesGet().maxBodyBytes,
-        retention: { ackedMessagesMs: ackedMessageRetentionMs, terminalTasksMs: terminalTaskRetentionMs },
+        retention: {
+          ackedMessagesMs: ackedMessageRetentionMs,
+          terminalTasksMs: terminalTaskRetentionMs,
+          mcpAccessMs: mcpAccessRetentionMs,
+          mcpAccessMaxRows,
+        },
       };
     },
 
@@ -605,6 +632,49 @@ function createBridgeDashboard({
           terminalSummary: r.terminal_summary || null,
         })),
         nextCursor: hasMore ? encodeDashboardCursor(page[page.length - 1].updated_at, page[page.length - 1].task_id) : null,
+      };
+    },
+
+    /** MCP access history, newest first (started_at DESC, event_id DESC), keyset-
+     *  paginated with the same opaque cursor as messages/tasks.
+     *
+     *  `event_id` is an integer but the shared cursor codec requires a string id,
+     *  so it goes in as a string and is turned back into a number here — a
+     *  cursor whose id is not a plain integer is rejected (treated as no cursor)
+     *  rather than being handed to SQL as something else.
+     *
+     *  Filters (`tool`, `outcome`) are applied in SQL, so they hold across pages.
+     *  Rows carry metadata only: no file content, query, message text or
+     *  absolute path was ever stored (worker-mcp-access.js). */
+    dashboardMcpAccess(params) {
+      const limit = Math.min(Math.max(Number(params.get("limit")) || DASHBOARD_HISTORY_DEFAULT_LIMIT, 1), DASHBOARD_HISTORY_MAX_LIMIT);
+      const decoded = decodeDashboardCursor(params.get("cursor"));
+      const cursor = decoded && /^\d{1,15}$/.test(decoded.id) ? { t: decoded.t, id: Number(decoded.id) } : null;
+      const rows = queryDashboardMcpAccess({
+        cursor,
+        limit,
+        tool: params.get("tool") || null,
+        outcome: params.get("outcome") || null,
+        // alarm() sweeps once a day, so a row can outlive the retention by up to a day.
+        since: Date.now() - mcpAccessRetentionMs,
+      });
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit);
+      const last = page[page.length - 1];
+      return {
+        events: page.map((r) => ({
+          eventId: r.event_id,
+          startedAt: r.started_at,
+          durationMs: r.duration_ms,
+          toolName: r.tool_name,
+          connector: r.connector,
+          taskId: r.task_id || null,
+          target: r.target || null,
+          outcome: r.outcome,
+          outcomeCode: r.outcome_code || null,
+          details: parseMcpDetails(r.detail_json),
+        })),
+        nextCursor: hasMore ? encodeDashboardCursor(last.started_at, String(last.event_id)) : null,
       };
     },
 

@@ -358,12 +358,25 @@ Open the `WebUI URL` (`https://<your-worker>.workers.dev/dashboard/hub`) and log
 
 Capabilities and behavior:
 - **Can do**: browse pending messages and full task exchange history with timestamps, ack or discard messages, view and edit guidance or body limits, view/edit/clear browser settings (shared ChatGPT Project URL, workspace override, conversation URL), start new tasks from the browser (available from both the per-workspace and hub dashboards).
+- **MCP Access history**: the **MCP Access** tab (next to Tasks and Messages) shows what ChatGPT did through the MCP connector — see [MCP Access history](#mcp-access-history) below.
 - **Real-time updates**: supports real-time push updates over WebSocket, immediately reflecting task progress, message exchanges, and setting changes in the browser (automatically falls back to adaptive polling — ~30s while active, ~2m when idle, ~60s for the Hub workspace list — if the WebSocket disconnects, and pauses updates while the tab is hidden).
-- **Data retention**: follows standard Worker policies (an acked message is removed after 7 days, and completed task history after 30 days).
+- **Data retention**: follows standard Worker policies (an acked message is removed after 7 days, and completed task history after 30 days). MCP access history is kept for 24 hours, at most 1000 calls per workspace.
 
 A workspace's own dashboard session is revoked immediately if you rotate that workspace's owner token (`gpt-worker rotate --gpt -w .`) or remove the workspace (`gpt-worker remove -w . --yes`). A hub dashboard session is revoked immediately if you rotate the shared hub token (`gpt-worker rotate --hub`) — see [Data Retention](#data-retention).
 
-### Resuming After a Timeout
+#### MCP Access history
+
+The **MCP Access** tab lists every tool call ChatGPT made through the connector, newest first, so you can see what it read (or tried to read) and why something was refused. Each row shows:
+
+- **What**: a plain-language tool name (Read file, Git diff, Search, Batch, …) with the raw tool name beneath it.
+- **Target**: the file or directory path, or a fixed description such as "workspace search" or "PLAN · iteration 2".
+- **Result**, as a text badge (never color alone): **OK**, **Blocked** (no active task, or the read window closed — see *Time-Bounded Access*), **Denied** (a sensitive, Git-ignored, or out-of-workspace file), **Error**, or **Mixed** (a batch with different outcomes; open it to see each call).
+- **Time taken** and the **task** it belonged to.
+
+To keep the list readable, consecutive successful file reads of the same task (within 30 seconds of each other) fold into one "Read file × N" row. Denials, blocks, and errors are never folded. Untick **Group repeated reads** to see every call. The **Tool** and **Result** filters apply to the whole history, not just the loaded page — use **Load more** to go further back. The tab works the same in the per-workspace and hub dashboards.
+
+What is recorded — and what never is: only metadata (time, tool, connector, task ID, a safe target, result class, a short reason code, duration). **File contents, diffs, search queries or hits, message bodies and titles, error text, raw tool arguments/results, secrets, and absolute paths are never stored.** Paths that would point outside the workspace are shown as a fixed label instead. This is an audit trail of *access*, not a copy of what was accessed.
+
 The default timeout for `wait` is 15 minutes. If a timeout occurs, you can resume waiting without re-submitting the task:
 
 ```bash
@@ -459,6 +472,7 @@ To allow background script execution in an existing tab:
 Your Cloudflare Worker (deployed to your own account in Step 3) retains task traffic for a limited period, which means some temporary data is stored remotely compared to a purely local setup:
 - **Task message bodies** (goal text, plans, execution reports) are automatically deleted from the Worker 7 days after being delivered and acknowledged.
 - **Task history** (goal text and outcome summary, used to give ChatGPT context on past tasks) is automatically deleted from the Worker 30 days after the task reaches a final outcome (done or blocked). An in-progress task is never deleted while it's active.
+- **MCP access history** (metadata only — see [MCP Access history](#mcp-access-history)) is deleted 24 hours after each call, and only the newest 1000 calls per workspace are kept. It is removed with the workspace by `gpt-worker remove`.
 - **[Web dashboard](#web-dashboard) sessions** expire after 24 hours and are then swept automatically; a workspace's own dashboard session is also revoked immediately by rotating that workspace's owner token or removing the workspace, and the shared hub dashboard's session is revoked immediately by rotating the shared hub token.
 - To permanently wipe all task/queue records for a workspace from your Cloudflare account, run `gpt-worker remove -w <dir> --yes` (see [Deregistering a Workspace](#deregistering-a-workspace)). There is no way to delete a single past task's history short of removing the whole workspace.
 

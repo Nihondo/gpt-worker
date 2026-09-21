@@ -116,6 +116,11 @@ function areSameProject(projectInfo, conversationInfo) {
  *    `msgs`/`tasks` rows (bridge-protocol.js's clearProtocolState), used by
  *    deprovision() only. Protocol state is owned by bridge-protocol.js, not
  *    this module, so it is never touched with a direct `sql.exec` here.
+ *  - clearMcpAccessState(): () => void — wipes the MCP access history
+ *    (bridge-mcp-access.js's clearAll), used by deprovision() only: token
+ *    rotation keeps the history, since it says nothing about who holds a
+ *    credential. Like protocol state, it is owned by its own domain module and
+ *    never touched with a direct `sql.exec` here.
  *  - revokeOAuthTokens(): () => void — revokes every OAuth authorization
  *    code/access/refresh token this DO has issued (BridgeDO's
  *    revokeAllOAuthTokens, a thin delegate onto bridge-oauth.js's own
@@ -140,7 +145,7 @@ function areSameProject(projectInfo, conversationInfo) {
  * dashboard domain (bridge-dashboard.js) as narrow injected capabilities,
  * instead of that module importing this one directly.
  */
-function createBridgeAdmin({ sql, generateToken, maxAdminRequestBytes, clearProtocolState, revokeOAuthTokens, clearOAuthState, revokeDashboardSessions }) {
+function createBridgeAdmin({ sql, generateToken, maxAdminRequestBytes, clearProtocolState, clearMcpAccessState = () => {}, revokeOAuthTokens, clearOAuthState, revokeDashboardSessions }) {
   return {
     parseProjectUrl,
     parseConversationUrl,
@@ -241,6 +246,7 @@ function createBridgeAdmin({ sql, generateToken, maxAdminRequestBytes, clearProt
     deprovision() {
       sql.exec(`DELETE FROM secrets`);
       clearProtocolState();
+      clearMcpAccessState();
       sql.exec(`DELETE FROM settings`);
       clearOAuthState();
       revokeDashboardSessions();

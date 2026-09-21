@@ -109,6 +109,29 @@ button:hover { filter: brightness(1.06); }
 .stage-label { font-size: .72rem; color: var(--muted); margin-inline-start: 3px; }
 .stage-label.blocked { color: var(--danger); font-weight: 700; }
 .decision-actions { display: flex; flex-direction: row; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+/* MCP Access tab: what ChatGPT did through MCP. Result badges always carry a text
+   label (OK / Blocked / Denied / Error / Mixed); the color only reinforces it. */
+select { inline-size: 100%; padding: 8px 9px; font-size: .8rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-muted); color: inherit; font-family: inherit; }
+.mcp-filters { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: end; }
+.mcp-filter { flex: 1 1 130px; min-inline-size: 0; }
+.mcp-filter label, .mcp-group-toggle { margin: 0 0 4px; }
+.mcp-group-toggle { flex: 1 1 100%; display: flex; align-items: center; font-weight: 600; margin-block: 2px 0; }
+.mcp-note { margin: 0; }
+.mcp-row .mcp-title { color: var(--ink); font-weight: 700; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-row .preview { overflow-wrap: anywhere; }
+.mcp-row .mcp-meta { color: var(--muted); font-size: .7rem; margin: 2px 0 0; }
+.mcp-outcome { color: #fff; }
+.mcp-outcome-success { background: #087f7a; }
+.mcp-outcome-gate { background: #8a6300; }
+.mcp-outcome-denied { background: #b3335a; }
+.mcp-outcome-error { background: #c23a57; }
+.mcp-outcome-mixed { background: #5b5ce2; }
+.mcp-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 5px 14px; margin: 12px 0; font-size: .78rem; }
+.mcp-facts dt { color: var(--muted); font-weight: 650; }
+.mcp-facts dd { margin: 0; overflow-wrap: anywhere; }
+.mcp-call-list { margin-top: 6px; }
+.mcp-call-row { grid-template-columns: auto minmax(70px, auto) minmax(0, 1fr) auto; }
+.mcp-call-target { overflow-wrap: anywhere; }
 @media (max-width: 920px) {
   .dashboard-layout { grid-template-columns: 1fr; }
   .workspace-sidebar { position: static; }
@@ -121,6 +144,8 @@ button:hover { filter: brightness(1.06); }
   .task-history-row { grid-template-columns: 1fr auto; }
   .task-history-iteration { grid-column: 1 / -1; }
   .task-history-title { grid-column: 1 / -1; }
+  .mcp-call-row { grid-template-columns: auto minmax(0, 1fr); }
+  .mcp-call-row .mcp-call-target, .mcp-call-row .task-history-iteration { grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
 @media (prefers-color-scheme: dark) {
@@ -134,4 +159,10 @@ button:hover { filter: brightness(1.06); }
   .stage-node { color: #c4c6da; background: #36384f; }
   .stage-node.complete { color: #b7f6e9; background: #16544f; }
   .list-pane::-webkit-scrollbar-thumb { background: #5a5d81; }
+  .mcp-outcome { color: #10111c; }
+  .mcp-outcome-success { background: #7de3d5; }
+  .mcp-outcome-gate { background: #ffd274; }
+  .mcp-outcome-denied { background: #ff8fb0; }
+  .mcp-outcome-error { background: #ff91aa; }
+  .mcp-outcome-mixed { background: #b9baff; }
 }

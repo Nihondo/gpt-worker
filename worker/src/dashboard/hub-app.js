@@ -175,6 +175,11 @@
     function handleWorkspaceInvalidate(workspaceId, scope) {
       if (scope === "settings") {
         if (state.workspaceId === workspaceId) panel.refreshAll();
+      } else if (scope === "mcp") {
+        // MCP access history of one workspace. Only the selected workspace has a
+        // list on screen, and other workspaces' overview strips show nothing that
+        // an MCP call changes — so neither may trigger a read.
+        if (state.workspaceId === workspaceId) panel.handleMcpInvalidate();
       } else {
         if (state.workspaceId === workspaceId) {
           panel.pollActivity();
@@ -182,6 +187,15 @@
           refreshSingleWorkspaceStatus(workspaceId);
         }
       }
+    }
+
+    // Queued while hidden: settings > activity > mcp. An "mcp" event stays "mcp"
+    // unless something stronger arrives, so it can never turn into a
+    // Tasks/Messages reload (or a status read for an unselected workspace).
+    function mergeWorkspaceScope(prev, next) {
+      if (prev === "settings" || next === "settings") return "settings";
+      if (prev === "activity" || next !== "mcp") return "activity";
+      return "mcp";
     }
 
     function handleHubInvalidate(scope) {
@@ -233,7 +247,7 @@
         if (document.hidden || !initialLoadDone) {
           if (data.workspaceId) {
             var prev = pendingWorkspaceEvents[data.workspaceId];
-            pendingWorkspaceEvents[data.workspaceId] = (prev === "settings" || data.scope === "settings") ? "settings" : "activity";
+            pendingWorkspaceEvents[data.workspaceId] = mergeWorkspaceScope(prev, data.scope);
           } else {
             if (data.scope === "registry") pendingRegistry = true;
             if (data.scope === "settings") pendingHubSettings = true;

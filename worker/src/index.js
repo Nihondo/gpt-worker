@@ -51,6 +51,7 @@ import { createBridgeOAuth } from "./bridge-oauth.js";
 import { createBridgeMcp, toolOk, toolError } from "./bridge-mcp.js";
 import { createBridgeTransport } from "./bridge-transport.js";
 import { createBridgeDashboard } from "./bridge-dashboard.js";
+import { createBridgeMcpAccess } from "./bridge-mcp-access.js";
 
 const MAX_REQUEST_BYTES = 32 * 1024; // the whole JSON-RPC/CLI envelope around it
 // Used only where the target workspace isn't known yet (the shared
@@ -68,6 +69,19 @@ const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // outlives a single week-long gap between sessions. msgs rows are pure
 // message-delivery transport and don't need that longevity.
 const TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+// MCP access history (the dashboard's "MCP Access" tab): metadata only, see
+// worker-mcp-access.js. Bounded by age AND by a row cap, whichever bites first,
+// so a chatty session cannot grow the table without limit.
+const MCP_ACCESS_RETENTION_MS = 24 * 60 * 60 * 1000;
+const MCP_ACCESS_MAX_ROWS = 1000;
+// At most one "mcp" dashboard invalidation per this interval. Each workspace-DO
+// invalidation also makes an internal fetch to the hub DO, and a burst of
+// read_file calls would otherwise make one per call. What a throttled
+// notification skipped is picked up by the dashboard's trailing "settling"
+// reload (workspace-panel.js handleMcpInvalidate, MCP_SETTLE_MS — keep it
+// longer than this interval), NOT by polling: the dashboard stops polling while
+// its WebSocket is healthy.
+const MCP_NOTIFY_MIN_INTERVAL_MS = 2000;
 const ALARM_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // OAuth TTLs, PKCE/state/scope/redirect-uri constants and validation are
 // owned by bridge-oauth.js now (Phase 2C) — see that module for
@@ -626,11 +640,18 @@ export class BridgeDO {
     // this.oauth themselves (see below), and this.oauth isn't constructed
     // yet at this point in the constructor; by the time either callback is
     // actually invoked at runtime, this.oauth always is.
+    // MCP access history: the durable store for the dashboard's "MCP Access"
+    // tab. Built before the admin/mcp/dashboard domains that reach it through
+    // narrow callbacks (never by importing it).
+    this.mcpAccess = createBridgeMcpAccess({ sql: this.sql, maxRows: MCP_ACCESS_MAX_ROWS });
+    this.lastMcpNotifyAt = 0;
+
     this.admin = createBridgeAdmin({
       sql: this.sql,
       generateToken: () => randomHex(32),
       maxAdminRequestBytes: MAX_REQUEST_BYTES,
       clearProtocolState: () => this.clearProtocolState(),
+      clearMcpAccessState: () => this.mcpAccess.clearAll(),
       revokeOAuthTokens: () => this.revokeAllOAuthTokens(),
       clearOAuthState: () => this.clearOAuthState(),
       revokeDashboardSessions: () => this.revokeAllDashboardSessions(),
@@ -756,6 +777,7 @@ export class BridgeDO {
       maxWorkspaceRequestBytes: () => this.maxRequestBytes(),
       relayWorkspaceTool: (name, params) => this.callLocal(name, params),
       allowOAuthMcpRequest: (useHubHandler) => this.rateLimit(useHubHandler ? "oauth-hub-mcp" : "oauth-mcp", 60),
+      recordMcpAccess: (event) => this.recordMcpAccess(event),
       relayHubToolToWorkspace: async (workspaceId, name, args) => {
         const stub = this.env.BRIDGE_DO.get(this.env.BRIDGE_DO.idFromName(workspaceId));
         const response = await stub.fetch(new Request("https://gpt-worker.internal/hub", {
@@ -820,6 +842,7 @@ export class BridgeDO {
       localContinueTask: (body) => this.localContinueTask(body),
       queryDashboardMessages: (args) => this.protocol.dashboardMessageRows(args),
       queryDashboardTasks: (args) => this.protocol.dashboardTaskRows(args),
+      queryDashboardMcpAccess: (args) => this.mcpAccess.dashboardRows(args),
       messageDirection: (messageId) => this.protocol.messageDirection(messageId),
       localStatus: () => this.localStatus(),
       consumeDashboardRateLimit: (bucket, maxPerMinute) => this.rateLimit(bucket, maxPerMinute),
@@ -857,6 +880,8 @@ export class BridgeDO {
       maxSharedRequestBytes: MAX_REQUEST_BYTES_CEILING,
       ackedMessageRetentionMs: RETENTION_MS,
       terminalTaskRetentionMs: TASK_RETENTION_MS,
+      mcpAccessRetentionMs: MCP_ACCESS_RETENTION_MS,
+      mcpAccessMaxRows: MCP_ACCESS_MAX_ROWS,
     });
 
     ctx.blockConcurrencyWhile(async () => {
@@ -1179,6 +1204,23 @@ export class BridgeDO {
           } catch {}
         }
       }
+    }
+  }
+
+  /** Stores one MCP access event, then tells open dashboards — at most once per
+   *  MCP_NOTIFY_MIN_INTERVAL_MS. Leading-edge throttle: the first call in a burst
+   *  notifies at once, later ones are skipped until the interval has passed (a
+   *  Durable Object has no timer of its own to flush a trailing one). What a
+   *  skipped notification would have refreshed is picked up by the browser: each
+   *  notification makes the MCP tab reload once now and once more just after this
+   *  interval (handleMcpInvalidate's settling reload). Recording itself never
+   *  depends on the notification. */
+  recordMcpAccess(event) {
+    this.mcpAccess.record(event);
+    const now = Date.now();
+    if (now - this.lastMcpNotifyAt >= MCP_NOTIFY_MIN_INTERVAL_MS) {
+      this.lastMcpNotifyAt = now;
+      this.notifyDashboardInvalidation("mcp");
     }
   }
 
@@ -1813,6 +1855,12 @@ export class BridgeDO {
 
     if (msgsChanges > 0 || tasksChanges > 0) {
       this.notifyDashboardInvalidation("activity");
+    }
+
+    // MCP access history past its retention. Only a sweep that actually removed
+    // rows is worth telling the dashboards about.
+    if (this.mcpAccess.cleanupBefore(Date.now() - MCP_ACCESS_RETENTION_MS) > 0) {
+      this.notifyDashboardInvalidation("mcp");
     }
 
     const now = Date.now();

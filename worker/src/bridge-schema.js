@@ -174,6 +174,29 @@ function initializeBridgeSchema(sql) {
   sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_history ON msgs(created_at DESC, message_id DESC)`);
   sql.exec(`CREATE INDEX IF NOT EXISTS idx_msgs_task_history ON msgs(task_id, created_at DESC, message_id DESC)`);
   sql.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(updated_at DESC, task_id DESC)`);
+
+  // MCP access history (the dashboard's "MCP Access" tab): one row of *metadata*
+  // per MCP tool call — never its content. Deliberately not a column set on
+  // msgs/tasks: it has a different transport, retention (7 days / a row cap) and
+  // privacy contract. What a row may contain is decided in
+  // worker-mcp-access.js; the columns here are the closed set it fills.
+  // event_id is an INTEGER PRIMARY KEY (the rowid), which is what lets the cap be
+  // enforced with a cheap primary-key range delete instead of a COUNT/OFFSET scan.
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS mcp_access_events (
+      event_id     INTEGER PRIMARY KEY,
+      started_at   INTEGER NOT NULL,
+      duration_ms  INTEGER NOT NULL,
+      tool_name    TEXT NOT NULL,
+      connector    TEXT NOT NULL,       -- 'dedicated' | 'shared'
+      task_id      TEXT,
+      target       TEXT,
+      outcome      TEXT NOT NULL,       -- success | gate_denied | access_denied | error | mixed
+      outcome_code TEXT,
+      detail_json  TEXT
+    )
+  `);
+  sql.exec(`CREATE INDEX IF NOT EXISTS idx_mcp_access_history ON mcp_access_events(started_at DESC, event_id DESC)`);
 }
 
 export { initializeBridgeSchema };

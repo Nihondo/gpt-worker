@@ -1580,3 +1580,248 @@ describe("invokeTool: relay metadata and relay failures", () => {
     }
   });
 });
+
+// MCP access history: one row of *metadata* per MCP tool call, recorded at the
+// single point every call passes through (invokeTool). The rows feed the
+// dashboard's "MCP Access" tab. What matters most here is what a row may NOT
+// contain — no file content, query, message text or absolute path — because the
+// table sits in the user's own Cloudflare account and lives for days.
+describe("MCP access history: recording", () => {
+  const rows = (doo) => doo.sql.exec(`SELECT * FROM mcp_access_events ORDER BY event_id`).toArray();
+  const relayReturns = (doo, result) => {
+    doo.callLocal = async () => ({ ok: true, result });
+  };
+  const relayFails = (doo, error) => {
+    doo.callLocal = async () => ({ ok: false, error });
+  };
+  const startTask = (doo, taskId = "t1") => doo.localStartTask({ task_id: taskId, goal: "g", text: "GOAL:\ng" });
+
+  test("the table and its index are added to a Durable Object that predates them, leaving its rows alone", () => {
+    const ctx = makeFakeCtx();
+    ctx.storage.sql.exec(`
+      CREATE TABLE tasks (
+        task_id TEXT PRIMARY KEY, goal TEXT NOT NULL, title TEXT, iteration INTEGER NOT NULL,
+        protocol_state TEXT NOT NULL, waiting_for TEXT NOT NULL,
+        task_started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, terminal_summary TEXT
+      )
+    `);
+    ctx.storage.sql.exec(
+      `INSERT INTO tasks (task_id, goal, iteration, protocol_state, waiting_for, task_started_at, updated_at)
+       VALUES ('old', 'old goal', 0, 'DONE', 'none', 1, 1)`
+    );
+
+    const doo = new BridgeDO(ctx, makeFakeEnv());
+
+    assert.deepEqual(
+      doo.sql.exec(`PRAGMA table_info('mcp_access_events')`).toArray().map((c) => c.name),
+      ["event_id", "started_at", "duration_ms", "tool_name", "connector", "task_id", "target", "outcome", "outcome_code", "detail_json"]
+    );
+    assert.ok(doo.sql.exec(`PRAGMA index_list('mcp_access_events')`).toArray().some((i) => i.name === "idx_mcp_access_history"));
+    assert.equal(doo.getTask("old").goal, "old goal");
+    assert.equal(rows(doo).length, 0);
+  });
+
+  test("a successful workspace call is one row, with the task that was active when it began", async () => {
+    const doo = makeDO();
+    startTask(doo, "0123456789abcdef");
+    relayReturns(doo, { path: "src/a.js", text: "FILE CONTENTS" });
+
+    const before = Date.now();
+    await doo.invokeTool("read_file", { path: "src/a.js" });
+
+    const [row] = rows(doo);
+    assert.equal(rows(doo).length, 1);
+    assert.equal(row.tool_name, "read_file");
+    assert.equal(row.connector, "dedicated");
+    assert.equal(row.task_id, "0123456789abcdef");
+    assert.equal(row.target, "src/a.js");
+    assert.equal(row.outcome, "success");
+    assert.equal(row.outcome_code, null);
+    assert.ok(row.started_at >= before && row.started_at <= Date.now());
+    assert.ok(row.duration_ms >= 0);
+  });
+
+  test("with no active task the row carries no task id", async () => {
+    const doo = makeDO();
+    relayReturns(doo, { status: "no_active_task" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+    assert.equal(rows(doo)[0].task_id, null);
+  });
+
+  test("the shared connector is recorded as such", async () => {
+    const doo = makeDO();
+    relayReturns(doo, { entries: [] });
+    await doo.invokeTool("list_directory", { path: "src" }, { connector: "shared" });
+    assert.equal(rows(doo)[0].connector, "shared");
+  });
+
+  test("every kind of outcome is told apart", async () => {
+    const doo = makeDO();
+    const cases = [
+      ["read_file", { text: "x" }, "success", null],
+      ["read_file", { status: "no_active_task" }, "gate_denied", "NO_ACTIVE_TASK"],
+      ["read_file", { status: "task_window_expired", message: "text" }, "gate_denied", "TASK_WINDOW_EXPIRED"],
+      ["read_file", { error: "ACCESS_DENIED_SENSITIVE_FILE", path: ".env" }, "access_denied", "ACCESS_DENIED_SENSITIVE_FILE"],
+      ["read_file", { error: "ACCESS_DENIED_GITIGNORED_FILE" }, "access_denied", "ACCESS_DENIED_GITIGNORED_FILE"],
+      ["read_file", { error: "OUT_OF_WORKSPACE" }, "access_denied", "OUT_OF_WORKSPACE"],
+      ["search_workspace", { error: "SEARCH_TIMEOUT", message: "text" }, "error", "SEARCH_TIMEOUT"],
+      ["git_status", { error: "GIT_TIMEOUT" }, "error", "GIT_TIMEOUT"],
+    ];
+    for (const [tool, result] of cases) {
+      relayReturns(doo, result);
+      await doo.invokeTool(tool, { path: "a.js", query: "q" });
+    }
+    assert.deepEqual(
+      rows(doo).map((r) => [r.outcome, r.outcome_code]),
+      cases.map(([, , outcome, code]) => [outcome, code])
+    );
+  });
+
+  test("a bridge that is offline, drops, fails or times out is an error carrying its code", async () => {
+    const doo = makeDO();
+    // No socket at all: the real callLocal answers local_offline.
+    await doo.invokeTool("read_file", { path: "a.js" });
+    relayFails(doo, { status: "local_disconnected" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+    relayFails(doo, { status: "timeout" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+    relayFails(doo, { status: "error", message: "sanitize_failed: SECRET DETAIL" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+
+    assert.deepEqual(
+      rows(doo).map((r) => [r.outcome, r.outcome_code]),
+      [["error", "LOCAL_OFFLINE"], ["error", "LOCAL_DISCONNECTED"], ["error", "LOCAL_TIMEOUT"], ["error", "LOCAL_TOOL_ERROR"]]
+    );
+  });
+
+  test("nothing from a call's arguments or result other than the sanitized target reaches the table", async () => {
+    const doo = makeDO();
+    startTask(doo);
+    relayReturns(doo, {
+      text: "FILE CONTENTS SECRET",
+      hits: [{ path: "a", line: 1, text: "SECRET HIT" }],
+      diff: "SECRET DIFF",
+      warning: "SECRET WARNING",
+    });
+    await doo.invokeTool("search_workspace", { query: "password=SECRET_QUERY", glob: "**/SECRET_GLOB" });
+    await doo.invokeTool("read_file", { path: "/Users/someone/private/SECRET_ABSOLUTE.txt" });
+    await doo.invokeTool("read_file", { path: "../SECRET_PARENT.txt" });
+    relayFails(doo, { status: "error", message: "SECRET ERROR MESSAGE" });
+    await doo.invokeTool("git_diff", {});
+    await doo.invokeTool("submit_plan", { task_id: "t1", iteration: 0, state: "PLAN", title: "SECRET TITLE", body: "SECRET BODY" });
+
+    const everything = JSON.stringify(rows(doo));
+    assert.doesNotMatch(everything, /SECRET/, "no content, query, glob, message, title, body or absolute path is stored");
+    assert.deepEqual(
+      rows(doo).slice(0, 3).map((r) => r.target),
+      ["workspace search", "invalid/outside workspace path", "invalid/outside workspace path"]
+    );
+  });
+
+  test("tools answered by the DO itself are recorded too, with fixed-vocabulary targets", async () => {
+    const doo = makeDO();
+    startTask(doo);
+    await doo.invokeTool("next_task", {});
+    await doo.invokeTool("workspace_guidance", {});
+    await doo.invokeTool("task_history", { limit: 5 });
+
+    assert.deepEqual(
+      rows(doo).map((r) => [r.tool_name, r.target, r.outcome]),
+      [["next_task", "fetch next task", "success"], ["workspace_guidance", "workspace guidance", "success"], ["task_history", "task history", "success"]]
+    );
+  });
+
+  test("a rejected protocol call is an error with its code", async () => {
+    const doo = makeDO();
+    await doo.invokeTool("submit_plan", { task_id: "nope", iteration: 0, state: "PLAN", body: "b" });
+    const [row] = rows(doo);
+    assert.equal(row.outcome, "error");
+    assert.equal(row.outcome_code, "NO_MATCHING_TASK");
+    assert.equal(row.target, "PLAN · iteration 0");
+  });
+
+  test("operating_instructions and an unknown tool are not workspace access and are not recorded", async () => {
+    const doo = makeDO();
+    await doo.invokeTool("operating_instructions", {});
+    await doo.invokeTool("no_such_tool", {});
+    assert.equal(rows(doo).length, 0);
+  });
+
+  test("a workspace_batch is one row; its sub-calls are content-free details", async () => {
+    const doo = makeDO();
+    relayReturns(doo, {
+      results: [
+        { id: "x", name: "read_file", ok: true, result: { text: "SECRET" } },
+        { id: "y", name: "read_file", ok: false, error: { error: "ACCESS_DENIED_SENSITIVE_FILE" } },
+        { id: "z", name: "search_workspace", ok: true, result: { hits: [{ text: "SECRET HIT" }] } },
+      ],
+    });
+    await doo.invokeTool("workspace_batch", {
+      calls: [
+        { id: "x", name: "read_file", arguments: { path: "a.js" } },
+        { id: "y", name: "read_file", arguments: { path: ".env" } },
+        { id: "z", name: "search_workspace", arguments: { query: "SECRET QUERY" } },
+      ],
+    });
+
+    assert.equal(rows(doo).length, 1);
+    const [row] = rows(doo);
+    assert.equal(row.tool_name, "workspace_batch");
+    assert.equal(row.target, "3 calls");
+    assert.equal(row.outcome, "mixed");
+    const details = JSON.parse(row.detail_json);
+    assert.deepEqual(details.calls.map((c) => [c.tool, c.target, c.outcome, c.code]), [
+      ["read_file", "a.js", "success", null],
+      ["read_file", ".env", "access_denied", "ACCESS_DENIED_SENSITIVE_FILE"],
+      ["search_workspace", "workspace search", "success", null],
+    ]);
+    assert.doesNotMatch(row.detail_json, /SECRET|"id"/);
+  });
+
+  test("a failure to record never changes what the caller gets back", async () => {
+    const doo = makeDO();
+    relayReturns(doo, { text: "hello" });
+    doo.mcpAccess.record = () => {
+      throw new Error("disk full");
+    };
+    const result = await doo.invokeTool("read_file", { path: "a.js" });
+    assert.equal(result.structuredContent.text, "hello");
+    assert.equal(result.isError, undefined);
+  });
+
+  test("the table is capped at 1000 rows, keeping the newest", () => {
+    const doo = makeDO();
+    const event = (n) => ({ startedAt: n, durationMs: 1, toolName: "read_file", connector: "dedicated", taskId: null, target: `f${n}`, outcome: "success", outcomeCode: null, detailsJson: null });
+    for (let n = 1; n <= 1005; n++) doo.mcpAccess.record(event(n));
+
+    const all = rows(doo);
+    assert.equal(all.length, 1000);
+    assert.equal(all[0].target, "f6", "the five oldest were dropped");
+    assert.equal(all[all.length - 1].target, "f1005");
+  });
+
+  test("alarm() removes history older than 24 hours and keeps the rest", async () => {
+    const doo = makeDO();
+    const hour = 60 * 60 * 1000;
+    const event = (startedAt, target) => ({ startedAt, durationMs: 1, toolName: "read_file", connector: "dedicated", taskId: null, target, outcome: "success", outcomeCode: null, detailsJson: null });
+    doo.mcpAccess.record(event(Date.now() - 25 * hour, "old"));
+    doo.mcpAccess.record(event(Date.now() - 23 * hour, "recent"));
+
+    await doo.alarm();
+
+    assert.deepEqual(rows(doo).map((r) => r.target), ["recent"]);
+  });
+
+  test("deprovision wipes the history; rotating a token does not", async () => {
+    const doo = makeDO();
+    doo.provision();
+    relayReturns(doo, { text: "x" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+
+    doo.rotateSecret("cli_token");
+    assert.equal(rows(doo).length, 1, "rotation keeps the history");
+
+    doo.deprovision();
+    assert.equal(rows(doo).length, 0);
+  });
+});

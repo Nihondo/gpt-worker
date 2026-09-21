@@ -77,14 +77,23 @@
     function handleInvalidate(scope) {
       if (scope === "settings" || scope === "registry") {
         panel.refreshAll();
+      } else if (scope === "mcp") {
+        // MCP access history only. It must not fall through to pollActivity(),
+        // which would reload Tasks/Messages on every tool call ChatGPT makes.
+        panel.handleMcpInvalidate();
       } else {
         panel.pollActivity();
       }
     }
 
+    // Several invalidations can queue up while the tab is hidden; keep the
+    // strongest one. "mcp" is the weakest: an "activity" refresh does not cover
+    // the MCP list, but nothing stronger is lost by preferring the others.
     function mergeScope(prev, next) {
       if (prev === "settings" || next === "settings") return "settings";
       if (prev === "registry" || next === "registry") return "registry";
+      if (prev === "activity" || next === "activity") return "activity";
+      if (prev === "mcp" || next === "mcp") return "mcp";
       return "activity";
     }
 

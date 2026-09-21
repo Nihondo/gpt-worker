@@ -33,6 +33,12 @@
 //    Resolves to that route's parsed JSON body. This is the only place the
 //    MCP hub path touches env.BRIDGE_DO — inside index.js, never here. It
 //    forwards only the tool name/arguments, never a hub credential/session.
+//  - recordMcpAccess(event): stores one row of MCP access-history *metadata*
+//    (the dashboard's "MCP Access" tab). Called best-effort, after a workspace
+//    tool call has finished, with an event built by worker-mcp-access.js — so
+//    it can only ever carry a tool name, a sanitized target, an outcome kind
+//    and a duration, never the call's arguments or result. A failure to record
+//    must not change what the caller gets back (see invokeTool).
 //  - maxSharedRequestBytes: number — index.js's MAX_REQUEST_BYTES_CEILING,
 //    the fixed envelope cap for the hub-level parse that runs before the
 //    target workspace's own limit is known (see handleOAuthMcpDispatch).
@@ -46,6 +52,7 @@
 import TOOLS from "./tools.json" with { type: "json" };
 import { operatingInstructions, operatingInstructionsVersion } from "./instructions.js";
 import { isValidWorkspaceId, json, readJsonWithLimit } from "./worker-http.js";
+import { buildMcpAccessEvent } from "./worker-mcp-access.js";
 
 // Tools answered locally by the hub (no workspace_id involved) instead of
 // being relayed to a workspace's Durable Object. Excluded from the
@@ -166,6 +173,7 @@ function createBridgeMcp({
   relayWorkspaceTool,
   allowOAuthMcpRequest,
   relayHubToolToWorkspace,
+  recordMcpAccess = () => {},
   maxSharedRequestBytes,
 }) {
   return {
@@ -328,7 +336,53 @@ function createBridgeMcp({
       return json({ jsonrpc: "2.0", id, result: await this.invokeTool(name, args) });
     },
 
-    async invokeTool(name, args = {}, { connector = "dedicated" } = {}) {
+    /** Runs a tool call and records it in the MCP access history.
+     *
+     *  Every MCP tool call — dedicated or shared (the hub forwards a shared call
+     *  to the workspace's own DO, which lands here too) — passes through this
+     *  method, which makes it the one place a call can be observed with its final
+     *  outcome: success, a gate refusal, an access denial, or a bridge failure
+     *  all come back as the response this returns. An unknown tool and
+     *  `operating_instructions` (protocol text, not workspace access) are not
+     *  recorded. */
+    async invokeTool(name, args = {}, options = {}) {
+      const tool = TOOLS.tools.find((t) => t.name === name);
+      if (!tool || tool.location === "instructions") return this.dispatchTool(name, args, options);
+
+      // Snapshot before running: the task that was active when the call began,
+      // as the DO itself knows it — never anything the caller supplied — and the
+      // start time. (The task can change during the call; the row should say
+      // what it was doing when it was asked.)
+      const startedAt = Date.now();
+      let taskId = null;
+      try {
+        const task = activeTask();
+        taskId = task ? task.task_id : null;
+      } catch {
+        /* history is best-effort; never let it break a call */
+      }
+
+      const result = await this.dispatchTool(name, args, options);
+
+      try {
+        recordMcpAccess(
+          buildMcpAccessEvent({
+            tool: name,
+            connector: options && options.connector,
+            args,
+            result,
+            startedAt,
+            finishedAt: Date.now(),
+            taskId,
+          })
+        );
+      } catch {
+        /* A failure to record must not change what the caller gets back. */
+      }
+      return result;
+    },
+
+    async dispatchTool(name, args = {}, { connector = "dedicated" } = {}) {
       const tool = TOOLS.tools.find((t) => t.name === name);
       if (!tool) return toolError("UNKNOWN_TOOL", `No such tool: ${name}`);
       try {

@@ -2633,3 +2633,326 @@ describe("dashboard: push-first hibernation WebSocket, targeted invalidation, an
     assert.match(WORKSPACE_PANEL_JS, /prevBody !== undefined \? Object\.assign\(\{\},\s*fresh,\s*\{\s*body:\s*prevBody\s*\}\)\s*:\s*fresh/);
   });
 });
+
+// The dashboard's "MCP Access" tab: history of what ChatGPT did through MCP,
+// served from the workspace DO's own mcp_access_events (metadata only — see
+// worker-mcp-access.js). The API is reached the same two ways as every other
+// dashboard operation: directly by the workspace owner, and through the hub's
+// binding-only relay; both go through dashboardApiDispatch.
+describe("dashboard: MCP access history API", () => {
+  // Fixed offsets from an hour ago: ordering stays deterministic, and every row is
+  // inside the 24 h retention (rows past it are hidden — see the test below).
+  const T0 = Date.now() - 60 * 60 * 1000;
+  const event = (over = {}) => ({
+    startedAt: Date.now(),
+    durationMs: 12,
+    toolName: "read_file",
+    connector: "dedicated",
+    taskId: null,
+    target: "src/a.js",
+    outcome: "success",
+    outcomeCode: null,
+    detailsJson: null,
+    ...over,
+  });
+  const getMcp = (env, workspaceId, cookie, query = "") =>
+    worker.fetch(req(`/dashboard/${workspaceId}/api/mcp-access${query}`, { headers: { cookie } }), env);
+
+  test("requires a dashboard session", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId } = makeProvisionedWorkspace(env, instanceFor);
+
+    const res = await worker.fetch(req(`/dashboard/${workspaceId}/api/mcp-access`), env);
+    assert.equal(res.status, 401);
+  });
+
+  test("returns newest-first events with every field the tab shows, and details parsed", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    doo.mcpAccess.record(event({ startedAt: T0 + 1_000, target: "old.js" }));
+    doo.mcpAccess.record(
+      event({
+        startedAt: T0 + 2_000,
+        toolName: "workspace_batch",
+        connector: "shared",
+        taskId: "0123456789abcdef",
+        target: "2 calls",
+        outcome: "mixed",
+        detailsJson: JSON.stringify({ calls: [{ tool: "read_file", target: "a.js", outcome: "success", code: null }] }),
+      })
+    );
+
+    const body = await (await getMcp(env, workspaceId, cookie)).json();
+
+    assert.deepEqual(body.events.map((e) => e.target), ["2 calls", "old.js"]);
+    assert.deepEqual(body.events[0], {
+      eventId: 2,
+      startedAt: T0 + 2_000,
+      durationMs: 12,
+      toolName: "workspace_batch",
+      connector: "shared",
+      taskId: "0123456789abcdef",
+      target: "2 calls",
+      outcome: "mixed",
+      outcomeCode: null,
+      details: { calls: [{ tool: "read_file", target: "a.js", outcome: "success", code: null }] },
+    });
+    assert.equal(body.events[1].details, null);
+    assert.equal(body.nextCursor, null);
+  });
+
+  test("an event recorded by a real tool call shows up, end to end", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    doo.callLocal = async () => ({ ok: true, result: { error: "ACCESS_DENIED_SENSITIVE_FILE", path: ".env" } });
+
+    await doo.invokeTool("read_file", { path: ".env" });
+
+    const [only] = (await (await getMcp(env, workspaceId, cookie)).json()).events;
+    assert.equal(only.toolName, "read_file");
+    assert.equal(only.target, ".env");
+    assert.equal(only.outcome, "access_denied");
+    assert.equal(only.outcomeCode, "ACCESS_DENIED_SENSITIVE_FILE");
+  });
+
+  test("keyset pagination is stable across ties: no row repeated, none skipped", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    // Five events in the same millisecond (the tie-break is event_id), then older ones.
+    for (let n = 0; n < 5; n++) doo.mcpAccess.record(event({ startedAt: T0 + 5_000, target: `tie-${n}` }));
+    for (let n = 0; n < 3; n++) doo.mcpAccess.record(event({ startedAt: T0 + 1_000 + n, target: `older-${n}` }));
+
+    const seen = [];
+    let cursor = null;
+    let pages = 0;
+    do {
+      const body = await (await getMcp(env, workspaceId, cookie, `?limit=3${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)).json();
+      seen.push(...body.events.map((e) => e.target));
+      cursor = body.nextCursor;
+      pages++;
+    } while (cursor && pages < 10);
+
+    assert.equal(pages, 3);
+    assert.equal(seen.length, 8);
+    assert.equal(new Set(seen).size, 8, "no duplicates");
+    assert.deepEqual(seen.slice(0, 5).sort(), ["tie-0", "tie-1", "tie-2", "tie-3", "tie-4"]);
+    assert.deepEqual(seen.slice(5), ["older-2", "older-1", "older-0"]);
+  });
+
+  test("tool and outcome filters hold across pages", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    for (let n = 0; n < 6; n++) {
+      doo.mcpAccess.record(event({ startedAt: T0 + 1_000 + n, toolName: n % 2 ? "read_file" : "git_status", outcome: n < 3 ? "success" : "access_denied" }));
+    }
+
+    const collect = async (query) => {
+      const found = [];
+      let cursor = null;
+      do {
+        const body = await (await getMcp(env, workspaceId, cookie, `?limit=1${query}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`)).json();
+        found.push(...body.events);
+        cursor = body.nextCursor;
+      } while (cursor);
+      return found;
+    };
+
+    const reads = await collect("&tool=read_file");
+    assert.equal(reads.length, 3);
+    assert.ok(reads.every((e) => e.toolName === "read_file"));
+    const denied = await collect("&outcome=access_denied");
+    assert.equal(denied.length, 3);
+    assert.ok(denied.every((e) => e.outcome === "access_denied"));
+    const both = await collect("&tool=read_file&outcome=access_denied");
+    assert.equal(both.length, 2);
+  });
+
+  test("a malformed filter or cursor is ignored, never handed to SQL", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    doo.mcpAccess.record(event());
+    const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+
+    for (const query of [
+      `?tool=${encodeURIComponent("read_file'; DROP TABLE mcp_access_events;--")}`,
+      "?tool=Not%20A%20Tool",
+      "?outcome=bogus",
+      `?cursor=${b64({ t: 1, id: "1; DROP TABLE mcp_access_events" })}`,
+      `?cursor=${b64({ t: 1, id: 5 })}`,
+      "?cursor=%%%not-base64",
+    ]) {
+      const res = await getMcp(env, workspaceId, cookie, query);
+      assert.equal(res.status, 200, query);
+      assert.equal((await res.json()).events.length, 1, `${query}: treated as no filter / no cursor`);
+    }
+    assert.equal(doo.sql.exec(`SELECT COUNT(*) AS n FROM mcp_access_events`).toArray()[0].n, 1, "the table is intact");
+  });
+
+  test("limit is clamped to 1..100", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    for (let n = 0; n < 130; n++) doo.mcpAccess.record(event({ startedAt: T0 + 1_000 + n }));
+
+    assert.equal((await (await getMcp(env, workspaceId, cookie, "?limit=1000")).json()).events.length, 100);
+    assert.equal((await (await getMcp(env, workspaceId, cookie, "?limit=1")).json()).events.length, 1);
+    assert.equal((await (await getMcp(env, workspaceId, cookie, "?limit=-5")).json()).events.length, 1);
+  });
+
+  test("a row past the retention that alarm() has not swept yet is not shown", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    const hour = 60 * 60 * 1000;
+    doo.mcpAccess.record(event({ startedAt: Date.now() - 25 * hour, target: "expired.js" }));
+    doo.mcpAccess.record(event({ startedAt: Date.now() - 23 * hour, target: "kept.js" }));
+
+    const body = await (await getMcp(env, workspaceId, cookie)).json();
+
+    assert.deepEqual(body.events.map((e) => e.target), ["kept.js"]);
+    assert.equal(body.nextCursor, null);
+  });
+
+  test("the overview states the history's own retention", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    const overview = await (await worker.fetch(req(`/dashboard/${workspaceId}/api/overview`, { headers: { cookie } }), env)).json();
+
+    assert.equal(overview.retention.mcpAccessMs, 24 * 60 * 60 * 1000);
+    assert.equal(overview.retention.mcpAccessMaxRows, 1000);
+    assert.equal(overview.retention.ackedMessagesMs, 7 * 24 * 60 * 60 * 1000, "existing retention fields are unchanged");
+  });
+
+  test("the history is not part of the snapshot, so the Tasks/Messages view never reads it", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+    doo.mcpAccess.record(event());
+
+    const snapshot = await (await worker.fetch(req(`/dashboard/${workspaceId}/api/snapshot`, { headers: { cookie } }), env)).json();
+
+    assert.deepEqual(Object.keys(snapshot).sort(), ["messages", "overview", "tasks"]);
+  });
+
+  test("hub relay serves the selected workspace's history only", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const other = instanceFor("fedcba9876543210");
+    other.provision();
+    const { hub, hubGptToken } = makeHub(env, instanceFor);
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "A" });
+    hub.registerWorkspace({ workspace_id: "fedcba9876543210", name: "B" });
+    doo.mcpAccess.record(event({ target: "only-in-A" }));
+    other.mcpAccess.record(event({ target: "only-in-B" }));
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    const a = await (await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/mcp-access`, { headers: { cookie } }), env)).json();
+    const b = await (await worker.fetch(req(`/dashboard/hub/api/workspaces/fedcba9876543210/mcp-access`, { headers: { cookie } }), env)).json();
+
+    assert.deepEqual(a.events.map((e) => e.target), ["only-in-A"]);
+    assert.deepEqual(b.events.map((e) => e.target), ["only-in-B"]);
+  });
+
+  test("hub relay carries the filter and cursor through, and refuses an unregistered workspace", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const { hub, hubGptToken } = makeHub(env, instanceFor);
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "A" });
+    for (let n = 0; n < 4; n++) doo.mcpAccess.record(event({ startedAt: T0 + 1_000 + n, toolName: n % 2 ? "read_file" : "git_log" }));
+    const cookie = await loginHubAndGetCookie(env, hubGptToken);
+
+    const first = await (await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/mcp-access?tool=read_file&limit=1`, { headers: { cookie } }), env)).json();
+    assert.equal(first.events.length, 1);
+    const second = await (await worker.fetch(req(`/dashboard/hub/api/workspaces/${workspaceId}/mcp-access?tool=read_file&limit=1&cursor=${encodeURIComponent(first.nextCursor)}`, { headers: { cookie } }), env)).json();
+    assert.equal(second.events.length, 1);
+    assert.notEqual(second.events[0].eventId, first.events[0].eventId);
+    assert.ok(second.events.every((e) => e.toolName === "read_file"));
+
+    const unregistered = await worker.fetch(req(`/dashboard/hub/api/workspaces/0000000000000000/mcp-access`, { headers: { cookie } }), env);
+    assert.equal(unregistered.status, 404);
+  });
+
+  test("a workspace session cannot read another workspace's history", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, gptToken } = makeProvisionedWorkspace(env, instanceFor);
+    const other = instanceFor("fedcba9876543210");
+    other.provision();
+    other.mcpAccess.record(event({ target: "secret-of-B" }));
+    const cookie = await loginAndGetCookie(env, workspaceId, gptToken);
+
+    const res = await worker.fetch(req(`/dashboard/fedcba9876543210/api/mcp-access`, { headers: { cookie } }), env);
+    assert.equal(res.status, 401);
+  });
+});
+
+// Recording a call tells open dashboards — but at most once per interval, and
+// under its own scope so an MCP call never makes the Tasks/Messages view reload.
+describe("dashboard: MCP access invalidation", () => {
+  async function socketsFor(env, instanceFor) {
+    const { workspaceId, doo } = makeProvisionedWorkspace(env, instanceFor);
+    const hub = instanceFor("gpt-worker-hub");
+    hub.provisionHub();
+    hub.registerWorkspace({ workspace_id: workspaceId, name: "ws1" });
+    const direct = new WebSocketPair();
+    doo.ctx.acceptWebSocket(direct[1], ["dashboard-workspace"]);
+    direct[1].serializeAttachment({ kind: "dashboard", sessionHash: "h1", expiresAt: Date.now() + 100000 });
+    const hubSocket = new WebSocketPair();
+    hub.ctx.acceptWebSocket(hubSocket[1], ["dashboard-hub"]);
+    hubSocket[1].serializeAttachment({ kind: "dashboard", sessionHash: "h2", expiresAt: Date.now() + 100000 });
+    return { workspaceId, doo, direct: direct[1], hubSocket: hubSocket[1] };
+  }
+  const flush = async (doo) => {
+    if (doo.ctx.waitedPromises) await Promise.all(doo.ctx.waitedPromises);
+  };
+
+  test("a recorded call sends scope 'mcp' to the direct dashboard and the hub — and nothing else", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { workspaceId, doo, direct, hubSocket } = await socketsFor(env, instanceFor);
+    doo.callLocal = async () => ({ ok: true, result: { text: "x" } });
+
+    await doo.invokeTool("read_file", { path: "a.js" });
+    await flush(doo);
+
+    assert.deepEqual(direct.sent.map((m) => JSON.parse(m)), [{ type: "invalidate", scope: "mcp" }]);
+    assert.deepEqual(hubSocket.sent.map((m) => JSON.parse(m)), [{ type: "invalidate", workspaceId, scope: "mcp" }]);
+  });
+
+  test("a burst of calls is throttled to one notification per interval, though every call is recorded", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { doo, direct, hubSocket } = await socketsFor(env, instanceFor);
+    doo.callLocal = async () => ({ ok: true, result: { text: "x" } });
+
+    for (let n = 0; n < 10; n++) await doo.invokeTool("read_file", { path: `f${n}.js` });
+    await flush(doo);
+
+    assert.equal(direct.sent.length, 1, "one notification for the burst");
+    assert.equal(hubSocket.sent.length, 1, "and one hub fetch, not ten");
+    assert.equal(doo.sql.exec(`SELECT COUNT(*) AS n FROM mcp_access_events`).toArray()[0].n, 10, "yet all ten were recorded");
+
+    doo.lastMcpNotifyAt = Date.now() - 2_500; // the interval has passed
+    await doo.invokeTool("read_file", { path: "later.js" });
+    await flush(doo);
+    assert.equal(direct.sent.length, 2, "the next call after the interval notifies again");
+  });
+
+  test("the retention sweep notifies only when it actually removed history", async () => {
+    const { env, instanceFor } = makeRealBridgeDoEnv();
+    const { doo, direct } = await socketsFor(env, instanceFor);
+
+    await doo.alarm();
+    await flush(doo);
+    assert.equal(direct.sent.length, 0, "nothing to sweep, nothing sent");
+
+    doo.mcpAccess.record({ startedAt: Date.now() - 8 * 24 * 60 * 60 * 1000, durationMs: 1, toolName: "read_file", connector: "dedicated", taskId: null, target: "x", outcome: "success", outcomeCode: null, detailsJson: null });
+    await doo.alarm();
+    await flush(doo);
+    assert.deepEqual(direct.sent.map((m) => JSON.parse(m)), [{ type: "invalidate", scope: "mcp" }]);
+  });
+});

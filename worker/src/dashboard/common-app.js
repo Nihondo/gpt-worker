@@ -112,3 +112,141 @@ export function messageComparator(a, b) {
   if (a.createdAt !== b.createdAt) return b.createdAt - a.createdAt;
   return b.messageId > a.messageId ? 1 : b.messageId < a.messageId ? -1 : 0;
 }
+
+// ---------------------------------------------------------------------------
+// MCP access history ("MCP Access" tab). Pure presentation helpers: turn the
+// metadata rows the Worker stores (tool name, outcome kind, a known outcome
+// code, a sanitized target) into words a person can read. Nothing here fetches
+// or holds state, and everything that reaches the DOM later goes through el()/
+// textContent — the strings below are ours, and the row values are shown as
+// text, never as markup.
+// ---------------------------------------------------------------------------
+
+var MCP_TOOL_LABELS = {
+  read_file: "Read file",
+  list_directory: "List directory",
+  search_workspace: "Search",
+  git_status: "Git status",
+  git_diff: "Git diff",
+  git_log: "Git log",
+  execution_output: "Execution output",
+  workspace_info: "Workspace info",
+  workspace_overview: "Project overview",
+  workspace_guidance: "Guidance",
+  workspace_batch: "Batch",
+  next_task: "Fetch task",
+  submit_plan: "Send reply",
+  set_title: "Set title",
+  task_history: "Task history",
+};
+
+export function mcpToolLabel(name) {
+  return MCP_TOOL_LABELS[name] || String(name || "Unknown tool");
+}
+
+// Result kinds are shown as words, not only as a color, so they read the same
+// for everyone and in a printout.
+var MCP_OUTCOMES = {
+  success: { label: "OK", className: "mcp-outcome-success" },
+  gate_denied: { label: "Blocked", className: "mcp-outcome-gate" },
+  access_denied: { label: "Denied", className: "mcp-outcome-denied" },
+  error: { label: "Error", className: "mcp-outcome-error" },
+  mixed: { label: "Mixed", className: "mcp-outcome-mixed" },
+};
+
+export function mcpOutcomeInfo(outcome) {
+  return MCP_OUTCOMES[outcome] || { label: String(outcome || "Unknown"), className: "mcp-outcome-error" };
+}
+
+var MCP_CODE_TEXT = {
+  NO_ACTIVE_TASK: "No active task — reading stays closed until one starts",
+  TASK_WINDOW_EXPIRED: "The task's read window went idle — the operator has to advance the task",
+  ACCESS_DENIED_SENSITIVE_FILE: "Sensitive file — never readable",
+  ACCESS_DENIED_GITIGNORED_FILE: "Git-ignored file — not readable unless the owner allows it",
+  ACCESS_DENIED_EXPLICIT_READ: "Blocked by the owner's deny-read setting",
+  ACCESS_DENIED: "Access denied by the workspace's read policy",
+  OUT_OF_WORKSPACE: "Path is outside the workspace",
+  LOCAL_OFFLINE: "The local bridge was not connected",
+  LOCAL_DISCONNECTED: "The local bridge disconnected mid-call",
+  LOCAL_TIMEOUT: "The local bridge did not answer in time",
+  LOCAL_TOOL_ERROR: "The local bridge reported an error",
+  SEARCH_TIMEOUT: "The search took too long",
+  SEARCH_FAILED: "The search failed (for example a malformed pattern)",
+  GIT_TIMEOUT: "Git did not answer in time",
+  GIT_ERROR: "Git reported an error",
+  NOT_FOUND: "File or directory not found",
+  BINARY_FILE: "Binary file — content not shown",
+  INVALID_ARGS: "The call's arguments were invalid",
+  INTERNAL_ERROR: "Internal error in the Worker",
+  NO_MATCHING_TASK: "The reply did not match an open task",
+  PARTIAL: "The result was partial or possibly incomplete",
+};
+
+/** A sentence for an outcome code, or the code itself when it is not one we know
+ *  (the Worker only ever stores identifier-shaped codes), or null for none. */
+export function mcpCodeText(code) {
+  if (!code) return null;
+  return MCP_CODE_TEXT[code] || String(code);
+}
+
+export function mcpTaskLabel(taskId) {
+  return taskId ? "task " + String(taskId).slice(0, 8) : "no active task";
+}
+
+export function formatDuration(ms) {
+  var n = Number(ms);
+  if (!isFinite(n) || n < 0) return "";
+  if (n < 1000) return Math.round(n) + " ms";
+  return (n / 1000).toFixed(n < 10000 ? 1 : 0) + " s";
+}
+
+export function mcpComparator(a, b) {
+  if (a.startedAt !== b.startedAt) return b.startedAt - a.startedAt;
+  return b.eventId - a.eventId;
+}
+
+// Reads that follow one another are the noise: one task can make dozens of
+// read_file calls in a minute. Successful reads of the same task, each within
+// this gap of the next, are shown as one row. A denial or an error is never
+// folded in — it is the thing you are looking for.
+export var MCP_GROUP_GAP_MS = 30000;
+var MCP_GROUPABLE_TOOLS = { read_file: true };
+
+/** Turns newest-first events into display items: single events, and groups of
+ *  two or more consecutive successful reads. The grouping is a view over the
+ *  events that are loaded; it never changes which events exist. */
+export function groupMcpEvents(events) {
+  var items = [];
+  var run = [];
+  function flush() {
+    if (run.length >= 2) {
+      // The id is the OLDEST member's: newer reads join a run at the top, so this id
+      // stays put and a selected group stays selected as the run grows.
+      items.push({ type: "group", id: "group-" + run[run.length - 1].eventId, events: run, newest: run[0], oldest: run[run.length - 1], count: run.length });
+    } else if (run.length === 1) {
+      items.push({ type: "event", id: "event-" + run[0].eventId, event: run[0] });
+    }
+    run = [];
+  }
+  events.forEach(function (event) {
+    var groupable = MCP_GROUPABLE_TOOLS[event.toolName] === true && event.outcome === "success";
+    if (!groupable) {
+      flush();
+      items.push({ type: "event", id: "event-" + event.eventId, event: event });
+      return;
+    }
+    var last = run[run.length - 1];
+    if (last && (last.toolName !== event.toolName || last.connector !== event.connector || last.taskId !== event.taskId || last.startedAt - event.startedAt > MCP_GROUP_GAP_MS)) flush();
+    run.push(event);
+  });
+  flush();
+  return items;
+}
+
+/** The one-line summary shown under a row's title. */
+export function mcpEventLine(event) {
+  var code = mcpCodeText(event.outcomeCode);
+  if (event.outcome === "success") return event.target || "";
+  if (event.outcome === "mixed") return event.target || "";
+  return code ? (event.target ? event.target + " — " + code : code) : (event.target || "");
+}
