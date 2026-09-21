@@ -15,6 +15,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { bundleScanTimeoutMs } from "./exec-limits.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CONFIG_PATH = path.join(HERE, "leaks.toml");
@@ -105,6 +106,81 @@ export function scanText(text) {
     } catch {
       /* best-effort cleanup */
     }
+  }
+}
+
+/** Scans a directory of files (one scanner run for all of them) and returns
+ *  raw findings as [{ file, ruleId, secret }], `file` being relative to `dir`
+ *  with forward slashes. Throws on any failure, exactly like scanText(): a
+ *  caller must never mistake a failed scan for "nothing found".
+ *
+ *  Two flags matter because the scanned files are untrusted workspace content:
+ *  `--ignore-gitleaks-allow` stops a `gitleaks:allow` / `betterleaks:allow`
+ *  comment on a line from suppressing the finding on it (measured: with the
+ *  default, such a line is reported as clean), and the ignore-file lookup is
+ *  pointed at an empty directory so no `.gitleaksignore` from the workspace
+ *  can suppress findings by fingerprint. */
+export function scanDirectory(dir) {
+  const scanner = detectScanner();
+  if (!scanner) {
+    throw new Error("No secret scanner available (install betterleaks or gitleaks).");
+  }
+  const target = path.resolve(dir);
+  const cwd = path.dirname(target);
+  const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-worker-scan-ignore-"));
+  const reportPath = path.join(os.tmpdir(), `gpt-worker-scan-${process.pid}-${crypto.randomBytes(8).toString("hex")}.json`);
+  try {
+    fs.writeFileSync(reportPath, "", { mode: 0o600 });
+    try {
+      execFileSync(
+        scanner.bin,
+        [
+          "dir", "--config", CONFIG_PATH, "--ignore-gitleaks-allow", "--gitleaks-ignore-path", emptyDir,
+          "--report-format", "json", "--report-path", reportPath, "--no-banner", "--exit-code", "0",
+          path.basename(target),
+        ],
+        { cwd, timeout: bundleScanTimeoutMs(), killSignal: "SIGKILL", stdio: ["ignore", "ignore", "ignore"] }
+      );
+    } catch (err) {
+      throw new Error(`Secret scan failed (${scanner.bin}): ${err.message || err}`);
+    }
+    let raw;
+    try {
+      raw = fs.readFileSync(reportPath, "utf8");
+    } catch (err) {
+      throw new Error(`Secret scan report missing (${scanner.bin}): ${err.message || err}`);
+    }
+    if (!raw.trim()) return [];
+    let findings;
+    try {
+      findings = JSON.parse(raw);
+    } catch (err) {
+      throw new Error(`Secret scan report unparsable (${scanner.bin}): ${err.message || err}`);
+    }
+    // A directory scan with nothing to report writes a literal `null` (a nil
+    // list), not `[]` — measured. Anything else that is not a list is a broken report.
+    if (findings === null) return [];
+    if (!Array.isArray(findings)) {
+      throw new Error(`Secret scan report was not a list (${scanner.bin}).`);
+    }
+    return findings
+      .map((f) => {
+        const reported = String(f.File || (f.Attributes && f.Attributes.path) || "");
+        const file = path.relative(target, path.resolve(cwd, reported)).split(path.sep).join("/");
+        return { file, ruleId: String(f.RuleID || ""), secret: String(f.Secret || "") };
+      })
+      .filter((f) => f.ruleId && f.secret)
+      .map((f) => {
+        // A finding whose file cannot be placed inside the scanned directory
+        // means the report cannot be trusted to say where the secret is.
+        if (!f.file || f.file === ".." || f.file.startsWith("../") || path.isAbsolute(f.file)) {
+          throw new Error(`Secret scan reported a path outside the scanned directory (${scanner.bin}).`);
+        }
+        return f;
+      });
+  } finally {
+    fs.rmSync(reportPath, { force: true });
+    fs.rmSync(emptyDir, { recursive: true, force: true });
   }
 }
 

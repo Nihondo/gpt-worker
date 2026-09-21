@@ -1,11 +1,10 @@
 // workspace_bundle delivery path (docs/plans/pending/workspace-bundle-tool.md,
-// Phase 0): a PreScanned archive crosses the bridge's single egress point
+// Phases 0-1): a PreScanned archive crosses the bridge's single egress point
 // without a second scan, and the Worker turns it into an MCP embedded resource
-// without doubling it into structuredContent. The archive content here is the
-// Phase 0 synthetic one; the properties under test are the delivery rules that
-// Phase 1 (real collection) must keep.
+// without doubling it into structuredContent. What goes *into* the archive is
+// covered by tests/bundle.test.mjs; this file is about getting it out.
 
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -13,13 +12,24 @@ import path from "node:path";
 import { BridgeLink } from "../bridge/link.mjs";
 import { PreScanned } from "../bridge/sanitize.mjs";
 import { BridgeDO } from "../worker/src/index.js";
+import { summarizeTarget } from "../worker/src/worker-mcp-access.js";
 import { makeFakeCtx, makeFakeEnv } from "./helpers/fake-do-ctx.mjs";
+import { workspaceStateDir } from "../bridge/state.mjs";
 
 const unrot13 = (s) =>
   s.replace(/[a-zA-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + (c.toLowerCase() <= "m" ? 13 : -13)));
 
+const dirsToClean = [];
+after(() => {
+  for (const dir of dirsToClean) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function makeBridgeLink() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gw-bundle-test-"));
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "gw-bundle-test-")));
+  fs.writeFileSync(path.join(root, "README.md"), "# demo\n");
+  fs.mkdirSync(path.join(root, "src"));
+  fs.writeFileSync(path.join(root, "src", "a.js"), "export const a = 1;\n");
+  dirsToClean.push(root, workspaceStateDir(root));
   const link = new BridgeLink({
     workerUrl: "https://example.test",
     workspaceId: "0123456789abcdef",
@@ -65,34 +75,31 @@ describe("BridgeLink: workspace_bundle", () => {
 
   test("an active window returns the archive in wire form, with no bundle object left behind", async () => {
     const { link, sent } = makeBridgeLink();
-    await call(link, "c", "workspace_bundle", { max_bytes: 4096, ...ACTIVE });
+    await call(link, "c", "workspace_bundle", ACTIVE);
 
     assert.equal(sent[0].ok, true);
-    const { bundle, spike, filesReturned } = sent[0].result;
-    assert.equal(spike, true);
-    assert.equal(filesReturned, 4);
+    const { bundle, filesReturned, archiveBytes } = sent[0].result;
+    assert.equal(filesReturned, 2);
     assert.deepEqual(Object.keys(bundle).sort(), ["base64", "filename", "mimeType"]);
     assert.equal(bundle.mimeType, "application/gzip");
     // gzip magic number: the archive really is the bytes that were packed.
-    assert.equal(Buffer.from(bundle.base64, "base64").subarray(0, 2).toString("hex"), "1f8b");
+    const bytes = Buffer.from(bundle.base64, "base64");
+    assert.equal(bytes.subarray(0, 2).toString("hex"), "1f8b");
+    assert.equal(bytes.length, archiveBytes);
     assert.equal("sanitize" in sent[0].result, false);
   });
 
-  test("the archive's size follows max_bytes and a bad value is an argument error, not a crash", async () => {
+  test("a bad max_bytes is an argument error, not a crash", async () => {
     const { link, sent } = makeBridgeLink();
-    await call(link, "d", "workspace_bundle", { max_bytes: 200_000, ...ACTIVE });
-    const bytes = Buffer.from(sent[0].result.bundle.base64, "base64").length;
-    assert.ok(bytes > 190_000 && bytes < 215_000, `archive was ${bytes} bytes`);
-
     await call(link, "e", "workspace_bundle", { max_bytes: 10, ...ACTIVE });
-    await call(link, "f", "workspace_bundle", { mime_type: "text/html", ...ACTIVE });
+    await call(link, "f", "workspace_bundle", { max_bytes: 999_999_999, ...ACTIVE });
+    assert.equal(sent[0].result.error, "INVALID_ARGS");
     assert.equal(sent[1].result.error, "INVALID_ARGS");
-    assert.equal(sent[2].result.error, "INVALID_ARGS");
   });
 
   test("bridge.log records the outcome and never the archive", async () => {
     const { link, sent, logged } = makeBridgeLink();
-    await call(link, "g", "workspace_bundle", { max_bytes: 2048, ...ACTIVE });
+    await call(link, "g", "workspace_bundle", ACTIVE);
     const base64 = sent[0].result.bundle.base64;
     assert.ok(logged.some((line) => /^rpc workspace_bundle ok/.test(line)));
     for (const line of logged) assert.equal(line.includes(base64.slice(0, 64)), false);
@@ -216,5 +223,13 @@ describe("Worker: workspace_bundle result", () => {
     const result = await doo.invokeTool("read_file", { path: "a.js" });
     assert.equal(result.content.length, 1);
     assert.deepEqual(result.structuredContent, { bundle: wire });
+  });
+
+  test("the audit target is a sanitized path or a fixed label, never the raw argument", () => {
+    assert.equal(summarizeTarget("workspace_bundle", {}), "workspace archive");
+    assert.equal(summarizeTarget("workspace_bundle", { path: "src/lib" }), "workspace archive · src/lib");
+    assert.equal(summarizeTarget("workspace_bundle", { path: "/etc/passwd" }), "workspace archive · invalid/outside workspace path");
+    assert.equal(summarizeTarget("workspace_bundle", { path: "../x" }), "workspace archive · invalid/outside workspace path");
+    assert.equal(summarizeTarget("workspace_bundle", { max_bytes: 4096 }), "workspace archive");
   });
 });

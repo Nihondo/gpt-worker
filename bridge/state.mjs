@@ -333,6 +333,15 @@ export function recordsDir(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), "records");
 }
 
+/** Where workspace_bundle stages a copy of the files it is about to scan and
+ *  pack. Private (0700) like everything else here: for a moment it holds
+ *  unmasked workspace content. Created on demand. */
+export function bundleStagingDir(workspaceRoot) {
+  const dir = path.join(workspaceStateDir(workspaceRoot), "bundle-staging");
+  ensurePrivateDir(dir);
+  return dir;
+}
+
 function tokensFilePath(workspaceRoot) {
   return path.join(workspaceStateDir(workspaceRoot), "tokens.json");
 }

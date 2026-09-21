@@ -37,11 +37,28 @@ export function openTimeoutMs() {
   return override() ?? 10_000;
 }
 
-/** `tar` packing a workspace_bundle archive. Bounded because it blocks the
- *  daemon's event loop like every other synchronous child, but generous
- *  compared with the per-path probes: it is one process over the whole tree. */
+// workspace_bundle runs three synchronous stages on the daemon's one thread:
+// collecting files, scanning the staged copy, and packing it. The Worker gives
+// up on the whole call after RPC_TIMEOUT_MS (20s), so the three budgets are
+// chosen to sum to less than that (8 + 6 + 5 = 19s in the worst case); a stage
+// that runs out of time fails or stops early instead of letting the Worker
+// abandon a call whose result would be thrown away.
+
+/** How long collecting bundle files may take before it stops and returns what
+ *  it has, flagged partial. Checked between directory entries, not inside one. */
+export function bundleCollectBudgetMs() {
+  return override() ?? 8_000;
+}
+
+/** The single directory scan over the staged bundle files. */
+export function bundleScanTimeoutMs() {
+  return override() ?? 6_000;
+}
+
+/** `tar` packing a workspace_bundle archive. One process over a directory of
+ *  at most a few MiB, so this is generous for what it does. */
 export function archiveTimeoutMs() {
-  return override() ?? 30_000;
+  return override() ?? 5_000;
 }
 
 /** True when execFileSync killed the child because `timeout` elapsed. Node

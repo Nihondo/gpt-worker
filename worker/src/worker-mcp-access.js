@@ -54,6 +54,7 @@ export const MCP_OUTCOME_CODES = [
   "INVALID_ARGS", "INVALID_ITERATION", "INVALID_STATE", "INVALID_TITLE", "TITLE_ALREADY_SET",
   "NOT_FOUND", "NOT_A_DIRECTORY", "ENOENT", "ENOTDIR", "BINARY_FILE",
   "GIT_ERROR", "GIT_TIMEOUT", "SEARCH_TIMEOUT", "SEARCH_FAILED",
+  "BUNDLE_TOO_LARGE", "BUNDLE_SCAN_FAILED", "ARCHIVE_TIMEOUT", "ARCHIVE_FAILED",
   "UNKNOWN_TOOL", "UNKNOWN_WORKSPACE", "WORKSPACE_UNAVAILABLE", "NO_MATCHING_TASK",
   "BODY_TOO_LARGE", "PAYLOAD_TOO_LARGE", "PARSE_ERROR", "INTERNAL_ERROR",
 ];
@@ -139,7 +140,7 @@ export function summarizeTarget(tool, args) {
     case "workspace_guidance":
       return "workspace guidance";
     case "workspace_bundle":
-      return "workspace archive";
+      return `workspace archive${optionalPathSuffix(a.path)}`;
     case "workspace_batch":
       return Array.isArray(a.calls) ? `${a.calls.length} call${a.calls.length === 1 ? "" : "s"}` : "batch";
     case "next_task":

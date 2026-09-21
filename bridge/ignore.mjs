@@ -253,6 +253,13 @@ export class IgnoreRules {
     this.resetOperationState();
   }
 
+  /** What the running operation has denied so far because git could not
+   *  answer, without ending it. For a tool that must record that in its own
+   *  output (workspace_bundle's BUNDLE.md) before the operation closes. */
+  operationSummary() {
+    return { deniedByUnknown: this.deniedByUnknown, reason: this.lastUnknownReason };
+  }
+
   /** Ends the operation and reports how many paths it denied because git could
    *  not answer (0 when git always gave a definite answer). */
   endOperation() {
