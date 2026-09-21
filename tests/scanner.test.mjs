@@ -11,6 +11,9 @@
 // one installed.
 import { test, describe, before, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { execFileSync } from "node:child_process";
 import * as scanner from "../bridge/scanner.mjs";
 
@@ -113,6 +116,37 @@ describe("scanner.mjs: detectScanner / scanText (requires betterleaks or gitleak
 
   test("scanText returns [] for text with no secrets", () => {
     assert.deepEqual(scanner.scanText("nothing to see here\njust ordinary code\n"), []);
+  });
+
+  // The scanned text is untrusted workspace content, so nothing in it (or next
+  // to it) may switch detection off. Both holes below were measured against the
+  // real scanner before the fix: the finding simply did not come back.
+  describe("text from the workspace cannot suppress a finding", () => {
+    const unrot13 = (t) =>
+      t.replace(/[a-zA-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + (c.toLowerCase() <= "m" ? 13 : -13)));
+    // Not a real credential: rot13 of a documentation-style URL.
+    const secretUrl = unrot13("cbfgterf://pnanel:fnavglpurpxcj@qo.vagreany.vainyvq:5432/ncc");
+
+    test("a `gitleaks:allow` / `betterleaks:allow` comment on the line", () => {
+      for (const marker of ["gitleaks:allow", "betterleaks:allow"]) {
+        const findings = scanner.scanText(`db = ${secretUrl} # ${marker}\n`);
+        assert.deepEqual(findings.map((f) => f.ruleId), ["gw-url-password"], marker);
+      }
+    });
+
+    test("a .gitleaksignore in the directory the process was started from", () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gw-ignorefile-"));
+      const previous = process.cwd();
+      try {
+        // A stdin finding's fingerprint is `:<rule>:<line>`, so this is easy to write.
+        fs.writeFileSync(path.join(dir, ".gitleaksignore"), ":gw-url-password:1\n");
+        process.chdir(dir);
+        assert.deepEqual(scanner.scanText(`db = ${secretUrl}\n`).map((f) => f.ruleId), ["gw-url-password"]);
+      } finally {
+        process.chdir(previous);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });
 

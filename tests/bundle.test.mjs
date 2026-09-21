@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { WorkspaceTools } from "../bridge/tools.mjs";
 import { PreScanned } from "../bridge/sanitize.mjs";
@@ -131,6 +132,14 @@ describe("workspace_bundle: what goes in", () => {
   test("has no macOS AppleDouble entries and one top-level directory", () => {
     assert.equal(archive.entries.some((e) => /(^|\/)\._/.test(e)), false);
     assert.equal(new Set(archive.entries.map((e) => e.split("/")[0])).size, 1);
+  });
+
+  test("carries no extended attributes, as AppleDouble entries or as PAX headers", () => {
+    // macOS gives new files a `com.apple.provenance` attribute, which bsdtar
+    // archives as a PAX header unless told not to (measured); on other systems
+    // this holds trivially.
+    const rawTar = zlib.gunzipSync(Buffer.from(bundle.base64, "base64")).toString("latin1");
+    assert.equal(/(LIBARCHIVE|SCHILY)\.xattr\./.test(rawTar), false);
   });
 
   test("leaves no staged copy behind", () => {

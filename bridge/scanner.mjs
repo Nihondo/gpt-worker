@@ -58,6 +58,23 @@ export function resetScannerCache() {
   cached = undefined;
 }
 
+// The scanner reads `.gitleaksignore` from its working directory, and the
+// findings of a `stdin` scan have a predictable fingerprint (`:<rule>:<line>`),
+// so an ignore file that is part of the scanned workspace could switch a rule
+// off. The daemon inherits the directory it was started from — normally the
+// workspace — and `--gitleaks-ignore-path` is not honored by `stdin` (measured),
+// so the only reliable defence is to run the scanner from a directory nothing
+// but this process ever writes to.
+let isolatedCwd = null;
+function scannerCwd() {
+  if (isolatedCwd && fs.existsSync(isolatedCwd)) return isolatedCwd;
+  isolatedCwd = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-worker-scan-cwd-"));
+  return isolatedCwd;
+}
+process.on("exit", () => {
+  if (isolatedCwd) fs.rmSync(isolatedCwd, { recursive: true, force: true });
+});
+
 /** Runs the scanner over `text` via its `stdin` subcommand and returns raw
  *  findings as [{ ruleId, secret }]. Throws on any failure — missing binary,
  *  non-zero exit despite --exit-code 0, a malformed report, or a timeout —
@@ -73,10 +90,13 @@ export function scanText(text) {
     try {
       // --exit-code 0 is required: both engines exit non-zero by default when
       // findings are present, which execFileSync would otherwise throw on.
+      // --ignore-gitleaks-allow: the text is untrusted workspace content, and by
+      // default a `gitleaks:allow` / `betterleaks:allow` comment on a line
+      // suppresses the finding on it (measured: such a line came back clean).
       execFileSync(
         scanner.bin,
-        ["stdin", "--config", CONFIG_PATH, "--report-format", "json", "--report-path", reportPath, "--no-banner", "--exit-code", "0"],
-        { input: text, timeout: SCAN_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "ignore", "ignore"] }
+        ["stdin", "--config", CONFIG_PATH, "--ignore-gitleaks-allow", "--report-format", "json", "--report-path", reportPath, "--no-banner", "--exit-code", "0"],
+        { input: text, cwd: scannerCwd(), timeout: SCAN_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, stdio: ["pipe", "ignore", "ignore"] }
       );
     } catch (err) {
       throw new Error(`Secret scan failed (${scanner.bin}): ${err.message || err}`);

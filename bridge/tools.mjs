@@ -114,6 +114,28 @@ function bundleSlug(root) {
   return cleaned || "workspace";
 }
 
+/** `tar -czf` over the staged directory, without extended attributes. macOS
+ *  stores them two ways and both were measured in real archives: as `._*`
+ *  AppleDouble entries (stopped by COPYFILE_DISABLE) and as PAX headers such as
+ *  `LIBARCHIVE.xattr.com.apple.provenance` (stopped by --no-xattrs). They can
+ *  carry things like a file's download URL, and readers warn about them. A tar
+ *  that does not know --no-xattrs is retried without it (it does not write
+ *  them by default). A timeout is not retried. */
+function packBundle(run, slug, archive) {
+  const options = {
+    env: { ...process.env, COPYFILE_DISABLE: "1" },
+    stdio: ["ignore", "ignore", "ignore"],
+    timeout: archiveTimeoutMs(),
+    killSignal: "SIGKILL",
+  };
+  try {
+    execFileSync("tar", ["--no-xattrs", "-czf", archive, "-C", run, slug], options);
+  } catch (err) {
+    if (isExecTimeout(err)) throw err;
+    execFileSync("tar", ["-czf", archive, "-C", run, slug], options);
+  }
+}
+
 function listForManifest(paths) {
   if (paths.length === 0) return "";
   const shown = paths.slice(0, BUNDLE_LIST_CAP).map((entry) => `  - ${entry}`);
@@ -452,14 +474,7 @@ export class WorkspaceTools {
 
       const archive = path.join(run, "out.tgz");
       try {
-        // COPYFILE_DISABLE stops macOS's bsdtar from adding `._*` AppleDouble
-        // entries (measured in Phase 0), which carry extended attributes.
-        execFileSync("tar", ["-czf", archive, "-C", run, slug], {
-          env: { ...process.env, COPYFILE_DISABLE: "1" },
-          stdio: ["ignore", "ignore", "ignore"],
-          timeout: archiveTimeoutMs(),
-          killSignal: "SIGKILL",
-        });
+        packBundle(run, slug, archive);
       } catch (err) {
         return { error: isExecTimeout(err) ? "ARCHIVE_TIMEOUT" : "ARCHIVE_FAILED" };
       }

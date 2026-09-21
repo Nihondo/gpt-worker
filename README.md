@@ -27,6 +27,7 @@ Special thanks to XiaoDuoYa for providing this brilliant idea.
 - **One-Time Setup Hub**: Deploy the relay Cloudflare Worker and configure ChatGPT once. Every subsequent project is added instantly with a single local command.
 - **Read-Only Workspace Access**: ChatGPT can inspect repository data and propose plans (read-only), but cannot edit files or run local commands. All code modifications and test executions are carried out and verified locally.
 - **Automatic Secret Protection**: Sensitive files such as `.env`, private keys, `.ssh`, `.aws`, and Git-ignored paths are automatically hidden from ChatGPT, and every tool result is additionally scanned by an external secret scanner (betterleaks/gitleaks) before it reaches ChatGPT, with any finding masked in place.
+- **Whole-Project Snapshot**: ChatGPT can ask for the project's readable text files as one archive (`workspace_bundle`) instead of reading them one at a time. It follows the same read rules as everything else and is secret-scanned before it is packed. See [Giving ChatGPT the Whole Project at Once](#giving-chatgpt-the-whole-project-at-once-workspace_bundle).
 - **Chrome Automation**: Automatically opens the ChatGPT Project in Chrome when a task is queued, and can submit messages in the background without stealing window focus.
 - **Web Dashboard**: Your Worker also serves a browser dashboard to inspect task history, check queued messages, edit guidance/limits, and queue new tasks without touching the CLI — either for a single workspace or across all registered projects. See [Web Dashboard](#web-dashboard).
 - **No npm Runtime Dependencies**: Built entirely with Node.js standard libraries — no bulky npm packages or background services to manage (an external secret scanner like betterleaks is required as a prerequisite).
@@ -313,6 +314,18 @@ gpt-worker undeny-read config/internal.json -w .
 > [!NOTE]
 > **Compatibility note**: Prior versions of `gpt-worker` used `deny-read` to revoke an `allow-read` exception. That operation is now `unallow-read`. `deny-read` now creates an independent, persistent deny rule that can target any path (including normal tracked files). Existing `read-allowlist.json` entries are preserved.
 
+### Giving ChatGPT the Whole Project at Once (`workspace_bundle`)
+Instead of reading files one by one, ChatGPT can call `workspace_bundle` to receive the project's readable text files as a single `.tgz` archive, which it opens in its own sandbox and reads selectively. This saves many round trips on a task that needs broad context. You do not run it yourself; ChatGPT calls it when it needs it.
+
+- **Same rules as every other read**: only what ChatGPT could already read is included. Sensitive files (`.env`, private keys, …), Git-ignored files, paths you `deny-read`, and noisy folders (`node_modules`, build output) are left out and are not named or counted. A path you `allow-read` stays direct-read only and is **not** put in the archive.
+- **Secrets are masked before packing**: every secret the scanner finds is replaced with `[REDACTED:<rule>]`, and local paths are normalized to `[workspace]`/`[home]`. If a secret cannot be masked in place, that file is left out instead.
+- **What is not included**: binary files, symbolic links and files over 1 MiB. `BUNDLE.md`, the first file in the archive, lists them and says whether the archive is complete.
+- **Size**: 1 MiB by default, at most 4 MiB. If the project is too large ChatGPT gets an error with a per-folder breakdown and asks for a narrower `path`; nothing is cut off silently.
+- **ChatGPT asks you to approve opening the archive.** The first time, ChatGPT shows a dialog ("Materialize the file?" / 「ファイルを実体化しますか？」). Choose **Allow for this conversation** (from the arrow beside Allow) so it does not ask again in that conversation; choosing plain Allow asks each time. A new conversation asks again.
+  - If you **decline**, ChatGPT is told you declined and will not retry the archive; ask it to read files one by one instead.
+  - If nobody answers, ChatGPT **waits indefinitely** (observed for over 15 minutes) and `gpt-worker wait` just keeps waiting. If a task seems stuck, look at the ChatGPT window for an unanswered dialog.
+- Requires `tar` (present on macOS and Linux by default).
+
 ### Inspecting Configuration
 Inspect configured Project URLs and auto-submit preferences:
 
@@ -443,6 +456,7 @@ gpt-worker start -w /path/to/your-project
 > **Note**:
 > - Redeploying preserves your Worker URL and existing authentication tokens, so you do not need to reconfigure ChatGPT connectors.
 > - If an update only modifies local bridge code (`bridge/`), Worker redeployment is not strictly necessary, but running `npm run deploy` is always safe.
+> - ChatGPT also keeps using a connector's earlier tool definitions. If an update adds or changes a tool's arguments or description (for example `workspace_bundle`'s `path`), refresh the connector in ChatGPT's settings; until then ChatGPT validates calls against the old definition and rejects new arguments.
 > - ChatGPT caches a connector's `initialize` response at registration time, so an update to the operating instructions only reaches an already-registered connector once you remove and re-add it. You don't need to do this for every deploy: the same instructions are also delivered via `next_task` (on the first task or whenever instructions change, via version handshake) and through the `operating_instructions` tool, so a round works correctly either way.
 
 ### Deregistering a Workspace
