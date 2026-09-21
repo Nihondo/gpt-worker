@@ -1,6 +1,6 @@
 import {
   clearEl, el, fmtTime, formatDuration, formatTimelineTime, groupMcpEvents, mcpCodeText,
-  mcpComparator, mcpEventLine, mcpOutcomeInfo, mcpTaskLabel, mcpToolLabel, messageComparator,
+  mcpComparator, mcpOutcomeInfo, mcpToolLabel, messageComparator,
   messageListLabel, messageStage, mergeRows, renderStageIndicator, taskComparator,
   taskHistoryKindClass, taskListLabel, taskStage,
 } from "./common-app.js";
@@ -377,16 +377,12 @@ export function createWorkspacePanel(adapter) {
     var row = el("button", { className: "list-row mcp-row" });
     row.type = "button"; row.setAttribute("role", "option"); row.setAttribute("aria-selected", state.selectedMcpId === item.id ? "true" : "false");
     var head = el("div", { className: "row" }), outcome = mcpOutcomeInfo(isGroup ? "success" : e.outcome);
-    head.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
+    var titleWrap = el("span", { className: "mcp-row-title" });
+    titleWrap.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
+    titleWrap.appendChild(el("span", { className: "mcp-title", text: mcpToolLabel(e.toolName) + (isGroup ? " × " + item.count : "") }));
+    head.appendChild(titleWrap);
     head.appendChild(el("span", { className: "meta", text: fmtTime(e.startedAt) }));
     row.appendChild(head);
-    row.appendChild(el("div", { className: "mcp-title", text: mcpToolLabel(e.toolName) + (isGroup ? " × " + item.count : "") }));
-    row.appendChild(el("div", { className: "preview", text: isGroup ? "Latest: " + (e.target || "") : mcpEventLine(e) }));
-    var bits = [e.toolName];
-    if (isGroup) bits.push("over " + formatDuration(item.newest.startedAt - item.oldest.startedAt));
-    else if (e.durationMs !== undefined) bits.push(formatDuration(e.durationMs));
-    bits.push(mcpTaskLabel(e.taskId));
-    row.appendChild(el("div", { className: "meta mcp-meta", text: bits.filter(Boolean).join(" · ") }));
     row.addEventListener("click", function () { selectMcp(item, row); });
     return row;
   }
@@ -411,7 +407,7 @@ export function createWorkspacePanel(adapter) {
     var list = el("ol", { className: "task-history-list mcp-call-list" });
     list.setAttribute("role", "list");
     (details.calls || []).forEach(function (call) {
-      var outcome = mcpOutcomeInfo(call.outcome), row = el("li", { className: "task-history-row mcp-call-row" });
+      var outcome = mcpOutcomeInfo(call.outcome), row = el("li", { className: "task-history-row mcp-call-row mcp-batch-row" });
       row.appendChild(el("span", { className: "badge mcp-outcome " + outcome.className, text: outcome.label }));
       row.appendChild(el("strong", { text: mcpToolLabel(call.tool) }));
       row.appendChild(el("span", { className: "mcp-call-target", text: call.target || "" }));

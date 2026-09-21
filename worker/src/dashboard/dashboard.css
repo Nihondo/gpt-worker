@@ -117,9 +117,12 @@ select { inline-size: 100%; padding: 8px 9px; font-size: .8rem; border: 1px soli
 .mcp-filter label, .mcp-group-toggle { margin: 0 0 4px; }
 .mcp-group-toggle { flex: 1 1 100%; display: flex; align-items: center; font-weight: 600; margin-block: 2px 0; }
 .mcp-note { margin: 0; }
-.mcp-row .mcp-title { color: var(--ink); font-weight: 700; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mcp-row .preview { overflow-wrap: anywhere; }
-.mcp-row .mcp-meta { color: var(--muted); font-size: .7rem; margin: 2px 0 0; }
+.mcp-row .row { flex-wrap: nowrap; gap: 8px; }
+.mcp-row-title { display: flex; align-items: center; gap: 8px; min-inline-size: 0; flex: 1 1 auto; }
+.mcp-row-title .badge { margin-right: 0; flex-shrink: 0; }
+.mcp-row .mcp-title { color: var(--ink); font-size: .75rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-row .meta { margin: 0; flex-shrink: 0; white-space: nowrap; }
+.badge.mcp-outcome { display: inline-flex; justify-content: center; align-items: center; box-sizing: border-box; width: 38px; padding: 3px 0; text-align: center; flex-shrink: 0; margin-right: 0; }
 .mcp-outcome { color: #fff; }
 .mcp-outcome-success { background: #087f7a; }
 .mcp-outcome-gate { background: #8a6300; }
@@ -131,6 +134,7 @@ select { inline-size: 100%; padding: 8px 9px; font-size: .8rem; border: 1px soli
 .mcp-facts dd { margin: 0; overflow-wrap: anywhere; }
 .mcp-call-list { margin-top: 6px; }
 .mcp-call-row { grid-template-columns: auto minmax(70px, auto) minmax(0, 1fr) auto; }
+.mcp-call-row:has(.badge), .mcp-batch-row { grid-template-columns: 38px minmax(70px, auto) minmax(0, 1fr) auto; gap: 8px; }
 .mcp-call-target { overflow-wrap: anywhere; }
 @media (max-width: 920px) {
   .dashboard-layout { grid-template-columns: 1fr; }
@@ -145,6 +149,7 @@ select { inline-size: 100%; padding: 8px 9px; font-size: .8rem; border: 1px soli
   .task-history-iteration { grid-column: 1 / -1; }
   .task-history-title { grid-column: 1 / -1; }
   .mcp-call-row { grid-template-columns: auto minmax(0, 1fr); }
+  .mcp-call-row:has(.badge), .mcp-batch-row { grid-template-columns: 38px minmax(0, 1fr); gap: 8px; }
   .mcp-call-row .mcp-call-target, .mcp-call-row .task-history-iteration { grid-column: 1 / -1; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }

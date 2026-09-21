@@ -100,20 +100,24 @@ describe("opening the tab", () => {
     assert.equal(t.node("messages-list-col").hidden, true);
   });
 
-  test("a row says what happened in words: tool, target, result, time taken and which task", async () => {
+  test("a row shows outcome, tool label, and time; detail pane shows target, duration, and task", async () => {
     const t = await setup(() => page([ev({ target: "src/app.js", durationMs: 1234, taskId: "abcdef0123456789" })]));
     await t.openTab();
 
     const text = rowText(t.rows()[0]);
     assert.match(text, /OK/);
     assert.match(text, /Read file/);
-    assert.match(text, /src\/app\.js/);
-    assert.match(text, /read_file/, "the raw tool name is still shown, as secondary text");
-    assert.match(text, /1\.2 s/);
-    assert.match(text, /task abcdef01/);
+    assert.doesNotMatch(text, /src\/app\.js/, "details are not in the list row");
+
+    t.rows()[0].click();
+    const detail = t.node("mcp-detail").textContent;
+    assert.match(detail, /src\/app\.js/);
+    assert.match(detail, /read_file/);
+    assert.match(detail, /1\.2 s/);
+    assert.match(detail, /abcdef0123456789/);
   });
 
-  test("each kind of outcome is a different word, with the reason in plain language", async () => {
+  test("each kind of outcome is a different word, with the reason in plain language in detail", async () => {
     const t = await setup(() =>
       page([
         ev({ outcome: "gate_denied", outcomeCode: "NO_ACTIVE_TASK", target: "a.js" }),
@@ -126,13 +130,17 @@ describe("opening the tab", () => {
 
     const [gate, denied, error, mixed] = t.rows().map(rowText);
     assert.match(gate, /Blocked/);
-    assert.match(gate, /No active task — reading stays closed/);
     assert.match(denied, /Denied/);
-    assert.match(denied, /Sensitive file — never readable/);
-    assert.match(error, /Error/);
-    assert.match(error, /The local bridge was not connected/);
-    assert.match(mixed, /Mixed/);
+    assert.match(error, /NG/);
+    assert.match(mixed, /Mix/);
     assert.match(mixed, /Batch/);
+
+    t.rows()[0].click();
+    assert.match(t.node("mcp-detail").textContent, /No active task — reading stays closed/);
+    t.rows()[1].click();
+    assert.match(t.node("mcp-detail").textContent, /Sensitive file — never readable/);
+    t.rows()[2].click();
+    assert.match(t.node("mcp-detail").textContent, /The local bridge was not connected/);
   });
 
   test("an empty history says how it fills up, not just 'nothing'", async () => {
@@ -215,7 +223,9 @@ describe("filters", () => {
 
     assert.equal(t.rows().length, 1);
     assert.doesNotMatch(t.node("mcp-list").textContent, /STALE/);
-    assert.match(t.node("mcp-list").textContent, /working tree/);
+    assert.match(t.node("mcp-list").textContent, /Git status/);
+    t.rows()[0].click();
+    assert.match(t.node("mcp-detail").textContent, /working tree/);
   });
 });
 
@@ -262,8 +272,9 @@ describe("paging and refreshing", () => {
     await t.panel.pollActivity();
     await flush();
 
-    assert.match(rowText(t.rows()[0]), /second\.js/);
     assert.equal(t.rows().length, 2);
+    t.rows()[0].click();
+    assert.match(t.node("mcp-detail").textContent, /second\.js/);
   });
 });
 
@@ -349,7 +360,8 @@ describe("the trailing settling reload (the Worker throttles notifications)", ()
       await flush();
       assert.equal(t.mcpCalls().length, before + 2, "exactly one trailing reload");
       assert.equal(t.rows().length, 3);
-      assert.match(t.node("mcp-list").textContent, /tail-2\.js/);
+      t.rows()[0].click();
+      assert.match(t.node("mcp-detail").textContent, /tail-2\.js/);
 
       mock.timers.tick(60_000);
       await flush();
@@ -460,10 +472,15 @@ describe("grouping repeated reads", () => {
     assert.equal(texts.length, 4);
     assert.match(texts[0], /Read file × 3/);
     assert.match(texts[1], /Denied/);
-    assert.match(texts[1], /\.env/, "the denied read is visible on its own line");
     assert.doesNotMatch(texts[2], /×/);
-    assert.match(texts[2], /d\.js/);
-    assert.match(texts[3], /e\.js/, "a gap over 30 seconds starts a new run");
+    assert.doesNotMatch(texts[3], /×/);
+
+    t.rows()[1].click();
+    assert.match(t.node("mcp-detail").textContent, /\.env/, "the denied read detail is visible");
+    t.rows()[2].click();
+    assert.match(t.node("mcp-detail").textContent, /d\.js/);
+    t.rows()[3].click();
+    assert.match(t.node("mcp-detail").textContent, /e\.js/, "a gap over 30 seconds starts a new run");
   });
 
   test("turning grouping off lists every call", async () => {
@@ -558,7 +575,7 @@ describe("the detail pane", () => {
     assert.equal(calls.length, 3);
     assert.match(calls[0], /OK.*Read file.*a\.js/);
     assert.match(calls[1], /Denied.*Read file.*\.env.*Sensitive file/);
-    assert.match(calls[2], /Error.*Search.*workspace search.*took too long/);
+    assert.match(calls[2], /NG.*Search.*workspace search.*took too long/);
     assert.match(t.node("mcp-detail").textContent, /Calls in this batch/);
   });
 });
@@ -573,13 +590,12 @@ describe("untrusted text is only ever text", () => {
       ])
     );
     await t.openTab();
-    t.rows()[0].click();
-    t.rows()[1].click();
-
-    // (The fake DOM throws on any innerHTML/outerHTML/insertAdjacentHTML use.)
-    assert.match(t.node("mcp-list").textContent, /<img src=x onerror="alert\(1\)"><script>/);
     assert.match(t.node("mcp-list").textContent, /weird_tool/);
-    assert.match(t.node("mcp-list").textContent, /WEIRD_CODE/);
+    t.rows()[0].click();
+    assert.match(t.node("mcp-detail").textContent, /<img src=x onerror="alert\(1\)"><script>/);
+    assert.match(t.node("mcp-detail").textContent, /WEIRD_CODE/);
+    t.rows()[1].click();
+    assert.match(t.node("mcp-detail").textContent, /<img src=x onerror="alert\(1\)"><script>/);
     assert.ok(descendants(t.node("mcp-detail")).every((node) => node.tagName !== "IMG" && node.tagName !== "SCRIPT"));
     assert.ok(descendants(t.node("mcp-list")).every((node) => node.tagName !== "IMG" && node.tagName !== "SCRIPT"));
   });

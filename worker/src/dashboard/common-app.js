@@ -150,8 +150,8 @@ var MCP_OUTCOMES = {
   success: { label: "OK", className: "mcp-outcome-success" },
   gate_denied: { label: "Blocked", className: "mcp-outcome-gate" },
   access_denied: { label: "Denied", className: "mcp-outcome-denied" },
-  error: { label: "Error", className: "mcp-outcome-error" },
-  mixed: { label: "Mixed", className: "mcp-outcome-mixed" },
+  error: { label: "NG", className: "mcp-outcome-error" },
+  mixed: { label: "Mix", className: "mcp-outcome-mixed" },
 };
 
 export function mcpOutcomeInfo(outcome) {
