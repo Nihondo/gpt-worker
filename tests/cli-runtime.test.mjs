@@ -32,7 +32,20 @@ test("remoteActiveState preserves Worker-owned window information while remoteAc
   const taskWindow = { state: "active", idleMs: 3_600_000, expiresAt: 1_700_000_000_000 };
   const server = await startFakeWorker(() => ({ body: { task, taskWindow } }));
   try {
-    assert.deepEqual(await remoteActiveState(cfgFor(server)), { task, taskWindow });
+    // An older Worker sends no hint: it reads as none, not as undefined.
+    assert.deepEqual(await remoteActiveState(cfgFor(server)), { task, taskWindow, bundleHint: null });
+    assert.deepEqual(await remoteActiveTask(cfgFor(server)), task);
+  } finally {
+    await server.close();
+  }
+});
+
+test("remoteActiveState passes the Worker's workspace_bundle hint through, and remoteActiveTask still returns only the task", async () => {
+  const task = { taskId: "t1" };
+  const bundleHint = { code: "BUNDLE_RETURNED", at: 1_700_000_000_000, ageMs: 5_000 };
+  const server = await startFakeWorker(() => ({ body: { task, taskWindow: null, bundleHint } }));
+  try {
+    assert.deepEqual(await remoteActiveState(cfgFor(server)), { task, taskWindow: null, bundleHint });
     assert.deepEqual(await remoteActiveTask(cfgFor(server)), task);
   } finally {
     await server.close();

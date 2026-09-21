@@ -299,7 +299,82 @@ export async function remoteActiveTask(cfg, opts = {}) {
 export async function remoteActiveState(cfg, opts = {}) {
   const state = await localCall(cfg, "active_task", {}, opts);
   if (state.error) throw new WorkerCallError(state.error);
-  return { task: state.task || null, taskWindow: state.taskWindow || null };
+  return { task: state.task || null, taskWindow: state.taskWindow || null, bundleHint: state.bundleHint || null };
+}
+
+// ---------------------------------------------------------------------------
+// workspace_bundle hint (Worker-computed; see BridgeDO.bundleHint)
+// ---------------------------------------------------------------------------
+//
+// ChatGPT asks the user before it opens a workspace_bundle attachment, and
+// that dialog is invisible from here. When the last thing ChatGPT did was be
+// handed an archive and the task has not moved since, the Worker says so in
+// `poll` / `active_task`. This is a hint, never a finding: it cannot tell a
+// pending dialog from ChatGPT simply reading the archive, so every message says
+// "may". The Worker decides *whether* there is a hint; when to speak up about
+// it is only presentation, so it lives here.
+
+// The first advisory waits a while (reading a large archive takes minutes),
+// then repeats rarely. Initial values, to be tuned against real use.
+const BUNDLE_ADVICE_AFTER_MS = 120_000;
+const BUNDLE_ADVICE_REPEAT_MS = 300_000;
+
+/** "42s" / "3 min" / "1 h 5 min": a duration for a human. */
+export function formatAgeMs(ms) {
+  const seconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (seconds < 90) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const rest = minutes % 60;
+  return rest ? `${Math.floor(minutes / 60)} h ${rest} min` : `${Math.floor(minutes / 60)} h`;
+}
+
+/** The lines `wait` should print for a `poll` hint, and the memory to pass back
+ *  with the next one. A hint is announced once when first seen; a reminder
+ *  follows once the silence has lasted a while, and then only occasionally.
+ *  `seen` is `{ at, adviceAgeMs }` from the previous call, or null. */
+export function bundleHintMessages(hint, seen) {
+  if (!hint || !Number.isFinite(hint.at)) return { lines: [], seen: seen || null };
+  const age = Number(hint.ageMs) || 0;
+  const isNew = !seen || seen.at !== hint.at;
+  const next = isNew ? { at: hint.at, adviceAgeMs: null } : { ...seen };
+  const lines = [];
+  if (isNew) {
+    lines.push(
+      `ChatGPT called workspace_bundle and was handed the archive (${formatAgeMs(age)} ago). ` +
+        "If ChatGPT asks for approval to open the attachment, answer in the ChatGPT window."
+    );
+  }
+  const due = next.adviceAgeMs === null ? age >= BUNDLE_ADVICE_AFTER_MS : age - next.adviceAgeMs >= BUNDLE_ADVICE_REPEAT_MS;
+  if (due) {
+    lines.push(
+      `${formatAgeMs(age)} since ChatGPT was handed a workspace_bundle archive, with no reply. ` +
+        "It may be waiting for you to approve opening the attachment in the ChatGPT window (or it may still be reading it). Still waiting."
+    );
+    next.adviceAgeMs = age;
+  }
+  return { lines, seen: next };
+}
+
+/** What `wait` says when its deadline passes with a hint outstanding. It starts
+ *  with the usual "No message yet." so anything that looks for that still works.
+ *  `sinceHintMs` is how long ago the hint was received, because its own age was
+ *  measured then. */
+export function bundleTimeoutMessage(hint, sinceHintMs = 0) {
+  const age = (Number(hint.ageMs) || 0) + Math.max(0, sinceHintMs);
+  return (
+    `No message yet. ChatGPT was handed a workspace_bundle archive ${formatAgeMs(age)} ago and has not replied since; ` +
+    "it may be waiting for you to approve opening the attachment in the ChatGPT window. " +
+    "Run 'gpt-worker wait' again to keep waiting."
+  );
+}
+
+/** The `gpt-worker status` line for a hint. */
+export function bundleStatusLine(hint) {
+  return (
+    `ChatGPT was handed a workspace_bundle archive ${formatAgeMs(hint.ageMs)} ago and has not continued ` +
+    "(it may be waiting for your approval in the ChatGPT window)"
+  );
 }
 
 function commandVersion(bin, args = ["--version"]) {

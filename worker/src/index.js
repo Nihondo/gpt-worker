@@ -732,7 +732,7 @@ export class BridgeDO {
         // not import it (one-way dependency), so the two are joined here in
         // the composition root. The CLI needs it to show how much of the
         // window is left without holding its own copy of the constant.
-        active_task: () => ({ task: this.taskView(this.activeTask()), taskWindow: this.taskWindowInfo() }),
+        active_task: () => ({ task: this.taskView(this.activeTask()), taskWindow: this.taskWindowInfo(), bundleHint: this.bundleHint() }),
         migrate_legacy_state: (body) => this.localMigrateLegacyState(body),
         settings_get: () => this.localSettingsGet(),
         settings_set: (body) => this.localSettingsSet(body),
@@ -1807,7 +1807,43 @@ export class BridgeDO {
   }
 
   async localPoll(body) {
-    return this.protocol.localPoll(body);
+    const res = await this.protocol.localPoll(body);
+    // Only an empty poll carries the hint: when there is a message the wait is
+    // over and there is nothing left to explain.
+    if (res && Array.isArray(res.messages) && res.messages.length === 0) {
+      const hint = this.bundleHint();
+      if (hint) res.hint = hint;
+    }
+    return res;
+  }
+
+  /** Says, for a task that is waiting on ChatGPT, that the last thing ChatGPT did
+   *  through MCP was be handed a workspace_bundle archive and that nothing has
+   *  moved since. ChatGPT asks the user before opening such an attachment, and
+   *  that dialog is invisible from here, so this is the only trace of "ChatGPT
+   *  may be waiting on a person".
+   *
+   *  It cannot tell that apart from ChatGPT reading the archive after the user
+   *  approved it — both are silence after a bundle — so it is a hint, never a
+   *  finding. Worker-side on purpose: next_task / submit_plan are answered here
+   *  and never reach the local bridge, so only the Durable Object sees the whole
+   *  sequence of calls. Joins two domains, so it lives here in the composition
+   *  root, like active_task. Returns null whenever the conditions do not all hold,
+   *  and on any failure: a hint must never break the poll or status it rides on. */
+  bundleHint(now = Date.now()) {
+    try {
+      const task = this.activeTask();
+      if (!task || (task.protocol_state !== "WAITING_PLAN" && task.protocol_state !== "WAITING_REVIEW")) return null;
+      const last = this.mcpAccess.latest();
+      if (!last || last.tool_name !== "workspace_bundle" || last.outcome !== "success") return null;
+      // The same task, and after it last moved: an earlier bundle no longer counts
+      // once the task has been reported on or replied to.
+      if (last.task_id !== task.task_id || !(last.started_at > task.updated_at)) return null;
+      const at = last.started_at + (Number.isFinite(last.duration_ms) ? last.duration_ms : 0);
+      return { code: "BUNDLE_RETURNED", at, ageMs: Math.max(0, now - at) };
+    } catch {
+      return null;
+    }
   }
 
   localAck(body) {

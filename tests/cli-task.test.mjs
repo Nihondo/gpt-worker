@@ -447,6 +447,116 @@ describe("wait: timing out and failing", () => {
   });
 });
 
+// The Worker attaches `hint` to an empty poll when the last thing ChatGPT did
+// was be handed a workspace_bundle archive and the task has not moved (see
+// BridgeDO.bundleHint). ChatGPT asks the user before opening that attachment, so
+// `wait` says so — without ending early: `--timeout` stays a real deadline and
+// the exit code stays 2.
+describe("wait: workspace_bundle hint", () => {
+  const PLAIN = "No message yet. Run 'gpt-worker wait' again once the user has asked ChatGPT to continue.";
+  const hint = (ageMs) => ({ code: "BUNDLE_RETURNED", at: 1_000, ageMs });
+  const count = (text, needle) => text.split(needle).length - 1;
+  // A real Worker holds a poll open; answering instantly would make the CLI spin.
+  const held = (body) => () => ({ body, delayMs: 150 });
+
+  test("announces the archive once, and reminds once the silence has lasted", async () => {
+    await withWorker(
+      opsHandler({ active_task: { task: task() }, poll: held({ messages: [], hint: hint(200_000) }) }),
+      async ({ server, ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 2, res.stderr);
+        assert.ok(server.calls("poll").length >= 2, "the same hint arrives on every poll");
+        assert.equal(count(res.stderr, "ChatGPT called workspace_bundle and was handed the archive"), 1);
+        assert.equal(count(res.stderr, "with no reply. It may be waiting for you to approve"), 1);
+        assert.match(res.stderr, /answer in the ChatGPT window/);
+        assert.match(ws.log(), /wait: ChatGPT called workspace_bundle/);
+      }
+    );
+  });
+
+  test("a recent bundle is announced but not yet worried about", async () => {
+    await withWorker(
+      opsHandler({ active_task: { task: task() }, poll: held({ messages: [], hint: hint(5_000) }) }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 2, res.stderr);
+        assert.equal(count(res.stderr, "ChatGPT called workspace_bundle and was handed the archive (5s ago)"), 1);
+        assert.doesNotMatch(res.stderr, /with no reply/);
+      }
+    );
+  });
+
+  test("at the deadline it still exits 2, and says so where the caller reads it (stdout and stderr)", async () => {
+    await withWorker(
+      opsHandler({ active_task: { task: task() }, poll: held({ messages: [], hint: hint(200_000) }) }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 2);
+        for (const out of [res.stdout, res.stderr]) {
+          assert.match(out, /No message yet\. ChatGPT was handed a workspace_bundle archive \d+ min ago and has not replied since/);
+          assert.match(out, /Run 'gpt-worker wait' again to keep waiting\./);
+        }
+        assert.doesNotMatch(res.stdout, /Run 'gpt-worker wait' again once the user has asked/);
+      }
+    );
+  });
+
+  test("without a hint the timeout output is exactly what it always was", async () => {
+    await withWorker(
+      opsHandler({ active_task: { task: task() }, poll: held({ messages: [] }) }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 2);
+        assert.equal(res.stdout.trim(), PLAIN);
+        assert.doesNotMatch(res.stderr, /workspace_bundle/);
+      }
+    );
+  });
+
+  test("a hint that goes away before the deadline leaves the plain timeout", async () => {
+    let polls = 0;
+    await withWorker(
+      opsHandler({
+        active_task: { task: task() },
+        poll: () => ({ body: polls++ === 0 ? { messages: [], hint: hint(5_000) } : { messages: [] }, delayMs: 150 }),
+      }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 2);
+        assert.equal(res.stdout.trim(), PLAIN);
+      }
+    );
+  });
+
+  test("a reply that arrives after the hint is delivered as usual", async () => {
+    let polls = 0;
+    await withWorker(
+      opsHandler({
+        active_task: { task: task() },
+        poll: () => (polls++ === 0 ? { body: { messages: [], hint: hint(5_000) }, delayMs: 100 } : { body: { messages: [PLAN] } }),
+        ack: ACK_OK,
+      }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "5"]);
+        assert.equal(res.code, 0, res.stderr);
+        assert.match(res.stdout, /Step 1: edit a\.js/);
+        assert.doesNotMatch(res.stdout, /No message yet/);
+      }
+    );
+  });
+
+  test("nothing to announce when there is no active task", async () => {
+    await withWorker(
+      opsHandler({ active_task: { task: null }, poll: { messages: [], hint: hint(200_000) } }),
+      async ({ ws }) => {
+        const res = await ws.run(["wait", "--timeout", "1"]);
+        assert.equal(res.code, 1);
+        assert.doesNotMatch(res.stderr, /workspace_bundle/);
+      }
+    );
+  });
+});
+
 describe("discard-task", () => {
   test("exits 1 when there is no active task", async () => {
     await withWorker(opsHandler({ active_task: { task: null } }), async ({ server, ws }) => {

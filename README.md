@@ -323,7 +323,7 @@ Instead of reading files one by one, ChatGPT can call `workspace_bundle` to rece
 - **Size**: 1 MiB by default, at most 4 MiB. If the project is too large ChatGPT gets an error with a per-folder breakdown and asks for a narrower `path`; nothing is cut off silently.
 - **ChatGPT asks you to approve opening the archive.** The first time, ChatGPT shows a dialog ("Materialize the file?" / 「ファイルを実体化しますか？」). Choose **Allow for this conversation** (from the arrow beside Allow) so it does not ask again in that conversation; choosing plain Allow asks each time. A new conversation asks again.
   - If you **decline**, ChatGPT is told you declined and will not retry the archive; ask it to read files one by one instead.
-  - If nobody answers, ChatGPT **waits indefinitely** (observed for over 15 minutes) and `gpt-worker wait` just keeps waiting. If a task seems stuck, look at the ChatGPT window for an unanswered dialog.
+  - If nobody answers, ChatGPT **waits indefinitely** (observed for over 15 minutes). gpt-worker cannot see the dialog, but it can see that ChatGPT was handed an archive and then went quiet: `gpt-worker wait` prints a notice when that happens and a reminder if the silence lasts, and `gpt-worker status` shows a `hint` line. It cannot tell an unanswered dialog from ChatGPT still reading the archive, so treat it as a prompt to look at the ChatGPT window, not as proof.
 - Requires `tar` (present on macOS and Linux by default).
 
 ### Inspecting Configuration
@@ -534,7 +534,7 @@ Run `gpt-worker help`, `gpt-worker help <command>`, or `gpt-worker <command> --h
 |---|---|
 | `0` | Success |
 | `1` | Error (the message says what to do) |
-| `2` | `wait` timed out with no reply yet — run it again |
+| `2` | `wait` timed out with no reply yet — run it again. If ChatGPT was handed a `workspace_bundle` archive and has been silent since, the message says so (it may be waiting for your approval in the ChatGPT window) |
 | `3` | `wait` delivered a reply, but the task did not advance. The reply is printed; inspect with `gpt-worker state`, and if the task is truly stuck, `gpt-worker discard-task --yes` |
 | `4` | The Worker could not be reached. For `task`/`report`/`handoff` the message says whether the request may still have been applied — check `gpt-worker state` before repeating it. `wait` can also exit 4 right after printing a reply whose acknowledgement could not be confirmed: follow the guidance it prints (check `gpt-worker state` and `gpt-worker queue --task <task id>`) rather than assuming a redelivery |
 

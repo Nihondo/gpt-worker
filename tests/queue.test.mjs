@@ -1825,3 +1825,160 @@ describe("MCP access history: recording", () => {
     assert.equal(rows(doo).length, 0);
   });
 });
+
+// The hint that `gpt-worker wait` / `status` show when the last thing ChatGPT did
+// was be handed a workspace_bundle archive and nothing has moved since. ChatGPT
+// asks the user before opening that attachment, which is invisible from here, so
+// this is the only trace of "ChatGPT may be waiting on a person". It is computed
+// in the Durable Object because next_task / submit_plan never reach the local
+// bridge. It cannot tell that apart from ChatGPT reading the archive afterwards,
+// so it is a hint: these tests pin *when* it appears, and that it carries no
+// content.
+describe("poll hint: workspace_bundle returned and ChatGPT silent", () => {
+  const BUNDLE = { filesReturned: 3, archiveBytes: 100, bundle: { base64: "aGVsbG8=", mimeType: "application/gzip", filename: "secret-name.tgz" } };
+  const relayReturns = (doo, result) => {
+    doo.callLocal = async () => ({ ok: true, result });
+  };
+  const T1 = "0123456789abcdef";
+  const start = (doo, id = T1) => doo.localStartTask({ task_id: id, goal: "g", text: "GOAL:\ng" });
+  const poll = (doo) => doo.localPoll({ timeout_ms: 0 });
+  // Successive calls in one millisecond would make "after the task last moved" ambiguous.
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const bundle = async (doo) => {
+    relayReturns(doo, BUNDLE);
+    await doo.invokeTool("workspace_bundle", {});
+  };
+
+  test("no hint without an active task, or before any bundle", async () => {
+    const doo = makeDO();
+    assert.equal("hint" in (await poll(doo)), false);
+    start(doo);
+    await tick();
+    assert.deepEqual(await poll(doo), { messages: [] });
+  });
+
+  test("a bundle returned to ChatGPT while the task waits for its plan", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    await bundle(doo);
+
+    const res = await poll(doo);
+    assert.deepEqual(res.messages, []);
+    assert.equal(res.hint.code, "BUNDLE_RETURNED");
+    assert.equal(typeof res.hint.at, "number");
+    assert.ok(res.hint.ageMs >= 0 && res.hint.ageMs < 5000);
+    assert.deepEqual(Object.keys(res.hint).sort(), ["ageMs", "at", "code"]);
+  });
+
+  test("the hint carries nothing from the call: no archive, no file name, no path", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    await bundle(doo);
+    const text = JSON.stringify(await poll(doo));
+    for (const leaked of ["aGVsbG8", "secret-name", "gzip", "filesReturned", "archiveBytes"]) {
+      assert.equal(text.includes(leaked), false, leaked);
+    }
+  });
+
+  test("it also applies while the task waits for a review", async () => {
+    const doo = makeDO();
+    start(doo);
+    doo.queueNext();
+    const plan = doo.queueSubmit({ task_id: T1, iteration: 0, state: "PLAN", body: "do X" });
+    doo.localAck({ message_id: plan.structuredContent.message_id });
+    doo.localReportTask({ task_id: T1, changed: 1, tests: "ok", text: "RESULT:\nExecution finished." });
+    assert.equal(doo.getTask(T1).protocol_state, "WAITING_REVIEW");
+    await tick();
+    await bundle(doo);
+
+    assert.equal((await poll(doo)).hint.code, "BUNDLE_RETURNED");
+  });
+
+  test("no hint once ChatGPT does anything else afterwards", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    await bundle(doo);
+    await tick();
+    relayReturns(doo, { path: "a.js", text: "x" });
+    await doo.invokeTool("read_file", { path: "a.js" });
+
+    assert.equal("hint" in (await poll(doo)), false);
+  });
+
+  test("no hint when the bundle call did not succeed", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    relayReturns(doo, { error: "BUNDLE_TOO_LARGE", message: "too big" });
+    await doo.invokeTool("workspace_bundle", {});
+    assert.equal("hint" in (await poll(doo)), false);
+
+    relayReturns(doo, { status: "no_active_task" });
+    await doo.invokeTool("workspace_bundle", {});
+    assert.equal("hint" in (await poll(doo)), false);
+  });
+
+  test("no hint once the task has moved on since the bundle", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    await bundle(doo);
+    await tick();
+    doo.queueNext();
+    const plan = doo.queueSubmit({ task_id: T1, iteration: 0, state: "PLAN", body: "do X" });
+
+    // The reply is now waiting for the CLI: the poll delivers it and there is nothing to explain.
+    const delivered = await poll(doo);
+    assert.equal(delivered.messages.length, 1);
+    assert.equal("hint" in delivered, false);
+
+    doo.localAck({ message_id: plan.structuredContent.message_id });
+    await tick();
+    assert.equal(doo.getTask(T1).protocol_state, "EXECUTING");
+    assert.equal("hint" in (await poll(doo)), false);
+  });
+
+  test("a bundle recorded for another task is not this task's", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    doo.recordMcpAccess({
+      startedAt: Date.now(), durationMs: 5, toolName: "workspace_bundle", connector: "dedicated",
+      taskId: "another-task", target: "workspace archive", outcome: "success", outcomeCode: null, detailsJson: null,
+    });
+    assert.equal("hint" in (await poll(doo)), false);
+  });
+
+  test("a failure while working the hint out never breaks the poll", async () => {
+    const doo = makeDO();
+    start(doo);
+    await tick();
+    await bundle(doo);
+    doo.mcpAccess.latest = () => {
+      throw new Error("boom");
+    };
+    assert.deepEqual(await poll(doo), { messages: [] });
+    assert.equal(doo.bundleHint(), null);
+  });
+
+  test("the active_task op carries the same hint, for `gpt-worker status`", async () => {
+    const doo = makeDO();
+    const { cliToken } = doo.provision();
+    start(doo);
+    await tick();
+    const ask = async () =>
+      (
+        await doo.handleLocalRoute(
+          new Request("https://x/local", { method: "POST", body: JSON.stringify({ op: "active_task" }) }),
+          cliToken
+        )
+      ).json();
+
+    assert.equal((await ask()).bundleHint, null);
+    await bundle(doo);
+    assert.equal((await ask()).bundleHint.code, "BUNDLE_RETURNED");
+  });
+});

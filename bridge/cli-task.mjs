@@ -8,6 +8,8 @@ import {
   EXIT_WORKER_UNREACHABLE,
   WorkerCallError,
   WorkerUnreachableError,
+  bundleHintMessages,
+  bundleTimeoutMessage,
   localCall,
   migrateLegacyStateIfNeeded,
   remoteActiveTask,
@@ -291,6 +293,10 @@ export async function cmdWait(args) {
   // end it: localCall already retries briefly, and beyond that the wait keeps
   // trying until its own deadline instead of dying with a stack trace.
   let unreachable = null;
+  // The last hint the Worker attached to an empty poll (about a workspace_bundle
+  // ChatGPT was handed), and what has already been said about it.
+  let bundleSeen = null;
+  let lastHint = null;
   while (Date.now() < deadline) {
     const remaining = deadline - Date.now();
     const chunk = Math.max(0, Math.min(remaining, 20_000));
@@ -306,6 +312,17 @@ export async function cmdWait(args) {
       continue;
     }
     unreachable = null;
+    if (result.hint) {
+      lastHint = { hint: result.hint, receivedAt: Date.now() };
+      const said = bundleHintMessages(result.hint, bundleSeen);
+      bundleSeen = said.seen;
+      for (const line of said.lines) {
+        console.error(line);
+        appendLog(root, `wait: ${line}`);
+      }
+    } else {
+      lastHint = null;
+    }
     const messages = selectWaitMessages(result.messages, task.taskId);
     if (messages.length > 0) {
       await deliverMessages(root, cfg, messages);
@@ -317,6 +334,15 @@ export async function cmdWait(args) {
     // caller should check connectivity, not just wait again.
     console.error(`The Worker stayed unreachable until the wait timed out (${unreachable.message}).\nCheck your network, then: gpt-worker status -w ${root}`);
     process.exit(EXIT_WORKER_UNREACHABLE);
+  }
+  if (lastHint) {
+    // Same exit code as any other timeout: `--timeout` is a real deadline. The
+    // sentence goes to stdout, which is what a caller reads once this returns,
+    // and to stderr, where the notices above were printed.
+    const line = bundleTimeoutMessage(lastHint.hint, Date.now() - lastHint.receivedAt);
+    console.error(line);
+    console.log(line);
+    process.exit(2);
   }
   console.log("No message yet. Run 'gpt-worker wait' again once the user has asked ChatGPT to continue.");
   process.exit(2);

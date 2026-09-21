@@ -46,6 +46,20 @@ function createBridgeMcpAccess({ sql, maxRows }) {
       if (threshold > 0) sql.exec(`DELETE FROM mcp_access_events WHERE event_id <= ?`, threshold);
     },
 
+    /** The single most recent event, or null. What a caller may take from it is
+     *  the same closed-set metadata the dashboard shows (tool name, outcome, task
+     *  id, times) — never a call's arguments or result. Served by the same index
+     *  as the dashboard's history query. */
+    latest() {
+      const rows = sql
+        .exec(
+          `SELECT started_at, duration_ms, tool_name, outcome, task_id
+           FROM mcp_access_events ORDER BY started_at DESC, event_id DESC LIMIT 1`
+        )
+        .toArray();
+      return rows.length ? rows[0] : null;
+    },
+
     /** Newest-first, keyset-paginated rows: (started_at DESC, event_id DESC).
      *  Returns up to `limit + 1` raw rows so the caller can tell whether there is
      *  another page. `tool` and `outcome` are validated here (the values reach

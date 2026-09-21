@@ -19,6 +19,7 @@ import { nudgeChatGpt } from "./chat-nudge.mjs";
 import {
   WorkerCallError,
   WorkerUnreachableError,
+  bundleStatusLine,
   localCall,
   migrateLegacyStateIfNeeded,
   remoteActiveState,
@@ -265,7 +266,7 @@ export async function cmdStatus(args) {
   try {
     const remote = await localCall(cfg, "status", {}, remoteOpts);
     if (remote.error) throw new WorkerCallError(remote.error);
-    const { task, taskWindow } = await remoteActiveState(cfg, remoteOpts);
+    const { task, taskWindow, bundleHint } = await remoteActiveState(cfg, remoteOpts);
     console.log(`worker link : ${remote.connected ? "connected" : "not connected"}`);
     console.log(`queue       : to_gpt=${remote.pendingToGpt} to_local=${remote.pendingToLocal}`);
     console.log(`task        : ${task ? task.taskId : "(none)"}`);
@@ -276,6 +277,7 @@ export async function cmdStatus(args) {
       console.log(`started     : ${formatTimestamp(task.taskStartedAt)}`);
       console.log(`last change : ${formatTimestamp(task.updatedAt)}`);
       console.log(`read window : ${formatWindow(taskWindow)}`);
+      if (bundleHint) console.log(`hint        : ${bundleStatusLine(bundleHint)}`);
     }
     if (Date.now() < remoteDeadlineMs) {
       try {

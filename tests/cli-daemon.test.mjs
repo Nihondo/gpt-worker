@@ -68,6 +68,38 @@ test("status shows local diagnostics, task timing, read gate, and body limit", a
   }
 });
 
+test("status shows the workspace_bundle hint when the Worker reports one, and only then", async () => {
+  const now = Date.now();
+  for (const withHint of [true, false]) {
+    const server = await startFakeWorker((call) => {
+      if (call.op === "status") return { body: { connected: true, pendingToGpt: 0, pendingToLocal: 0 } };
+      if (call.op === "active_task") {
+        return {
+          body: {
+            task: { taskId: "t1", iteration: 0, protocolState: "WAITING_PLAN", waitingFor: "GPT_PLAN", taskStartedAt: now - 20_000, updatedAt: now - 10_000 },
+            taskWindow: { state: "active", expiresAt: now + 60_000, idleMs: 3_600_000 },
+            bundleHint: withHint ? { code: "BUNDLE_RETURNED", at: now - 180_000, ageMs: 180_000 } : null,
+          },
+        };
+      }
+      return { body: {} };
+    });
+    const ws = makeWorkspace(server);
+    try {
+      const result = await ws.run(["status"]);
+      assert.equal(result.code, 0, result.stderr);
+      if (withHint) {
+        assert.match(result.stdout, /hint\s+: ChatGPT was handed a workspace_bundle archive 3 min ago and has not continued/);
+      } else {
+        assert.doesNotMatch(result.stdout, /workspace_bundle/);
+      }
+    } finally {
+      await server.close();
+      ws.cleanup();
+    }
+  }
+});
+
 test("status displays allowed read files and directories", async () => {
   const server = await startFakeWorker((call) => {
     if (call.op === "status") return { body: { connected: true, pendingToGpt: 0, pendingToLocal: 0 } };
